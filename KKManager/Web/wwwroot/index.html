@@ -176,10 +176,14 @@
   /* 重复副本组标题行最右侧：引用这个 guid 的卡片缩略图（前三张 + 查看更多）——一眼看出哪些卡在用它 */
   .dupgrp{display:flex;align-items:center;gap:10px}
   .dupthumbs{display:flex;align-items:center;gap:4px;flex:0 0 auto;cursor:pointer}
-  .dupth{width:26px;height:36px;object-fit:cover;border:1px solid var(--line);border-radius:4px;background:var(--panel2);display:block}
+  .dupth{width:22px;height:30px;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--panel2);display:block}
   .dupthumbs:hover .dupth{border-color:var(--accent)}
-  .dupmore{font-size:11px;color:var(--accent);border:1px solid var(--line);border-radius:4px;padding:3px 6px;white-space:nowrap;background:var(--panel2)}
+  .dupmore{font-size:10px;color:var(--accent);border:1px solid var(--line);border-radius:4px;padding:2px 5px;white-space:nowrap;background:var(--panel2)}
   .dupthumbs:hover .dupmore{border-color:var(--accent)}
+  /* 重复副本：表格行更紧凑 + 小字再小一档（同一弹窗高度多看几组） */
+  table.list.dup td{padding:1px 8px}
+  table.list.dup tr.grp td{padding:3px 8px}
+  table.list.dup .cellsm{font-size:10px}
 </style>
 </head>
 <body>
@@ -389,8 +393,8 @@
       <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px">
         <input id="dupQ" class="grow" placeholder="过滤 guid / 名称 / 文件名 / 版本 / 作者…">
       </div>
-      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝在本窗口之上<b>叠一层</b>打开这个 mod（看哪些卡片在用它）——不离开这里，关掉上层即回到本窗口原位。<b>guid 行最右侧</b>＝引用这个 mod 的卡片缩略图（前三张——点缩略图或「查看更多」看全部，同样是叠层窗口）。<b>文件名下方小字</b>＝这一份的完整文件系统路径；<b>md5</b>＝内容指纹（只算有重复的 mod，算过就留档、不再重算）——同一 guid 各份 <b>md5 不同</b>、或<b>创建 / 修改时间不同</b>、且这组还没挑过版本时，对应格标<b>红块</b>提醒你先看清再选；已挑过的组不标红。</div>
-      <table class="list"><thead><tr><th style="width:118px">级别</th><th>文件名 / 路径</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:70px">大小</th><th style="width:136px">创建 / 修改</th><th style="width:112px">md5</th><th style="width:224px">操作</th></tr></thead>
+      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝在本窗口之上<b>叠一层</b>打开这个 mod（看哪些卡片在用它）——不离开这里，关掉上层即回到本窗口原位。<b>guid 行最右侧</b>＝引用这个 mod 的卡片缩略图（前三张——点缩略图或「查看更多」看全部，同样是叠层窗口）。<b>文件名下方小字</b>＝这一份的完整文件系统路径；<b>md5</b>＝内容指纹（只算有重复的 mod，算过就留档、不再重算）——同一 guid 各份 <b>md5 不同</b>、或<b>创建 / 修改时间不同</b>、且这组还没挑过版本时，对应格标<b>红块</b>提醒你先看清再选（时间标红到段：<b>年月日</b>不同 → 整串标红；只有<b>时分秒</b>不同 → 只标红时分秒）；已挑过的组不标红。</div>
+      <table class="list dup"><thead><tr><th style="width:118px">级别</th><th>文件名 / 路径</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:70px">大小</th><th style="width:136px">创建 / 修改</th><th style="width:112px">md5</th><th style="width:224px">操作</th></tr></thead>
         <tbody id="dupBody"></tbody></table>
     </div>
     <footer>
@@ -1745,12 +1749,13 @@ function dupBtns(g, f){
   const a = DUP_ACT_TIP[act];
   return `<button data-act="${act}" data-guid="${gid}" data-path="${path}" title="${a.title}">${a.label}</button>` + ref;
 }
-/* 组内某字段（md5 / ctime / mtime）是否不一致——只对有值的份判断；不一致的组需要人工挑版本（红块提示） */
-function dupFieldMixed(g, key){
+/* 组内某字段（md5 / ctime / mtime）是否不一致——只对有值的份判断；不一致的组需要人工挑版本（红块提示）
+   project 用于**按段**比较（如时间戳的日期段 / 时间段）——不传则比整值 */
+function dupFieldMixed(g, key, project){
   const seen = {};
   let kinds = 0;
   (g.files||[]).forEach(f => {
-    const v = f[key];
+    const v = project ? project(f[key]) : f[key];
     if(!v) return;
     if(!seen[v]){ seen[v] = 1; kinds = kinds + 1; }
   });
@@ -1760,6 +1765,23 @@ function dupFieldMixed(g, key){
 function dupStamp(v){
   if(!v) return '—';
   return v.replace('T',' ').replace(/\.\d+$/, '');
+}
+/* 时间戳拆段（日期 / 时间）——精确标红用：毫秒不参与判定 */
+function dupStampParts(v){
+  const s = v || '';
+  const i = s.indexOf('T');
+  if(i < 0) return { d:s, t:'' };
+  return { d:s.substring(0, i), t:s.substring(i + 1).replace(/\.\d+$/, '') };
+}
+/* 时间格——两级标红：组内**年月日**不同 → 整串标红；年月日相同、只是**时分秒**不同 → 只标红时分秒
+   （判定按显示粒度：去掉毫秒后的「日期 时间」整值——只有毫秒不同不标红） */
+function dupTimeCell(g, f, key, tip){
+  const v = f[key];
+  const shown = x => { const p = dupStampParts(x); if(!p.d && !p.t) return ''; return p.d + ' ' + p.t; };
+  if(!dupPending(g) || !dupFieldMixed(g, key, shown)) return esc(dupStamp(v));
+  const p = dupStampParts(v);
+  if(!p.t || dupFieldMixed(g, key, x => dupStampParts(x).d)) return `<span class="mk r" title="${tip}">${esc(dupStamp(v))}</span>`;
+  return `${esc(p.d)} <span class="mk r" title="${tip}">${esc(p.t)}</span>`;
 }
 function dupFileRow(g, f){
   const size = f.size ? (f.size/1048576).toFixed(1) + ' MB' : '';
@@ -1776,7 +1798,7 @@ function dupFileRow(g, f){
   const note = act ? '' : (f.isOld ? '旧版文件位于主库——请重扫核对' : '已是主库当前版本（其余副本已判旧版）');
   /* 完整文件系统路径——文件名下方小字（副本实际在哪一目了然）；超长省略号截断，悬停看全量 */
   const fullPath = f.filePath || '';
-  const pathLine = fullPath ? `<div class="dim mono" style="font-size:11px;max-width:460px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fullPath)}">${esc(fullPath)}</div>` : '';
+  const pathLine = fullPath ? `<div class="dim mono cellsm" style="max-width:460px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fullPath)}">${esc(fullPath)}</div>` : '';
   /* 标红判据统一：组内该项不一致 + 该组尚未做出主要选择（待确认）——已挑过版本的组不标 */
   const dupWarn = dupPending(g);
   /* md5——组内内容不一致时标红（提示人工挑） */
@@ -1787,18 +1809,16 @@ function dupFileRow(g, f){
     const short = md5.slice(0,12);
     const tip = 'MD5 ' + md5 + '（完整值）';
     if(md5Warn) md5Cell = `<span class="mk r" title="${tip}">${esc(short)}</span>`;
-    else md5Cell = `<span class="mono" style="font-size:11px" title="${tip}">${esc(short)}</span>`;
+    else md5Cell = `<span class="mono cellsm" title="${tip}">${esc(short)}</span>`;
   }
-  /* 建 / 改——组内该项不一致时同样标红（各份的创建 / 修改时间不同 = 很可能不是同一份） */
-  const ct = esc(dupStamp(f.ctime));
-  const mt = esc(dupStamp(f.mtime));
-  const ctCell = (dupWarn && dupFieldMixed(g,'ctime')) ? `<span class="mk r" title="各副本创建时间不同——看清再挑">${ct}</span>` : ct;
-  const mtCell = (dupWarn && dupFieldMixed(g,'mtime')) ? `<span class="mk r" title="各副本修改时间不同——看清再挑">${mt}</span>` : mt;
+  /* 建 / 改——两级标红：年月日不同 → 整串标红；年月日相同、只有时分秒不同 → 只标红时分秒 */
+  const ctCell = dupTimeCell(g, f, 'ctime', '各副本创建时间不同——看清再挑');
+  const mtCell = dupTimeCell(g, f, 'mtime', '各副本修改时间不同——看清再挑');
   return `<tr class="dupfile${act ? '' : ' noact'}" data-guid="${esc(g.guid)}" data-act="${act}" data-note="${note}" data-path="${esc(f.filePath||'')}" data-tier="${f.tier || 0}">
-    <td>${tierCell} <span class="dim" style="font-size:11px">${esc(root)}</span></td>
+    <td>${tierCell} <span class="dim cellsm">${esc(root)}</span></td>
     <td class="mono">${esc(f.fileName||'')}${tags}${pathLine}</td>
     <td>${ver}</td><td>${author}</td><td class="dim">${size}</td>
-    <td class="dim" style="font-size:11px">建 ${ctCell}<br>改 ${mtCell}</td>
+    <td class="dim cellsm">建 ${ctCell}<br>改 ${mtCell}</td>
     <td>${md5Cell}</td>
     <td>${dupBtns(g, f)}</td></tr>`;
 }
