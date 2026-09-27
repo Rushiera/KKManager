@@ -856,8 +856,13 @@ namespace KKManager.Web
 
             app.MapGet("/api/folders", () => Results.Json(_hub.QueryFolders(LoadConfig())));
 
-            app.MapGet("/api/cards", (int page, int size, string filter, string q, string folder, string root) =>
+            app.MapGet("/api/cards", (int page, int size, string filter, string q, string folder, string root, string order, bool? desc) =>
             {
+                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size")
+                {
+                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size）" });
+                }
+                bool descending = desc == null || desc.Value;
                 if (size <= 0)
                 {
                     size = NoLimit;
@@ -866,7 +871,7 @@ namespace KKManager.Web
                 {
                     page = 1;
                 }
-                return Results.Json(_hub.QueryCards(LoadConfig(), page, size, filter, q, folder, root));
+                return Results.Json(_hub.QueryCards(LoadConfig(), page, size, filter, q, folder, root, order, descending));
             });
 
             app.MapGet("/api/mods", (int page, int size, string filter, string q) =>

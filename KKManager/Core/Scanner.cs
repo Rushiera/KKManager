@@ -29,6 +29,8 @@ namespace KKManager.Core
 
         /// <summary>缩略图字节总量。</summary>
         public long ThumbBytes { get; set; }
+        /// <summary>本次扫描因磁盘上已不存在而清理的记录数——卡片行 / mod 副本涉及的 guid 数 / 旧版登记条数之和。</summary>
+        public int Removed { get; set; }
 
         /// <summary>耗时。</summary>
         public TimeSpan Elapsed { get; set; }
@@ -146,6 +148,26 @@ namespace KKManager.Core
                 {
                     store.Rollback();
                     throw;
+                }
+
+                // 清扫：本次枚举集合中已不存在的行——离线库 / 枚举失败 / 枚举为空一律不清扫（枚举失败不等于文件消失）
+                if (!enumFailed && files.Count > 0)
+                {
+                    HashSet<string> present = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+                    List<string> goneGuids = store.DeleteModFilesMissingUnderRoot(root.path, present);
+                    foreach (string guid in goneGuids)
+                    {
+                        hub.RecomputeMod(cfg, guid);
+                    }
+                    int goneOld = hub.Core.DeleteModOldMissingUnderRoot(root.path, present);
+                    if (goneGuids.Count > 0 || goneOld > 0)
+                    {
+                        result.Removed += goneGuids.Count + goneOld;
+                        if (log != null)
+                        {
+                            log("  已清理 " + goneGuids.Count + " 个 guid 的已消失副本记录 · 旧版登记 " + goneOld + " 条（磁盘上已不存在）");
+                        }
+                    }
                 }
             }
 
@@ -293,6 +315,21 @@ namespace KKManager.Core
                 {
                     store.Rollback();
                     throw;
+                }
+
+                // 清扫：本次枚举集合中已不存在的行——离线库 / 枚举失败 / 枚举为空一律不清扫（枚举失败不等于文件消失）
+                if (!enumFailed && files.Count > 0)
+                {
+                    HashSet<string> present = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+                    int goneCards = store.DeleteCardsMissingUnderRoot(root.path, present);
+                    if (goneCards > 0)
+                    {
+                        result.Removed += goneCards;
+                        if (log != null)
+                        {
+                            log("  已清理 " + goneCards + " 条已消失的卡片记录（磁盘上已不存在）");
+                        }
+                    }
                 }
             }
 

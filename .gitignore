@@ -9,8 +9,8 @@ dist/
 revealer/*.zip
 revealer/kkmanager*/KMR.exe
 
-# 运行时数据库与卡片留档
-data/
+# 运行时数据库与卡片留档（🔴 只锚根目录——裸 data/ 会连源码目录 KKManager/Data/ 一起忽略，2026-09-27 修）
+/data/
 card_archive/
 
 # 编辑器 / 本地临时

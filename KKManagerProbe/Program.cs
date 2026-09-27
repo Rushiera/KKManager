@@ -85,7 +85,7 @@ namespace KKManager.Probe
         {
             if (args.Length < 3)
             {
-                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile>");
+                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js>");
                 return 2;
             }
 
@@ -135,6 +135,10 @@ namespace KKManager.Probe
                         return 2;
                     }
                     return CompareRange(args[1], args[2], long.Parse(args[3]), long.Parse(args[4]), long.Parse(args[5]));
+                case "htmlcheck":
+                    return ProbeHtml(args[1], args[2]);
+                case "extractjs":
+                    return ExtractJs(args[1], args[2]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
