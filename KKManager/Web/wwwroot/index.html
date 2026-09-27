@@ -1,0 +1,2484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KK Manager by Rushiera — 卡片 / mod 管理器</title>
+<style>
+  :root{
+    --bg:#14161a; --panel:#1d2026; --panel2:#24282f; --line:#32373f;
+    --fg:#e6e8ec; --dim:#9aa2ae; --accent:#5aa9e6;
+    --green:#5ad18a; --yellow:#e6c45a; --gold:#f5c542; --red:#e6605a; --black:#8a8f98; --gray:#9aa2ae;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Segoe UI","Microsoft YaHei",sans-serif}
+  header{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;font-weight:600}
+  h1 span{color:var(--accent)}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);color:#0b1015;border-color:var(--accent);font-weight:600}
+  button.danger{border-color:#7a3a36;color:#ffb4b0}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input,select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:13px;font-family:inherit}
+  main{padding:14px 16px 70px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;margin-bottom:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px}
+  .stat b{display:block;font-size:19px;font-weight:600;margin-top:2px}
+  .stat small{color:var(--dim)}
+  .stat.g b{color:var(--green)} .stat.y b{color:var(--yellow)}
+  .stat.r b{color:var(--red)} .stat.k b{color:var(--black)}
+  .statSub{display:block;font-size:11px;color:var(--dim);margin-top:1px}
+  .statSub.y{color:var(--yellow)}
+  .stat[data-open]{cursor:pointer;transition:border-color .12s ease}
+  .stat[data-open]:hover{border-color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .item{background:var(--panel2);border:2px solid var(--line);border-radius:8px;overflow:hidden;position:relative;cursor:pointer;transition:transform .12s ease,box-shadow .12s ease}
+  .item:hover{transform:scale(1.06);box-shadow:0 10px 24px #000a;z-index:6}
+  .item.s-ok{border-color:var(--green)}
+  .item.s-cache{border-color:var(--yellow)}
+  .item.s-cold{border-color:var(--gray)}
+  .item.s-miss{border-color:var(--red)}
+  .item .thumb{width:100%;aspect-ratio:252/352;background:#0e1013 center/cover no-repeat;display:block}
+  .item .meta{padding:6px 8px;font-size:12px}
+  .item .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .item .sub{color:var(--dim);font-size:11px;margin-top:2px}
+  .mz{border-top:1px solid var(--line);padding:10px 0 6px}
+  .mz:first-child{border-top:0;padding-top:0}
+  .mzhead{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .mzrow{display:flex;gap:10px;overflow:hidden}
+  .mzrow .item{flex:0 0 118px;width:118px}
+  .mzrow.open{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));overflow:visible}
+  .mzrow.open .item{flex:none;width:auto}
+  .mzbtn{padding:2px 8px;font-size:12px}
+  .marks{position:absolute;top:6px;right:6px;display:flex;gap:4px}
+  .mk{border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;cursor:pointer;user-select:none}
+  .mk.y{background:var(--yellow);color:#1a1605}
+  .mk.r{background:var(--red);color:#1a0807}
+  .mk.k{background:var(--black);color:#101216}
+  .mk.g{background:var(--green);color:#08160d}
+  .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+  .tabs button.active{background:var(--accent);color:#0b1015;border-color:var(--accent)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:12px;cursor:pointer;color:var(--dim)}
+  .chip.active{border-color:var(--accent);color:var(--fg)}
+  .chip b{color:var(--fg);font-weight:600}
+  table.list{width:100%;border-collapse:collapse;font-size:13px}
+  table.list th,table.list td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+  table.list th{color:var(--dim);font-weight:600}
+  .mono{font-family:Consolas,monospace;font-size:12px}
+  .dim{color:var(--dim)}
+  .hidden{display:none !important}
+  .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
+  .modal.wide{width:min(1120px,96vw)}
+  .modal header{position:static;border:0;background:transparent;padding:12px 14px 6px}
+  .modal .body{overflow:auto;padding:0 14px 12px}
+  .cardinfo{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px}
+  .cardinfo .mk{background:var(--panel);border:1px solid var(--line);color:var(--fg);font-weight:600}
+  .cardinfo .mk.g{border-color:var(--green);color:var(--green)}
+  .cardinfo .mk.y{border-color:var(--yellow);color:var(--yellow)}
+  .cardinfo .mk.k{border-color:var(--gray);color:var(--gray)}
+  .cardinfo .mk.r{border-color:var(--red);color:var(--red)}
+  .modal footer{border-top:1px solid var(--line);padding:10px 14px;display:flex;gap:10px;align-items:center}
+  .bar{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;background:var(--accent);width:0}
+  footer.page{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--line);padding:8px 16px;display:flex;gap:10px;align-items:center;font-size:12px;color:var(--dim)}
+  .grow{flex:1}
+  input[readonly]{color:var(--dim);background:#1a1d22}
+  tr.locked td{background:#1a1d22}
+  .tip{position:fixed;pointer-events:none;background:#0b0e12e6;border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px;z-index:60;white-space:nowrap}
+  /* 组成条目预览浮层（文本悬停显示内容）+ 条目缩略图 */
+  .tip.comp{white-space:pre-wrap;max-width:560px;max-height:340px;overflow:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.35;pointer-events:none}
+  .compThumb{width:18px;height:18px;object-fit:cover;border:1px solid var(--line);border-radius:3px;vertical-align:middle;flex:0 0 auto}
+  .comprow.hastext .mono{color:var(--accent)}
+  .comprow:hover{background:#2b3038}
+  /* unity3d 条目：可点开贴图浮层；已解析的标蓝 */
+  .comprow.u3d{cursor:pointer}
+  .comprow.u3d.parsed .mono{color:#5aa9ff}
+  #u3dTip{position:fixed;background:#0b0e12f5;border:1px solid var(--line);border-radius:6px;padding:8px;z-index:70;font-size:12px;display:flex;flex-direction:column;gap:6px;max-width:440px}
+  #u3dTip .u3dHead{display:flex;gap:8px;align-items:center}
+  #u3dTip .u3dGrid{display:grid;grid-template-columns:repeat(auto-fill,64px);gap:6px;max-height:216px;overflow:auto}
+  #u3dTip .u3dGrid img{width:64px;height:64px;object-fit:cover;border:1px solid var(--line);border-radius:4px;cursor:pointer;background:#000}
+  #u3dTip .u3dGrid img.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  #u3dTip .u3dBig{text-align:center}
+  #u3dTip .u3dBig img{max-width:100%;max-height:280px;border:1px solid var(--line);border-radius:4px}
+  .reveal{cursor:pointer;text-decoration:underline dotted}
+  table.list tr[data-guid]{cursor:pointer}
+  table.list tr[data-guid]:hover td{background:#22262d}
+  /* 折叠文件夹视图：每库只显示一排（超出部分裁掉） */
+  #folderBar.folded .chips{max-height:26px;overflow:hidden}
+  /* 扫描进度悬浮窗（右上角） */
+  .scanfloat{position:fixed;top:58px;right:14px;width:340px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;z-index:40;box-shadow:0 10px 24px #0009}
+  .scanfloat .hdr{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+  tr[draggable="true"]{cursor:grab}
+  tr.dragging td{opacity:.45}
+  /* 库根未设置——顶部按钮持续闪红提示「第一次使用请先设置」 */
+  @keyframes needSet{0%,100%{background:#3a1412;border-color:var(--red);color:#ffb4b0}50%{background:var(--red);border-color:var(--red);color:#1a0807}}
+  button.need-set{animation:needSet 1.1s ease-in-out infinite;border-color:var(--red)}
+  /* mod 表：自适应窗格（列宽百分比 + 定宽布局 + 省略号）+ 表头点击排序 + 作者筛选浮层 */
+  table.list.fixed{table-layout:fixed}
+  table.list.fixed th,table.list.fixed td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  table.list th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+  table.list th.sortable:hover{color:var(--fg)}
+  table.list th .arrow{color:var(--accent)}
+  button.thbtn{padding:0 5px;font-size:11px;line-height:15px;border-radius:4px;vertical-align:middle;margin-left:4px}
+  button.thbtn.on{border-color:var(--accent);color:var(--accent)}
+  .filterpop{position:fixed;z-index:70;width:380px;max-width:94vw;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;box-shadow:0 10px 24px #0009;display:flex;flex-direction:column;gap:6px}
+  .filterpop .auhead{display:flex;gap:8px;align-items:baseline;font-size:12px}
+  .filterpop input{width:100%}
+  .filterpop .aulist{height:250px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--panel2);padding:3px}
+  .filterpop .aulist label{display:flex;gap:6px;align-items:center;padding:2px 4px;font-size:12px;border-radius:4px;cursor:pointer}
+  .filterpop .aulist label:hover{background:#2b3038}
+  .filterpop .au-name{flex:0 0 auto;white-space:nowrap}
+  .filterpop .au-n{flex:0 0 auto;color:var(--dim);font-size:11px}
+  .filterpop .aufoot{display:flex;gap:6px;align-items:center;font-size:12px}
+  /* 编辑授权——顶部栏勾选（默认不授权，随时可撤销） */
+  label.authbox{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:var(--dim);cursor:pointer;user-select:none;margin-left:6px}
+  label.authbox input{width:15px;height:15px}
+  label.authbox.on{color:var(--gold)}
+  .edchunk td{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  /* 编辑卡片（只读结构视图）——分区折叠 + 概览表 + 内嵌贴图网格 */
+  .edsec{border:1px solid var(--line);border-radius:8px;margin:10px 0;background:var(--panel2);overflow:hidden}
+  .edsec>summary{cursor:pointer;padding:8px 10px;font-size:13px;user-select:none;list-style:none}
+  .edsec>summary::-webkit-details-marker{display:none}
+  .edsec>summary::before{content:"▸ ";color:var(--dim)}
+  .edsec[open]>summary::before{content:"▾ "}
+  .edsec>summary:hover{background:#2b3038}
+  .edsec .secbody{padding:8px 10px;border-top:1px solid var(--line)}
+  .edkv{width:100%;border-collapse:collapse;font-size:12px}
+  .edkv th{width:132px;text-align:left;color:var(--dim);font-weight:600;padding:3px 8px 3px 0;vertical-align:top;white-space:nowrap}
+  .edkv td{padding:3px 0}
+  .edimg{display:flex;flex-wrap:wrap;gap:8px}
+  .edimg .cell{width:104px;font-size:11px;color:var(--dim);text-align:center;line-height:1.25}
+  .edimg img{width:100px;height:100px;object-fit:contain;background:#0b0d10;border:1px solid var(--line);border-radius:6px;display:block;margin-bottom:3px}
+  .edimg a{text-decoration:none}
+  .edimg img.bad{opacity:.25}
+  /* 编辑字段（姓 / 名 / 爱称 / 性格）——网格布局，窄屏自动换行 */
+  .edgrid{display:flex;flex-wrap:wrap;gap:10px}
+  .edgrid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim);min-width:180px;flex:1}
+  .edgrid input,.edgrid select{background:#0b0d10;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit}
+  .edgrid input:focus,.edgrid select:focus{outline:none;border-color:var(--accent)}
+  /* 离线库标记（mod 侧冷冻库）——黑底浅字，深色界面上可读 */
+  .offmark{background:#000;color:#e8e8e8;padding:0 4px;border-radius:3px;font-size:11px}
+  /* 待办条目 */
+  .tditem{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--panel2)}
+</style>
+</head>
+<body>
+<header>
+  <h1>KK Manager <span>by Rushiera</span></h1>
+  <button class="primary" id="btnScanMods">扫描 mod 库</button>
+  <button class="primary" id="btnScanCards">扫描卡片库</button>
+  <button id="btnSettings">库根设置</button>
+  <label class="authbox" id="authBox" title="默认不授权——勾选后须确认声明才授权，随时可撤销"><input type="checkbox" id="chkAuth">编辑授权</label>
+  <span class="grow"></span>
+  <span id="verInfo" class="dim" style="margin-left:12px"></span>
+  <span id="scanStatus" class="dim"></span>
+</header>
+
+<main>
+  <div class="stats" id="stats"></div>
+
+  <div class="card hidden" id="settingsCard">
+    <h2>游戏根地址 — 4 条级别 1 库根（mod 主库 + 卡片 3 库）由它派生，关系固定；扫描范围完全由下面的库根列表决定</h2>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px">
+      <input id="gameRoot" class="mono" style="flex:1;min-width:420px" placeholder="D:\SteamLibrary\GameGeneral\Koikatu">
+      <button id="btnPickGameRoot">浏览…</button>
+      <span class="dim">选定游戏根后自动填入 4 条级别 1：游戏根\mods · UserData 下 female / coordinate / Studio</span>
+    </div>
+
+    <h2>库根设置 — mod 库（预置条目锁定不可改 · 新增库根一律冷冻库 · 扫描不覆盖未添加的文件夹）</h2>
+    <table class="list"><thead><tr><th style="width:82px">更新</th><th style="width:88px">离线</th><th style="width:96px">级别</th><th>路径 / 备注</th><th style="width:72px">含子目录</th><th style="width:52px">只读</th><th style="width:170px"></th></tr></thead>
+      <tbody id="modRootsBody"></tbody></table>
+    <div style="margin:8px 0 16px">
+      <button id="btnAddModRoot">+ 添加冷冻库</button>
+      <span class="dim">1 主库（游戏读取·命中即绿·预置锁定）· 2 缓存库（可搬入主库·黄·槽位不可删，路径与勾选归你）· 3 冷冻库（只读·灰；你新增的都在这一级）</span>
+    </div>
+
+    <h2>库根设置 — 卡片库（预置主库锁定不可改 · 新增库根一律附加库 · 勾了「含子目录」即递归扫描）</h2>
+    <table class="list"><thead><tr><th style="width:82px">更新</th><th style="width:88px">离线</th><th style="width:96px">级别</th><th>路径 / 备注</th><th style="width:72px">含子目录</th><th style="width:52px">只读</th><th style="width:170px"></th></tr></thead>
+      <tbody id="cardRootsBody"></tbody></table>
+    <div style="margin:8px 0 16px">
+      <button id="btnAddCardRoot">+ 添加附加库</button>
+      <span class="dim">1 主库（female / coordinate / Studio·预置，不可改不可删）· 2 附加库（你新增的都在这一级）</span>
+      <span class="grow"></span>
+      <button class="primary" id="btnSave">保存配置</button>
+    </div>
+    <div class="dim mono" id="dbPath"></div>
+  </div>
+
+  <div class="scanfloat hidden" id="scanFloat">
+    <div class="hdr"><span>扫描进度</span><span class="grow"></span><button id="btnScanFloatHide" style="padding:2px 8px;font-size:12px">收起</button></div>
+    <div id="scanInfo" class="dim" style="font-size:12px;margin-top:4px"></div>
+    <div class="bar"><i id="scanBar"></i></div>
+    <div id="scanErrors" class="mono" style="margin-top:6px;font-size:12px;color:var(--yellow)"></div>
+  </div>
+
+  <div class="scanfloat hidden" id="moveFloat" style="z-index:41">
+    <div class="hdr"><span>移到缓存库</span><span class="grow"></span><button id="btnMoveStop" style="padding:2px 8px;font-size:12px">停止</button><button id="btnMoveFloatHide" style="padding:2px 8px;font-size:12px">收起</button></div>
+    <div id="moveInfo" class="dim" style="font-size:12px;margin-top:4px"></div>
+    <div class="bar"><i id="moveBar"></i></div>
+    <div id="moveErrors" class="mono" style="margin-top:6px;font-size:12px;color:var(--yellow)"></div>
+  </div>
+
+  <div class="tabs">
+    <button id="tabCards" class="active">卡片</button>
+    <button id="tabMods">mod 库</button>
+    <button id="tabMissing">缺失清单</button>
+  </div>
+
+  <div class="row card" style="margin-bottom:12px">
+    <input id="q" class="grow" placeholder="搜索文件名 / guid…">
+    <select id="filter">
+      <option value="all">全部</option>
+      <option value="pending">未就绪（黄+红+黑）</option>
+      <option value="ready">主库已就绪</option>
+      <option value="black">有真缺失（黑）</option>
+      <option value="nomod">无 mod 引用</option>
+      <option value="nothumb">无缩略图</option>
+      <option value="tier1">mod：主库</option>
+      <option value="tier2">mod：缓存库</option>
+      <option value="tier3">mod：冷冻库</option>
+      <option value="dup">mod：重复副本</option>
+      <option value="unused">mod：未被引用</option>
+    </select>
+    <button id="btnReload">刷新</button>
+  </div>
+
+  <div class="row" style="margin-bottom:6px;align-items:center">
+    <button id="btnFoldFolders">折叠文件夹</button>
+    <span class="dim" id="foldHint">折叠后每个库只占一排（点根名下方的 chip 切换文件范围）</span>
+  </div>
+  <div id="folderBar"></div>
+
+  <div id="viewCards"><div class="grid" id="cardsGrid"></div></div>
+  <div id="viewMods" class="hidden"><div class="card">
+    <table class="list fixed" id="modsTable">
+      <colgroup>
+        <col style="width:13%"><col style="width:11%"><col style="width:15%"><col style="width:7%">
+        <col style="width:6%"><col style="width:17%"><col style="width:6%"><col style="width:6.5%">
+        <col style="width:8.5%"><col style="width:9.5%">
+      </colgroup>
+      <thead><tr>
+        <th>guid</th><th>名称</th>
+        <th>作者<button id="btnAuthorFilter" class="thbtn" title="按作者筛选">筛选 ▾</button><span id="authorMark" class="dim"></span></th>
+        <th>版本</th>
+        <th>级别</th><th>文件名</th>
+        <th style="text-align:right">副本</th><th>旧版</th>
+        <th class="sortable" data-sort="used" data-label="被引用" style="text-align:right" title="点击切换升序 / 降序（默认降序）">被引用</th>
+        <th class="sortable" data-sort="size" data-label="大小" style="text-align:right" title="点击切换升序 / 降序（默认降序）">大小</th>
+      </tr></thead>
+      <tbody id="modsBody"></tbody>
+    </table>
+  </div></div>
+  <div id="viewMissing" class="hidden"><div class="card"><div id="missingList"></div></div></div>
+
+  <div id="auPanel" class="filterpop hidden">
+    <div class="auhead"><b>按作者筛选</b><span class="dim" id="auInfo"></span></div>
+    <input id="auQ" placeholder="搜索作者（含即可，模糊匹配）…">
+    <div class="aulist" id="auList"></div>
+    <div class="aufoot">
+      <button id="auCancel">取消</button>
+      <span class="grow"></span>
+      <button id="auNone">清除筛选</button>
+      <button id="auApply" class="primary">只看选中</button>
+    </div>
+  </div>
+</main>
+
+<footer class="page">
+  <button id="btnPrev">上一页</button>
+  <span id="pageInfo">第 1 页</span>
+  <button id="btnNext">下一页</button>
+  <span class="grow"></span>
+  <span id="footInfo"></span>
+</footer>
+
+<div class="tip hidden" id="tip"></div>
+<div id="u3dTip" class="hidden"></div>
+
+<div class="overlay hidden" id="overlay">
+  <div class="modal">
+    <header><b id="mTitle">引用明细</b></header>
+    <div class="body">
+      <div class="row" style="margin:6px 0 10px">
+        <button id="btnCheckAll">全选</button>
+        <button id="btnCheckNone">全不选</button>
+        <span class="dim" id="mHint"></span>
+      </div>
+      <div class="cardinfo" id="mCardInfo"></div>
+      <table class="list"><thead><tr><th style="width:34px"></th><th>guid</th><th style="width:150px">部件</th><th style="width:190px">文件</th><th style="width:70px">级别</th></tr></thead>
+        <tbody id="mBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="mSel">已选 0</span>
+      <span class="grow"></span>
+      <button id="btnMove" class="primary">搬入主库</button>
+      <button id="btnCloseModal">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovModCards">
+  <div class="modal">
+    <header><b id="mcTitle">引用卡片</b></header>
+    <div class="body">
+      <div class="cardinfo" id="mcModInfo"></div>
+      <div class="cardinfo hidden" id="mcComp"></div>
+      <div class="grid" id="mcGrid" style="grid-template-columns:repeat(auto-fill,minmax(118px,1fr))"></div>
+    </div>
+    <footer>
+      <span class="dim" id="mcInfo"></span>
+      <span class="grow"></span>
+      <button id="btnMcMore">加载更多</button>
+      <button id="btnMcClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovUnused">
+  <div class="modal wide">
+    <header><b>未被任何卡片引用的 mod</b> <span class="dim" id="uvInfo"></span></header>
+    <div class="body">
+      <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px">
+        <input id="uvQ" class="grow" placeholder="过滤 guid / 名称 / 文件名…">
+        <button id="uvAll">全选</button>
+        <button id="uvNone">全不选</button>
+      </div>
+      <div class="dim" id="uvHint" style="font-size:12px;margin-bottom:8px">列表 = <b>主库</b>中未被任何卡片引用的 mod（按文件大小从大到小）。移出后游戏不再加载它们；搬运在<b>后台</b>进行（每个文件约数秒），关掉页面也会继续，随时可「停止」。移错了可用「搬入主库」搬回。</div>
+      <table class="list"><thead><tr><th style="width:34px"></th><th>guid</th><th>名称</th><th style="width:76px">级别</th><th>文件名</th><th style="width:84px">大小</th><th style="width:52px">副本</th></tr></thead>
+        <tbody id="uvBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="uvSel">已选 0</span>
+      <span class="grow"></span>
+      <button id="btnUvMove" class="primary">移到 mod_cache</button>
+      <button id="btnUvClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovDup">
+  <div class="modal wide">
+    <header><b>重复副本</b> <span class="dim" id="dupInfo"></span></header>
+    <div class="body">
+      <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px">
+        <input id="dupQ" class="grow" placeholder="过滤 guid / 名称 / 文件名 / 版本 / 作者…">
+      </div>
+      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。</div>
+      <table class="list"><thead><tr><th style="width:118px">级别</th><th>文件名</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:78px">大小</th><th style="width:132px">改于</th><th style="width:150px">操作</th></tr></thead>
+        <tbody id="dupBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="dupFoot"></span>
+      <span class="grow"></span>
+      <button id="btnDupReload">重新读取</button>
+      <button id="btnDupClose">确认</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovAuth">
+  <div class="modal">
+    <header><b>编辑授权</b> <span class="dim">未授权时无法编辑卡片</span></header>
+    <div class="body">
+      <div style="line-height:1.7;font-size:13px">
+        <div>声明 1 —— 编辑卡片可能会对卡片产生不可逆的影响。</div>
+        <div>声明 2 —— 提供编辑授权视为你同意本软件对卡片做的一切操作。</div>
+        <div>声明 3 —— 该编辑授权可随时撤销，撤销后若再次使用编辑需要再次授权。</div>
+        <div>声明 4 —— 如果有必要，被本软件编辑过的卡片可能会在 png 文件结构中的注释段留下一条 KCM 声明用于标识。</div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:14px;font-size:13px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="chkAgree">上述内容你均同意
+      </label>
+    </div>
+    <footer>
+      <span class="dim" id="authMsg">勾选后点「按确认」即授权</span>
+      <span class="grow"></span>
+      <button id="btnAuthOk" class="primary">按确认</button>
+      <button id="btnAuthCancel">取消</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovEdit">
+  <div class="modal wide">
+    <header><b>编辑卡片</b> <span class="dim" id="edTitle"></span></header>
+    <div class="body">
+      <div id="edEdit"></div>
+      <div id="edSections"></div>
+    </div>
+    <footer>
+      <span class="dim" id="edMsg">只读视图——软件不会改动卡片文件</span>
+      <span class="grow"></span>
+      <button id="btnEditReload">重新读取</button>
+      <button id="btnEditClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovOld">
+  <div class="modal wide">
+    <header><b>寻找旧版</b> <span class="dim" id="oldTitle"></span></header>
+    <div class="body">
+      <div class="dim" id="oldHint" style="font-size:12px;margin-bottom:8px">本软件编辑这张卡片前，会把原版复制一份留在软件内部（<span class="mono" id="oldDir"></span>）——原版放回原处是<b>编辑后的卡片</b>，留档的是<b>编辑前</b>的原版。点「定位文件」在资源管理器里打开并选中。</div>
+      <div id="oldBody"></div>
+    </div>
+    <footer>
+      <span class="dim" id="oldFoot"></span>
+      <span class="grow"></span>
+      <button id="btnOldReload">重新读取</button>
+      <button id="btnOldClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovTodo">
+  <div class="modal wide">
+    <header><b>待办清单</b> <span class="dim" id="tdInfo"></span></header>
+    <div class="body">
+      <div class="dim" id="tdHint" style="font-size:12px;margin-bottom:8px">软件认为需要你处理的事。库被判为<b>离线</b>（地址不存在，或库里一个东西都没有）时这里会出现一条——把它的路径改成<b>备注</b>写清东西放哪了，也可以直接上线或彻底删除数据。手动设为离线的库不在这里出现。</div>
+      <div id="tdBody"></div>
+    </div>
+    <footer>
+      <span class="dim" id="tdFoot"></span>
+      <span class="grow"></span>
+      <button id="btnTdReload">重新读取</button>
+      <button id="btnTdClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = { tab:'cards', page:1, folder:null, root:null, roots:{gameRoot:'',modRoots:[],cardRoots:[]}, refs:[], cards:[], rendered:0, batch:120, foldFolders:false,
+  modRows:[], modView:[], modShown:0, modBatch:200, modSort:{key:'used', dir:'desc'}, modAuthors:[], auAll:[], auPending:null };
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  const txt = await r.text();
+  if(!r.ok) throw new Error(r.status + ' ' + txt);
+  return txt ? JSON.parse(txt) : null;
+}
+const fmt = n => (n===null||n===undefined) ? '-' : Number(n).toLocaleString('en-US');
+const esc = s => String(s===null||s===undefined?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tierName = t => ({1:'主库',2:'缓存库',3:'冷冻库'}[t] || ('级别'+t));
+/* 在资源管理器中打开并选中（受管的 mod 副本）——mod 列表文件名列与引用明细文件名列共用同一出口 */
+function revealPath(p){
+  if(!p){ alert('该 mod 本地没有对应文件'); return; }
+  api('/api/reveal', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:p})})
+    .catch(err => alert('打开失败：' + err.message));
+}
+
+/* ---------- 编辑授权（默认不授权 · 顶部勾选与编辑卡片入口均走四条声明确认窗 · 随时可撤销） ---------- */
+let editAuth = false;
+function applyAuth(v){
+  editAuth = v === true;
+  $('chkAuth').checked = editAuth;
+  $('authBox').classList.toggle('on', editAuth);
+}
+async function setAuth(v){
+  try{
+    const r = await api('/api/edit-auth', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({granted: v})});
+    applyAuth(r.editAuthorized === true);
+    return editAuth;
+  }catch(e){
+    applyAuth(!v);   /* 落盘失败——勾选态退回，不假装已授权 */
+    alert('授权设置失败：' + e.message);
+    return editAuth;
+  }
+}
+/* 二次确认窗（四条声明 + 同意勾选）——授权成功后执行 onOk；两处入口共用：编辑卡片 / 顶部勾选 */
+function askEditAuth(onOk){
+  $('chkAgree').checked = false;
+  $('authMsg').textContent = '勾选后点「按确认」即授权';
+  $('ovAuth').classList.remove('hidden');
+  $('btnAuthOk').onclick = async () => {
+    if(!$('chkAgree').checked){ $('authMsg').textContent = '请先勾选「上述内容你均同意」'; return; }
+    $('authMsg').textContent = '正在授权…';
+    const ok = await setAuth(true);
+    if(!ok){ $('authMsg').textContent = '授权失败——看页面提示'; return; }
+    $('ovAuth').classList.add('hidden');
+    if(onOk){ onOk(); }
+  };
+  $('btnAuthCancel').onclick = () => $('ovAuth').classList.add('hidden');
+}
+/* 点「编辑卡片」入口——没授权先走二次确认 */
+function requestEdit(cardId, lib){
+  if(editAuth){ openEditor(cardId, lib); return; }
+  askEditAuth(() => openEditor(cardId, lib));
+}
+
+/* ---------- 编辑卡片（只读结构视图——PNG 块表 + 图片区 / 数据区划分） ---------- */
+let editCtx = {cardId:0, lib:0};
+function secHtml(title, count, bodyHtml, open){
+  const c = count ? ' <span class="dim">'+esc(count)+'</span>' : '';
+  return `<details class="edsec"${open ? ' open' : ''}><summary><b>${esc(title)}</b>${c}</summary><div class="secbody">${bodyHtml}</div></details>`;
+}
+function kvHtml(rows){
+  let html = '<table class="edkv">';
+  rows.forEach(r => {
+    html += `<tr><th>${esc(r[0])}</th><td>${r[1]}</td></tr>`;
+  });
+  return html + '</table>';
+}
+function cardTypeName(t){
+  if(!t){ return '<span class="dim">&lt;未识别&gt;</span>'; }
+  if(t.indexOf('Clothes') >= 0){ return '服装卡（coordinate）'; }
+  if(t.indexOf('Chara') >= 0){ return '人物卡（character）'; }
+  return esc(t);
+}
+function chunkTableHtml(chunks){
+  let html = '<table class="list edchunk"><thead><tr><th style="width:150px">偏移</th><th style="width:70px">类型</th><th style="width:150px">数据长度</th><th>CRC</th></tr></thead><tbody>';
+  (chunks||[]).forEach(c => {
+    const crc = c.crcChecked ? (c.crcOk ? 'OK' : '<span style="color:var(--red)">不符</span>') : '<span class="dim">未校验（大块）</span>';
+    html += `<tr><td>${fmt(c.offset)}</td><td>${esc(c.type)}</td><td>${fmt(c.length)}</td><td>${crc}</td></tr>`;
+  });
+  return html + '</tbody></table>';
+}
+function imageGridHtml(d){
+  const c = editCtx;
+  let html = '<div class="edimg">';
+  (d.images||[]).forEach(img => {
+    const src = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${img.offset}&size=${img.size}&w=96`;
+    const big = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${img.offset}&size=${img.size}&w=512`;
+    const tip = img.width+'×'+img.height+' · '+fmt(img.size)+' 字节 · @'+fmt(img.offset)+(img.ended ? '' : ' · 未闭合');
+    html += `<div class="cell" title="${esc(tip)}">
+      <a href="${big}" target="_blank" rel="noopener"><img loading="lazy" src="${src}" onerror="this.classList.add('bad')"></a>
+      <div>#${img.index}${img.isFace ? ' · 脸图' : ''}</div>
+      <div>${img.width}×${img.height}</div>
+      <div>${fmt(img.size)}</div>
+    </div>`;
+  });
+  return html + '</div><div class="dim" style="margin-top:8px;font-size:12px">缩略图按需加载（滚动到才读）；点缩略图在新标签页看大图。</div>';
+}
+function renderStructure(st, d){
+  if(!st){ $('edSections').innerHTML = '<span class="dim">没有结构数据</span>'; return; }
+  const c = editCtx;
+  $('edTitle').textContent = st.fileName || '';
+  const imgEnd = st.imageEnd > 0 ? fmt(st.imageEnd) : '<未找到>';
+  const imgCount = d ? (d.images||[]).length : 0;
+  const imgBytes = d ? (d.imageBytesTotal||0) : 0;
+  const pctData = st.dataSize > 0 ? (imgBytes*100/st.dataSize).toFixed(1)+'%' : '—';
+  const pctFile = st.size > 0 && st.imageEnd > 0 ? (st.imageEnd*100/st.size).toFixed(2)+'%' : '—';
+  const refs = d ? (d.modRefs||[]) : [];
+  const uniq = new Set(refs.map(m => m.modId));
+  let html = '';
+
+  /* ① 概览——把结构读成人话 */
+  const rows = [
+    ['文件', `<span class="mono dim">${esc(st.filePath||'')}</span>`],
+    ['大小 / 改于', `<b>${fmt(st.size)}</b> 字节 · ${esc(st.mtime||'')}`],
+    ['卡类型', `<b>${cardTypeName(st.cardType)}</b> <span class="dim mono">${esc(st.cardType||'')}</span>`],
+    ['角色名', d && d.charName ? `<b>${esc(d.charName)}</b>` : '<span class="dim">&lt;头段未记录&gt;</span>'],
+    ['数据版本', esc(st.dataVersion||'<无>')],
+    ['卡面预览图', `${imgEnd} 字节（占文件 ${pctFile}）· PNG 块 ${(st.chunks||[]).length} 个`],
+    ['数据区', `<b>${fmt(st.dataSize)}</b> 字节（起点 ${imgEnd}）`],
+    ['内嵌贴图', `<b>${imgCount}</b> 张 · ${fmt(imgBytes)} 字节（占数据区 <b>${pctData}</b>）`],
+    ['mod 声明', `<b>${refs.length}</b> 条 → 去重 <b>${uniq.size}</b> 个 mod`],
+    ['写入数据的插件', d ? `<b>${(d.pluginNames||[]).length}</b> 个` : '<span class="dim">—</span>'],
+    ['服装部件', d ? `<b>${(d.parts||[]).length}</b> 件` : '<span class="dim">—</span>'],
+    ['数据块目录', d && (d.blocks||[]).length ? `<b>${d.blocks.length}</b> 条` : '<span class="dim">无（老格式）</span>']
+  ];
+  if(d && d.faceImageSize > 0){
+    rows.push(['卡面脸图', `${fmt(d.faceImageSize)} 字节 @${fmt(d.faceImageOffset)}`]);
+  }
+  /* 概览末：内嵌贴图第一张（第一行第一列）直接摆出来 */
+  let firstImg = '';
+  if(d && (d.images||[]).length){
+    const i0 = d.images[0];
+    const s0 = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${i0.offset}&size=${i0.size}&w=192`;
+    const b0 = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${i0.offset}&size=${i0.size}&w=512`;
+    firstImg = `<div style="margin-top:10px;display:flex;gap:12px;align-items:flex-start">
+      <a href="${b0}" target="_blank" rel="noopener"><img src="${s0}" style="width:144px;height:144px;object-fit:contain;background:#0b0d10;border:1px solid var(--line);border-radius:6px" onerror="this.classList.add('bad')"></a>
+      <div class="dim" style="font-size:12px;line-height:1.7">内嵌贴图 #1（第一张）<br>${i0.width}×${i0.height} · ${fmt(i0.size)} 字节 · @${fmt(i0.offset)}${i0.isFace ? ' · 脸图' : ''}${i0.ended ? '' : ' · 未闭合'}<br>点图在新标签页看大图</div>
+    </div>`;
+  }
+  html += secHtml('概览', '', kvHtml(rows) + firstImg, true);
+
+  /* ② 内嵌贴图（缩略图网格） */
+  if(imgCount){
+    html += secHtml('内嵌贴图', imgCount + ' 张 · ' + fmt(imgBytes) + ' 字节', imageGridHtml(d), false);
+  }
+
+  /* ③ mod 声明区 */
+  if(refs.length){
+    let t = '<table class="list"><thead><tr><th>部件</th><th style="width:110px">槽位</th><th>mod（guid）</th><th style="width:120px">作者</th><th style="width:170px">卡内名称</th></tr></thead><tbody>';
+    refs.forEach(m => {
+      t += `<tr><td class="mono">${esc(m.property||'?')}</td><td>${m.slot}</td><td>${esc(m.modId||'')}</td><td>${esc(m.author||'')}</td><td>${esc(m.name||'')}</td></tr>`;
+    });
+    html += secHtml('mod 声明区', refs.length + ' 条 → ' + uniq.size + ' 个 mod', t + '</tbody></table>', false);
+  }
+
+  /* ④ 服装部件 */
+  if(d && (d.parts||[]).length){
+    let t = '<table class="list"><thead><tr><th style="width:60px">#</th><th style="width:170px">部件 id</th><th>记录的字段</th></tr></thead><tbody>';
+    d.parts.forEach(p => {
+      t += `<tr><td>${p.index}</td><td class="mono">${p.id >= 0 ? p.id : '?'}</td><td class="mono dim">${esc((p.keys||[]).join(', '))}</td></tr>`;
+    });
+    html += secHtml('服装部件（parts）', d.parts.length + ' 件', t + '</tbody></table>', false);
+  }
+
+  /* ⑤ 数据块目录 */
+  if(d && (d.blocks||[]).length){
+    let t = '<table class="list"><thead><tr><th>块名</th><th style="width:100px">版本</th><th style="width:140px">位置</th><th style="width:170px">大小</th></tr></thead><tbody>';
+    d.blocks.forEach(b => {
+      t += `<tr><td>${esc(b.name||'')}</td><td>${esc(b.version||'')}</td><td class="mono">${fmt(b.pos)}</td><td class="mono">${fmt(b.size)}</td></tr>`;
+    });
+    html += secHtml('数据块目录（lstInfo）', d.blocks.length + ' 条', t + '</tbody></table>', false);
+  }
+
+  /* ⑥ 写入数据的插件 */
+  if(d && (d.pluginNames||[]).length){
+    let t = '<div class="mono" style="font-size:12px;line-height:1.7">';
+    d.pluginNames.forEach(n => { t += '· ' + esc(n) + '<br>'; });
+    html += secHtml('写入数据的插件（KKEx）', d.pluginNames.length + ' 个', t + '</div>', false);
+  }
+
+  /* ⑦ PNG 块表 */
+  html += secHtml('PNG 块表（卡面预览图）', (st.chunks||[]).length + ' 个', chunkTableHtml(st.chunks), false);
+
+  /* ⑧ 数据区头段 */
+  html += secHtml('数据区头段', '', kvHtml([
+    ['标记', '<span class="mono">int32 = 100（ChaFile 头）</span>'],
+    ['首 64 字节', `<span class="mono" style="font-size:11px;word-break:break-all">${esc(st.dataHeadHex||'<无>')}</span>`]
+  ]), false);
+
+  /* ⑨ 提示与告警 */
+  const warns = [];
+  if(st.warnings){ st.warnings.forEach(w => { warns.push(w); }); }
+  if(d && d.warnings){ d.warnings.forEach(w => { warns.push(w); }); }
+  if(warns.length){
+    html += secHtml('提示', warns.length + ' 条', '<div style="color:var(--yellow);font-size:12px;line-height:1.7">' + warns.map(esc).join('<br>') + '</div>', false);
+  }
+  if(st.error){
+    html = '<div style="color:var(--red);margin-bottom:8px">' + esc(st.error) + '</div>' + html;
+  }
+  $('edSections').innerHTML = html;
+}
+async function loadStructure(){
+  const c = editCtx;
+  $('edMsg').textContent = '读取中…（要扫一遍卡片，大卡需几秒）';
+  $('edSections').innerHTML = '<span class="dim">读取中…</span>';
+  try{
+    const r = await api(`/api/card/${c.cardId}/structure?lib=${c.lib||0}`);
+    if(r.ok !== true && r.error){
+      $('edMsg').textContent = '结构读取失败';
+      $('edSections').innerHTML = '<span style="color:var(--red)">'+esc(r.error)+'</span>';
+      return;
+    }
+    renderStructure(r.structure, r.detail);
+    $('edMsg').textContent = '只读视图——软件不会改动卡片文件';
+  }catch(e){
+    $('edMsg').textContent = '结构读取失败';
+    $('edSections').innerHTML = '<span style="color:var(--red)">结构读取失败：'+esc(e.message)+'</span>';
+  }
+}
+function openEditor(cardId, lib){
+  editCtx = {cardId: cardId, lib: lib||0};
+  $('ovEdit').classList.remove('hidden');
+  loadParams();
+  loadStructure();
+}
+
+/* ---------- 编辑字段（姓 / 名 / 爱称 / 性格）——性格字母表来自 /api/personalities ---------- */
+let persList = null;
+let editParams = null;
+async function loadPersonalities(){
+  if(persList){ return persList; }
+  try{ const r = await api('/api/personalities'); persList = r.list || []; }catch(e){ persList = []; }
+  return persList;
+}
+async function loadParams(){
+  const c = editCtx;
+  $('edEdit').innerHTML = '<div class="dim" style="font-size:12px">读取字段中…</div>';
+  try{
+    const r = await api(`/api/card/${c.cardId}/params?lib=${c.lib||0}`);
+    if(r.ok !== true){
+      editParams = null;
+      $('edEdit').innerHTML = '<div class="edsec" style="padding:8px 10px;color:var(--yellow);font-size:12px">这张卡片没有可编辑的字段：'+esc(r.error||'')+'</div>';
+      return;
+    }
+    editParams = r;
+    const list = await loadPersonalities();
+    const known = list.some(p => p.id === r.personality);
+    const extra = known ? '' : `<option value="${r.personality}">${r.personality} 未收录（表外 ID）</option>`;
+    const opts = list.map(p => `<option value="${p.id}">${p.id} ${esc(p.name)}</option>`).join('');
+    $('edEdit').innerHTML = `<details class="edsec" open><summary><b>编辑</b> <span class="dim">姓 / 名 / 爱称 / 性格</span></summary><div class="secbody">
+      <div class="edgrid">
+        <label>姓<input id="edLast" value="${esc(r.lastName||'')}"></label>
+        <label>名<input id="edFirst" value="${esc(r.firstName||'')}"></label>
+        <label>爱称<input id="edNick" value="${esc(r.nickName||'')}"></label>
+        <label>性格<select id="edPers">${extra}${opts}</select></label>
+      </div>
+      <div class="dim" style="font-size:12px;margin:8px 0;line-height:1.7">
+        编辑只改被编辑的字节——卡面图 / 脸图 / 数据区其余内容原样搬运，文件的创建 / 修改时间与属性写完后还原（附加改动改回跟原来一样）。<br>
+        原版先留档在软件内部（编辑卡片右侧「寻找旧版」可查）——留档 ${r.archived||0} 份。
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="btnEdSave" class="primary">保存编辑</button>
+        <button id="btnEdReset">还原为当前值</button>
+        <span class="dim" style="font-size:12px">卡面预览图 / 脸图替换：<b>留口未实现</b></span>
+      </div>
+      <div id="edSaveMsg" class="dim" style="font-size:12px;margin-top:8px"></div>
+    </div></details>`;
+    $('edPers').value = String(r.personality);
+    $('btnEdSave').onclick = saveEdit;
+    $('btnEdReset').onclick = () => loadParams();
+  }catch(e){
+    editParams = null;
+    $('edEdit').innerHTML = '<div class="edsec" style="padding:8px 10px;color:var(--red);font-size:12px">字段读取失败：'+esc(e.message)+'</div>';
+  }
+}
+function persName(id){
+  const list = persList || [];
+  const hit = list.find(p => p.id === id);
+  return hit ? hit.name : '未收录';
+}
+function describeEdit(body){
+  const parts = [];
+  if(body.lastName !== (editParams.lastName||'')){ parts.push('姓 ' + (editParams.lastName||'<空>') + ' → ' + (body.lastName||'<空>')); }
+  if(body.firstName !== (editParams.firstName||'')){ parts.push('名 ' + (editParams.firstName||'<空>') + ' → ' + (body.firstName||'<空>')); }
+  if(body.nickName !== (editParams.nickName||'')){ parts.push('爱称 ' + (editParams.nickName||'<空>') + ' → ' + (body.nickName||'<空>')); }
+  if(body.personality !== editParams.personality){ parts.push('性格 ' + persName(editParams.personality) + ' → ' + persName(body.personality)); }
+  return parts;
+}
+async function saveEdit(){
+  if(!editParams){ $('edSaveMsg').textContent = '字段未读到——无法保存'; return; }
+  const c = editCtx;
+  const body = { lib: c.lib||0, lastName: $('edLast').value, firstName: $('edFirst').value, nickName: $('edNick').value, personality: parseInt($('edPers').value, 10) };
+  const changes = describeEdit(body);
+  if(!changes.length){ $('edSaveMsg').textContent = '没有字段发生变化——未写盘'; return; }
+  $('edSaveMsg').innerHTML = '写入中…（大卡需几秒）　改动：' + changes.map(esc).join(' · ');
+  try{
+    const r = await api(`/api/card/${c.cardId}/params`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const arch = r.archivedFile ? String(r.archivedFile).split('\\').pop() : '<无>';
+    $('edSaveMsg').innerHTML = '<b style="color:var(--green)">已写入</b>　' + (r.changes||[]).map(esc).join(' · ')
+      + `　字节增量 ${r.delta}　留档 ${esc(arch)}`;
+    await loadParams();
+    await loadStructure();
+    renderCardInfo(c.cardId, c.lib);
+  }catch(e){
+    $('edSaveMsg').innerHTML = '<span style="color:var(--red)">写入失败：'+esc(e.message)+'</span>';
+  }
+}
+
+/* ---------- 寻找旧版（编辑留档） ---------- */
+async function openOld(cardId, lib){
+  $('ovOld').classList.remove('hidden');
+  $('oldTitle').textContent = '';
+  $('oldFoot').textContent = '';
+  $('oldBody').innerHTML = '<span class="dim">读取中…</span>';
+  try{
+    const r = await api(`/api/card/${cardId}/archives?lib=${lib||0}`);
+    if(r.ok !== true){ $('oldBody').innerHTML = '<span style="color:var(--red)">'+esc(r.error||'')+'</span>'; return; }
+    $('oldDir').textContent = r.archiveDir || '';
+    $('oldTitle').textContent = String(r.cardPath||'').split('\\').pop();
+    const list = r.list || [];
+    if(!list.length){ $('oldBody').innerHTML = '<div class="dim">这张卡片还没有留档——被本软件编辑过的卡片才会留档。</div>'; return; }
+    let html = '<table class="list"><thead><tr><th style="width:160px">留档时刻</th><th style="width:120px">原大小</th><th style="width:150px">原修改时间</th><th>改动</th><th style="width:110px">操作</th></tr></thead><tbody>';
+    list.forEach(x => {
+      html += `<tr><td class="mono">${esc(x.editedAt||'')}</td><td class="mono">${fmt(x.archivedSize)}</td><td class="mono dim">${esc(x.archivedMtime||'')}</td><td style="font-size:12px">${esc(x.changes||'')}</td><td><button class="reveal" data-path="${esc(x.archivedFile||'')}">定位文件</button></td></tr>`;
+    });
+    html += '</tbody></table>';
+    $('oldBody').innerHTML = html;
+    $('oldBody').querySelectorAll('.reveal').forEach(b => b.onclick = () => revealPath(b.dataset.path));
+    $('oldFoot').textContent = '共 ' + list.length + ' 份留档';
+  }catch(e){
+    $('oldBody').innerHTML = '<span style="color:var(--red)">读取失败：'+esc(e.message)+'</span>';
+  }
+}
+
+/* ---------- 记忆（选中的文件夹 / 折叠态） ---------- */
+function rememberFolder(){
+  try{ localStorage.setItem('kk.folder', JSON.stringify({root: state.root, folder: state.folder})); }catch(e){}
+}
+function applyFold(){
+  $('folderBar').classList.toggle('folded', state.foldFolders === true);
+  $('btnFoldFolders').textContent = state.foldFolders ? '展开文件夹' : '折叠文件夹';
+}
+function restoreUi(){
+  try{
+    state.foldFolders = localStorage.getItem('kk.fold') === '1';
+    const raw = localStorage.getItem('kk.folder');
+    if(raw){
+      const saved = JSON.parse(raw);
+      const roots = ((state.roots||{}).cardRoots)||[];
+      const known = roots.some(r => (r.path||'') === saved.root);
+      if(saved.root && known){ state.root = saved.root; state.folder = (saved.folder===undefined?null:saved.folder); }
+    }
+  }catch(e){}
+  applyFold();
+}
+
+/* ---------- 库根配置 ---------- */
+function tierLabel(kind, tier){
+  const pairs = (kind === 'mods') ? [[1,'1 主库'],[2,'2 缓存库'],[3,'3 冷冻库']] : [[1,'1 主库'],[2,'2 附加库']];
+  for(let i=0;i<pairs.length;i++){ if(pairs[i][0] === tier) return pairs[i][1]; }
+  return '级别' + tier;
+}
+function rootRow(kind, e){
+  /* 级别不由使用者选：主库 / 缓存库是预置条目，新增的 mod 库根固定为冷冻库、卡片库根固定为附加库 */
+  const t = e || {tier: (kind === 'mods' ? 3 : 2), path:'', recurse: true, readOnly: false, locked: false, offline: false, note: ''};
+  const lock = !!t.locked;
+  /* 缓存库 = mod 级别 2 的槽位：不可删，路径与勾选仍归使用者（游戏根换掉也不跟随） */
+  const cacheSlot = (kind === 'mods' && t.tier === 2);
+  const offline = !!t.offline;
+  /* 离线语义只对使用者添加的条目开放——预置主库与缓存库槽位不适用 */
+  const canOff = !lock && !cacheSlot;
+  const lockTip = '预置条目——路径 / 含子目录 / 只读均不可改，也不可删除';
+  const tr = document.createElement('tr');
+  tr.dataset.tier = String(t.tier);
+  tr.dataset.locked = lock ? '1' : '0';
+  tr.dataset.offline = offline ? '1' : '0';
+  tr.dataset.path = t.path || '';
+  /* 原路径——保存时用于判定「在原来的那一行直接改地址 = 用新地址完全替换原来的」 */
+  tr.dataset.orig = t.path || '';
+  /* 上线库这里显示路径，离线库这里显示备注（离线不扫描、不更新，路径本身留作库身份键） */
+  const cellPath = offline
+    ? `<input class="note mono" style="flex:1" value="${esc(t.note||'')}" placeholder="写清这东西你放哪了…">`
+    : `<input class="path mono" style="flex:1" value="${esc(t.path)}" placeholder="D:\\..."${lock?' readonly disabled':''}>`;
+  tr.innerHTML = `
+    <td><button class="upd" style="white-space:nowrap"${offline?' disabled title="离线库不参与扫描——先上线"':''}>更新本库</button></td>
+    <td>${canOff?`<button class="off" style="white-space:nowrap">${offline?'点击上线':'设为离线'}</button>`:'<span class="dim" style="font-size:12px">—</span>'}</td>
+    <td><span class="dim"${lock?` title="${lockTip}"`:''}>${tierLabel(kind, t.tier)}${lock?' · 锁定':(cacheSlot?' · 不可删':'')}${offline?' · 已离线':''}</span></td>
+    <td><div style="display:flex;gap:6px">${cellPath}${lock?`<span class="dim" style="white-space:nowrap;line-height:24px" title="${lockTip}">预置主库·锁定</span>`:(offline?'':'<button class="browse" style="white-space:nowrap">浏览…</button>')}</div></td>
+    <td style="text-align:center"><input class="recurse" type="checkbox" ${t.recurse?'checked':''}${lock?' disabled':''}></td>
+    <td style="text-align:center"><input class="readOnly" type="checkbox" ${t.readOnly?'checked':''}${lock?' disabled':''}></td>
+    <td style="white-space:nowrap">${(lock||cacheSlot)?'':(offline?'<button class="danger">删</button> <button class="purge">彻底删除数据</button>':'<button class="danger">删</button>')}</td>`;
+  const delBtn = tr.querySelector('button.danger');
+  if(delBtn) delBtn.onclick = () => tr.remove();
+  /* 更新本库——只扫这一条库根（离线库按钮已禁用） */
+  const updBtn = tr.querySelector('button.upd');
+  if(updBtn) updBtn.onclick = async () => {
+    const target = (kind === 'mods') ? 'mods' : 'cards';
+    const pathInput = tr.querySelector('.path');
+    /* 这一行当前的地址——离线行显示备注框，路径仍从 dataset 取（库身份键） */
+    const rootPath = pathInput ? pathInput.value.trim() : (tr.dataset.path || '');
+    try{
+      /* 先把面板上的改动落盘——服务端按已保存的配置校验库根，没保存直接扫会报「库根不在已保存的配置里」 */
+      if(!await saveSettings(false, true)) return;
+      const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({target, root: rootPath})});
+      if(!r || !r.ok){ alert((r && r.error) || '启动失败'); return; }
+      $('scanFloat').classList.remove('hidden');
+      pollScan();
+    }catch(e){ alert('启动失败：' + e.message); }
+  };
+  /* 设为离线 / 点击上线——先把面板上的其他改动落盘，避免被这次切换覆盖 */
+  const offBtn = tr.querySelector('button.off');
+  if(offBtn) offBtn.onclick = async () => {
+    offBtn.disabled = true;
+    try{
+      await saveSettings(false);
+      const r = await api('/api/roots/offline', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({kind, path: tr.dataset.orig, offline: !offline})});
+      if(!r || !r.ok){ alert((r && r.error) || '切换失败'); return; }
+      await loadSettings(); await loadFolders(); await loadStats();
+    }catch(e){ alert('切换失败：' + e.message); }
+    finally{ offBtn.disabled = false; }
+  };
+  /* 彻底删除数据——删该库的数据库文件并把这条库根从列表移除（磁盘上的原始文件不动） */
+  const purgeBtn = tr.querySelector('button.purge');
+  if(purgeBtn) purgeBtn.onclick = async () => {
+    if(!confirm('彻底删除数据？\n\n该库的数据库文件将被删除，这条库根也会从列表里移除——内容就此消失。\n磁盘上的原始文件不会被删除。')) return;
+    try{
+      const r = await api('/api/roots/purge', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({kind, path: tr.dataset.orig})});
+      if(!r || !r.ok){ alert((r && r.error) || '删除失败'); return; }
+      await loadSettings(); await loadFolders(); await loadStats();
+    }catch(e){ alert('删除失败：' + e.message); }
+  };
+  const browseBtn = tr.querySelector('button.browse');
+  if(browseBtn) browseBtn.onclick = async () => {
+    const old = browseBtn.textContent;
+    browseBtn.disabled = true;
+    browseBtn.textContent = '等待选择…';
+    try{
+      const r = await api('/api/browse-folder', {method:'POST'});
+      if(r && r.ok && r.path){ tr.querySelector('.path').value = r.path; }
+      else if(r && r.error){ alert('选择文件夹未完成（' + (r.stage||'?') + '）：' + r.error); }
+      else { alert('选择文件夹未完成：未返回路径（' + JSON.stringify(r) + '）'); }
+    }catch(e){ alert('选择文件夹失败：' + e.message); }
+    finally{ browseBtn.disabled = false; browseBtn.textContent = old; }
+  };
+  return tr;
+}
+function renderRoots(){
+  const roots = state.roots || {};
+  $('gameRoot').value = roots.gameRoot || '';
+  $('modRootsBody').innerHTML = '';
+  (roots.modRoots||[]).forEach(e => $('modRootsBody').appendChild(rootRow('mods', e)));
+  $('cardRootsBody').innerHTML = '';
+  (roots.cardRoots||[]).forEach(e => $('cardRootsBody').appendChild(rootRow('cards', e)));
+  wireDrag('cardRootsBody');
+}
+/* 卡片附加库支持上下拖动排序——预置主库（锁定行）不参与，也不能被拖到前面 */
+function wireDrag(tbodyId){
+  const tbody = $(tbodyId);
+  if(!tbody) return;
+  let dragRow = null;
+  const keepAfterLocked = row => {
+    const rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+    let lastLocked = -1;
+    rows.forEach((r,i) => { if(r.dataset.locked === '1') lastLocked = i; });
+    if(lastLocked >= 0 && rows.indexOf(row) <= lastLocked){ tbody.insertBefore(row, rows[lastLocked].nextSibling); }
+    rows.forEach((r,i) => { r.dataset.order = String(i); });
+  };
+  Array.prototype.slice.call(tbody.querySelectorAll('tr')).forEach(tr => {
+    if(tr.dataset.locked === '1') return;
+    tr.draggable = true;
+    tr.addEventListener('dragstart', e => { dragRow = tr; tr.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+    tr.addEventListener('dragend', () => { tr.classList.remove('dragging'); dragRow = null; });
+    tr.addEventListener('dragover', e => {
+      if(!dragRow || dragRow === tr) return;
+      e.preventDefault();
+      const box = tr.getBoundingClientRect();
+      const after = (e.clientY - box.top) > box.height / 2;
+      tbody.insertBefore(dragRow, after ? tr.nextSibling : tr);
+      keepAfterLocked(dragRow);
+    });
+    tr.addEventListener('drop', e => e.preventDefault());
+  });
+  tbody.ondrop = async e => {
+    e.preventDefault();
+    if(!dragRow) return;
+    dragRow = null;
+    await saveSettings();   /* 落盘顺序：行序即配置顺序，文件夹视图组序随之更新 */
+    await loadFolders();
+  };
+}
+function collectRoots(bodyId){
+  const out = [];
+  document.querySelectorAll('#'+bodyId+' tr').forEach(tr => {
+    const off = tr.dataset.offline === '1';
+    const pathInput = tr.querySelector('.path');
+    const noteInput = tr.querySelector('.note');
+    /* 离线行显示的是备注框——路径从 dataset 取（它是库身份键，不随备注变） */
+    const path = off ? (tr.dataset.path || '').trim() : (pathInput ? pathInput.value.trim() : '');
+    if(!path) return;
+    out.push({ tier: parseInt(tr.dataset.tier,10), path,
+      recurse: tr.querySelector('.recurse').checked,
+      readOnly: tr.querySelector('.readOnly').checked,
+      offline: off,
+      note: noteInput ? noteInput.value.trim() : '',
+      replacedFrom: tr.dataset.orig || '' });
+  });
+  return out;
+}
+async function loadSettings(){
+  const s = await api('/api/settings');
+  state.roots = s.roots || {gameRoot:'', modRoots:[], cardRoots:[]};
+  renderRoots();
+  updateSettingsHint();
+  $('verInfo').textContent = 'v' + (s.version || '?');
+  applyAuth(s.editAuthorized === true);
+  $('dbPath').textContent = '面板 v' + (s.version || '?') + ' · 数据库：' + (s.dbPath || '');
+}
+async function saveSettings(collapse, quiet){
+  try{
+    await syncMainRoots($('gameRoot').value);   /* 保存前对齐：4 条级别 1 = 游戏根派生值 */
+    const body = { gameRoot: $('gameRoot').value.trim(), modRoots: collectRoots('modRootsBody'), cardRoots: collectRoots('cardRootsBody') };
+    const r = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    state.roots = r.roots || state.roots;
+    renderRoots();
+    updateSettingsHint();
+    if(collapse) $('settingsCard').classList.add('hidden');   /* 点「保存配置」才收起——拖拽排序触发的保存不收起 */
+    if(!quiet) $('btnSave').textContent = '已保存';
+    if(!quiet) setTimeout(()=> $('btnSave').textContent = '保存配置', 1200);
+    if(!quiet && r.warnings && r.warnings.length) alert('保存完成，但有提示：\n' + r.warnings.join('\n'));
+    await loadStats();
+    return true;
+  }catch(e){ alert('保存失败：' + e.message); return false; }
+}
+/* 库根未设置——顶部按钮闪红 + 提示「第一次使用请先设置」 */
+function updateSettingsHint(){
+  const g = (state.roots && state.roots.gameRoot) ? String(state.roots.gameRoot).trim() : '';
+  const set = g.length > 0;
+  $('btnSettings').textContent = set ? '库根设置' : '库根设置-第一次使用时请先设置';
+  $('btnSettings').classList.toggle('need-set', !set);
+}
+/* 游戏根与 4 条级别 1 强绑定——按游戏根取派生路径，就地刷新锁定行（不落盘，落盘走「保存配置」） */
+async function syncMainRoots(gameRoot){
+  const raw = (gameRoot === undefined || gameRoot === null) ? $('gameRoot').value : String(gameRoot);
+  const r = await api('/api/roots/recommend?gameRoot=' + encodeURIComponent(raw.trim()));
+  applyPresetRows('modRootsBody', 'mods', r.modRoots);
+  applyPresetRows('cardRootsBody', 'cards', r.cardRoots);
+}
+/* 只重建锁定行（4 条级别 1）——使用者添加的条目与缓存库槽位保持原样 */
+function applyPresetRows(bodyId, kind, list){
+  const body = $(bodyId);
+  Array.prototype.slice.call(body.querySelectorAll('tr')).forEach(tr => { if(tr.dataset.locked === '1') tr.remove(); });
+  let cursor = null;
+  (list || []).forEach(e => {
+    if(!e.locked) return;
+    const row = rootRow(kind, e);
+    body.insertBefore(row, cursor ? cursor.nextSibling : body.firstChild);
+    cursor = row;
+  });
+}
+/* 选定游戏根——写进地址框并立即刷新 4 条级别 1 */
+async function pickGameRoot(){
+  const btn = $('btnPickGameRoot');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '等待选择…';
+  try{
+    const r = await api('/api/browse-folder', {method:'POST'});
+    if(r && r.ok && r.path){
+      $('gameRoot').value = r.path;
+      await syncMainRoots(r.path);
+    }
+    else if(r && r.error){ alert('选择文件夹未完成（' + (r.stage||'?') + '）：' + r.error); }
+    else { alert('选择文件夹未完成：未返回路径（' + JSON.stringify(r) + '）'); }
+  }catch(e){ alert('选择文件夹失败：' + e.message); }
+  finally{ btn.disabled = false; btn.textContent = old; }
+}
+
+/* ---------- 统计 ---------- */
+async function loadStats(){
+  const s = await api('/api/stats');
+  $('stats').innerHTML = [
+    ['卡片', fmt(s.cards), ''], ['主库就绪', fmt(s.cardsReady), 'g'],
+    ['黄 · 仅缓存', fmt(s.yellow), 'y'], ['灰 · 仅冷冻', fmt(s.red), 'k'], ['红 · 缺失', fmt(s.black), 'r', 'miss'],
+    ['引用（去重）', fmt(s.refs), ''],
+    ['mod 主库', fmt(s.modsTier1), ''], ['mod 缓存', fmt(s.modsTier2), ''], ['mod 冷冻', fmt(s.modsTier3), ''],
+    ['重复副本', fmt(s.dupGroups), '', 'dup', (s.dupPending > 0 ? `<span class="statSub y">${fmt(s.dupPending)} 待确认</span>` : '<span class="statSub">全部已确认</span>')], ['未引用 mod', fmt(s.unusedMods), '', 'unused'],
+    ['待办', (s.todos > 0 ? fmt(s.todos) + ' 条消息' : '无'), (s.todos > 0 ? 'y' : ''), 'todo']
+  ].map(([k,v,c,open,sub]) => {
+    let tip = '';
+    if(open === 'dup') tip = '点击查看同 guid 的多份副本（待确认的在上，已确认的沉底）';
+    else if(open === 'unused') tip = '点击查看全部未被任何卡片引用的 mod';
+    else if(open === 'miss') tip = '点击查看缺失清单（全库皆无的 mod，按被引用卡片数排序）';
+    else if(open === 'todo') tip = '点击查看待办清单（软件认为需要你处理的事）';
+    return `<div class="stat ${c}"${open?` data-open="${open}" title="${tip}"`:''}><small>${k}</small><b>${v}</b>${sub||''}</div>`;
+  }).join('');
+}
+
+/* ---------- 文件夹分组（按库根分栏，每组含「全部文件夹」） ---------- */
+async function loadFolders(){
+  const list = await api('/api/folders');
+  const bar = $('folderBar');
+  bar.innerHTML = '';
+  const groups = [];
+  list.forEach(f => {
+    let g = null;
+    for(let i=0;i<groups.length;i++){ if(groups[i].root === f.rootPath){ g = groups[i]; break; } }
+    if(!g){ g = {root:f.rootPath, items:[]}; groups.push(g); }
+    g.items.push(f);
+  });
+  const cardRoots = (state.roots && state.roots.cardRoots) ? state.roots.cardRoots : [];
+  const order = cardRoots.map(r => r.path);
+  const tierOf = {};
+  const offOf = {};
+  cardRoots.forEach(r => { tierOf[(r.path||'').toLowerCase()] = r.tier; offOf[(r.path||'').toLowerCase()] = !!r.offline; });
+  groups.sort((a,b) => {
+    let ia = order.indexOf(a.root), ib = order.indexOf(b.root);
+    if(ia < 0) ia = 999;
+    if(ib < 0) ib = 999;
+    return ia - ib;
+  });
+  /* 记忆的文件夹若已不在（重扫 / 库根改了）→ 退回「全部文件夹」 */
+  if(state.root && state.folder !== null){
+    const alive = list.some(f => f.rootPath === state.root && f.folder === state.folder);
+    if(!alive){ state.folder = null; rememberFolder(); }
+  }
+  groups.forEach(g => {
+    const wrap = document.createElement('div');
+    wrap.className = 'chips';
+    const head = document.createElement('span');
+    head.className = 'dim';
+    head.style.cssText = 'font-size:12px;line-height:24px;min-width:104px';
+    /* 离线库的组标题用红色 + 「（已离线）」；附加库（卡片库根级别 ≥2）用金色 */
+    const rkey = (g.root||'').toLowerCase();
+    const rootName = (g.root||'').split('\\').pop() || g.root;
+    if(offOf[rkey]){
+      head.style.color = 'var(--red)';
+      head.textContent = rootName + '（已离线）';
+    }else{
+      if((tierOf[rkey] || 0) >= 2){ head.style.color = 'var(--gold)'; }
+      head.textContent = rootName;
+    }
+    wrap.appendChild(head);
+    const mk = (label, folder, root, extra) => {
+      const b = document.createElement('div');
+      b.className = 'chip' + ((state.folder===folder && state.root===root)?' active':'');
+      b.innerHTML = label + (extra?` <b>${extra}</b>`:'');
+      b.onclick = () => { state.folder = folder; state.root = root; state.page = 1; rememberFolder(); loadFolders(); reload(); };
+      wrap.appendChild(b);
+    };
+    mk('全部文件夹', null, g.root, '');
+    g.items.forEach(f => {
+      mk(esc(f.folder || '(根目录)'), f.folder, f.rootPath, f.count + (f.black>0 ? ' · 红' + f.black : ''));
+    });
+    bar.appendChild(wrap);
+  });
+}
+
+/* ---------- 卡片列表（边框色 = mod 引用级别） ---------- */
+function cardStateClass(c){
+  if(c.modCount === 0) return '';
+  if(c.black > 0) return 's-miss';
+  if(c.red > 0) return 's-cold';
+  if(c.yellow > 0) return 's-cache';
+  return 's-ok';
+}
+function cardHtml(c){
+  const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
+  return `<div class="item ${cardStateClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
+      <div class="meta"><div class="name">${esc(c.fileName)}</div>
+      <div class="sub">${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB</div></div></div>`;
+}
+/* 分块渲染——卡片多时不再一次性铺满 DOM（滚动到底再补一批） */
+function renderCardsChunk(){
+  const grid = $('cardsGrid');
+  if(state.rendered >= state.cards.length){ updateCardsInfo(); return; }
+  const end = Math.min(state.cards.length, state.rendered + state.batch);
+  grid.insertAdjacentHTML('beforeend', state.cards.slice(state.rendered, end).map(cardHtml).join(''));
+  state.rendered = end;
+  updateCardsInfo();
+}
+function updateCardsInfo(){
+  $('pageInfo').textContent = state.cards.length
+    ? `已显示 ${state.rendered} / 共 ${state.cards.length} 张（滚动继续加载）`
+    : '无结果';
+}
+async function loadCards(){
+  const q = $('q').value, filter = $('filter').value;
+  let url = `/api/cards?page=1&size=0&filter=${encodeURIComponent(filter)}&q=${encodeURIComponent(q)}`;
+  if(state.folder !== null && state.folder !== undefined) url += '&folder=' + encodeURIComponent(state.folder);
+  if(state.root) url += '&root=' + encodeURIComponent(state.root);
+  const data = await api(url);
+  state.cards = data; state.rendered = 0;
+  $('cardsGrid').innerHTML = data.length ? '' : '<div class="dim">无结果</div>';
+  renderCardsChunk();
+}
+
+/* ---------- mod 列表（全部行已在本地：size=0 取回全量 → 排序 / 作者筛选 / 分块渲染都在这里做） ---------- */
+const MOD_NO_AUTHOR = '（无作者）';
+const modAuthor = m => (m.author||'').trim() || MOD_NO_AUTHOR;
+const fmtSize = n => {
+  if(!n) return '-';
+  if(n < 1024) return n + ' B';
+  if(n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  if(n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
+  return (n/1073741824).toFixed(2) + ' GB';
+};
+async function loadMods(){
+  const q = $('q').value, filter = $('filter').value;
+  const f = ['tier1','tier2','tier3','dup','unused','used'].includes(filter) ? filter : 'all';
+  $('modsBody').innerHTML = '<tr><td colspan="10" class="dim">加载中…</td></tr>';
+  const data = await api(`/api/mods?page=1&size=0&filter=${f}&q=${encodeURIComponent(q)}`);
+  state.modRows = data || [];
+  renderMods(true);
+  updateAuthorMark();
+}
+/* 排序 + 作者筛选（模糊：含即可，不区分大小写）→ 返回筛选排序后的行 */
+function modsFiltered(){
+  let list = state.modRows || [];
+  if(state.modAuthors && state.modAuthors.length){
+    const set = new Set(state.modAuthors);
+    list = list.filter(m => set.has(modAuthor(m)));
+  }
+  const key = state.modSort.key === 'size' ? (m => m.size || 0) : (m => m.used || 0);
+  const dir = state.modSort.dir === 'asc' ? 1 : -1;
+  const arr = list.slice();
+  arr.sort((a,b) => {
+    const d = key(a) - key(b);
+    if(d) return d * dir;
+    const ga = a.guid || '', gb = b.guid || '';
+    return ga < gb ? -1 : (ga > gb ? 1 : 0);
+  });
+  return arr;
+}
+function modRow(m){
+  const dup = m.dupCount > 1 ? '<b style="color:var(--yellow)">' + m.dupCount + '</b>' : m.dupCount;
+  const old = m.hasOld ? '<b style="color:var(--yellow)" title="存在判为旧版的副本：' + esc(m.oldName||'') + '">有旧版</b>' : '';
+  return `<tr data-guid="${esc(m.guid)}" title="点击查看引用卡片"><td class="mono" title="${esc(m.guid)}">${esc(m.guid)}</td>
+    <td title="${esc(m.name||'')}">${esc(m.name||'')}</td><td title="${esc(m.author||'')}">${esc(m.author||'')}</td>
+    <td class="dim">${esc(m.version||'')}</td>
+    <td>${tierName(m.tier)}${inOfflineRoot(m.filePath)?' <b class="offmark" title="这份副本所在的库已离线——内容取数据库，不再随扫描更新">离线</b>':''}</td><td class="mono dim reveal" data-path="${esc(m.filePath||'')}" title="在资源管理器中打开并选中：${esc(m.filePath||m.fileName||'')}">${esc(m.fileName||'')}</td>
+    <td style="text-align:right">${dup}</td><td>${old}</td>
+    <td style="text-align:right">${fmt(m.used)}</td><td class="dim" style="text-align:right">${fmtSize(m.size)}</td></tr>`;
+}
+/* mod 的副本落在离线库（冷冻库）里——标记用黑色（离线库内容取数据库，不随扫描更新） */
+function inOfflineRoot(path){
+  const list = (state.roots || {}).modRoots || [];
+  if(!path) return false;
+  const p = String(path).toLowerCase();
+  for(let i=0;i<list.length;i++){
+    const r = list[i];
+    if(!r.offline) continue;
+    const base = (r.path||'').toLowerCase();
+    if(base && p.indexOf(base) === 0) return true;
+  }
+  return false;
+}
+/* 分块渲染：上万行不一次铺满 DOM（滚到底自动补下一批） */
+function renderMods(reset){
+  if(reset !== false){
+    state.modView = modsFiltered();
+    state.modShown = 0;
+    $('modsBody').innerHTML = '';
+  }
+  const list = state.modView || [];
+  if(reset === false && state.modShown >= list.length){
+    return;
+  }
+  if(!list.length){
+    $('modsBody').innerHTML = '<tr><td colspan="10" class="dim">没有符合条件的 mod</td></tr>';
+    state.modShown = 0;
+  }else{
+    const end = Math.min(list.length, state.modShown + state.modBatch);
+    const html = list.slice(state.modShown, end).map(modRow).join('');
+    if(state.modShown === 0){ $('modsBody').innerHTML = html; }
+    else{ $('modsBody').insertAdjacentHTML('beforeend', html); }
+    state.modShown = end;
+  }
+  $('pageInfo').textContent = `mod：共 ${fmt(list.length)} 条（已渲染 ${fmt(state.modShown)}）`;
+  markSort();
+}
+/* 表头排序指示（▲升 / ▼降） */
+function markSort(){
+  document.querySelectorAll('#modsTable th[data-sort]').forEach(th => {
+    const on = th.dataset.sort === state.modSort.key;
+    th.innerHTML = esc(th.dataset.label) + (on ? ` <span class="arrow">${state.modSort.dir === 'asc' ? '▲' : '▼'}</span>` : '');
+  });
+}
+function toggleSort(key){
+  if(state.modSort.key === key){
+    state.modSort.dir = state.modSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.modSort.key = key;
+    state.modSort.dir = 'desc';
+  }
+  renderMods(true);
+}
+/* ---------- 作者筛选浮层（Excel 式：搜索框 + 勾选清单 + 文字按钮）
+     清单来自 /api/authors = 库侧聚合表 mod_author（不临时读 mod 行）· 按 mod 数量从多到少 ---------- */
+const auLabel = a => ((a.author||'').trim() || MOD_NO_AUTHOR);
+function auHits(){
+  const q = $('auQ').value.trim().toLowerCase();
+  const all = state.auAll || [];
+  if(!q) return all;
+  return all.filter(a => auLabel(a).toLowerCase().indexOf(q) >= 0);
+}
+function renderAuList(){
+  const all = state.auAll || [];
+  const hit = auHits();
+  const pend = state.auPending || new Set();
+  $('auList').innerHTML = hit.length ? hit.map(a => {
+    const name = auLabel(a);
+    return `<label data-name="${esc(name)}" title="${esc(name)}"><input type="checkbox" class="auchk" ${pend.has(name)?'checked':''}><span class="au-name">${esc(name)}</span><span class="au-n">${fmt(a.count)} 个</span></label>`;
+  }).join('') : '<div class="dim" style="padding:6px">没有匹配的作者</div>';
+  auFoot(hit.length);
+}
+/* 底部计数与按钮文案（勾选时不重渲染清单——重渲染会丢滚动位置） */
+function auFoot(hitCount){
+  const pend = state.auPending || new Set();
+  $('auInfo').textContent = `已选 ${pend.size} · 命中 ${hitCount}/${(state.auAll||[]).length} 位`;
+  $('auApply').textContent = pend.size ? `只看选中（${pend.size}）` : '显示全部';
+}
+async function openAuthorFilter(){
+  state.auPending = new Set(state.modAuthors || []);
+  $('auQ').value = '';
+  $('auList').innerHTML = '<div class="dim" style="padding:6px">读取作者清单…</div>';
+  const p = $('auPanel'), btn = $('btnAuthorFilter');
+  p.classList.remove('hidden');
+  const r = btn.getBoundingClientRect();
+  const w = p.offsetWidth || 380;
+  let left = r.left - 80;
+  if(left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if(left < 8) left = 8;
+  p.style.left = left + 'px';
+  p.style.top = (r.bottom + 4) + 'px';
+  try{
+    state.auAll = await api('/api/authors');
+    renderAuList();
+    $('auQ').focus();
+  }catch(e){
+    $('auList').innerHTML = `<div class="dim" style="padding:6px">作者清单读取失败：${esc(e.message)}</div>`;
+  }
+}
+function closeAuthorFilter(){ $('auPanel').classList.add('hidden'); }
+function applyAuthorFilter(){
+  const sel = Array.from(state.auPending || new Set());
+  state.modAuthors = sel;
+  closeAuthorFilter();
+  updateAuthorMark();
+  renderMods(true);
+}
+function updateAuthorMark(){
+  const sel = state.modAuthors || [];
+  $('btnAuthorFilter').classList.toggle('on', sel.length > 0);
+  $('btnAuthorFilter').title = sel.length ? ('已按作者筛选：' + sel.join(' / ') + '（点开可改）') : '按作者筛选';
+  $('authorMark').textContent = sel.length ? `（筛 ${sel.length}）` : '';
+}
+
+/* ---------- 缺失清单（全量 · 按被引用卡片数倒序 · 每条直接列出缺它的卡） ---------- */
+const MZ_PER = 12;
+async function loadMissing(){
+  $('missingList').innerHTML = '<div class="dim">加载中…</div>';
+  try{
+    const d = await api(`/api/missing?per=${MZ_PER}`);
+    const rows = d.items || [];
+    $('missingList').innerHTML = rows.length
+      ? rows.map(mzHtml).join('')
+      : '<div class="dim">没有全库皆无的 mod</div>';
+    $('pageInfo').textContent = `缺失 ${d.total} 项（按被引用卡片数从多到少 · 点卡片看它的引用明细）`;
+  }catch(e){
+    $('missingList').innerHTML = `<div class="dim">加载失败：${esc(e.message)}</div>`;
+    $('pageInfo').textContent = '缺失清单加载失败';
+  }
+}
+/* 一条缺失：行头（guid + 被引用张数 + 展开钮）+ 缺它的卡片行（超过 MZ_PER 张时默认只占一行） */
+function mzHtml(row){
+  const list = row.samples || [];
+  const more = row.cards > list.length;
+  return `<div class="mz" data-guid="${esc(row.guid)}" data-cards="${row.cards}">
+    <div class="mzhead">
+      <span class="mono" title="点这里看传统的「引用卡片」弹窗">${esc(row.guid)}</span>
+      <span class="dim">被 <b>${fmt(row.cards)}</b> 张卡引用</span>
+      <span class="grow"></span>
+      ${more ? `<button class="mzbtn" data-mz="1" title="展开显示全部引用卡片">▸ 展开全部（${fmt(row.cards)}）</button>` : ''}
+    </div>
+    <div class="mzrow">${list.map(cardHtml).join('') || '<div class="dim">没有卡片引用这个 mod</div>'}</div>
+  </div>`;
+}
+/* 展开 = 取回该 guid 的全部引用卡片平铺（弹窗里那套）；收起 = 还原默认的一行 */
+async function mzToggle(box, btn){
+  const row = box.querySelector('.mzrow');
+  if(box.dataset.open === '1'){
+    row.innerHTML = box.dataset.saved || '';
+    row.classList.remove('open');
+    box.dataset.open = '';
+    btn.textContent = `▸ 展开全部（${fmt(box.dataset.cards)}）`;
+    return;
+  }
+  if(!box.dataset.saved) box.dataset.saved = row.innerHTML;
+  btn.disabled = true;
+  btn.textContent = '加载中…';
+  try{
+    const r = await api(`/api/mod/${encodeURIComponent(box.dataset.guid)}/cards?page=1&size=0`);
+    row.innerHTML = (r.items || []).map(cardHtml).join('') || '<div class="dim">没有卡片引用这个 mod</div>';
+    row.classList.add('open');
+    box.dataset.open = '1';
+    btn.textContent = '▾ 收起';
+  }catch(e){
+    btn.textContent = '加载失败';
+    alert('展开失败：' + e.message);
+  }
+  btn.disabled = false;
+}
+
+/* ---------- 反查与搬运（按级别分组可折叠 · 按行级别判定可否搬运） ---------- */
+async function openRefs(cardId, tier, lib){
+  const list = await api(`/api/card/${cardId}/refs?tier=${tier}&lib=${lib||0}`);
+  state.refs = list;
+  const scope = tier===0 ? '全部级别' : (tier===9 ? '全库皆无（红）' : tierName(tier));
+  $('mTitle').textContent = `引用明细 — ${scope} · 共 ${list.length} 项`;
+  $('mHint').textContent = '点行看「还有哪些卡用它」· 点文件名在资源管理器里定位 · 组标题可折叠';
+  renderCardInfo(cardId, lib);
+  $('mBody').innerHTML = refsHtml(list);
+  bindGroups();
+  $('mBody').querySelectorAll('.rowchk').forEach(c => c.onchange = updateSel);
+  updateSel();
+  $('overlay').classList.remove('hidden');
+}
+/* 卡片信息区（文件名 / 路径 / 四色计数 + 「编辑卡片」入口——未授权时先走二次确认） */
+async function renderCardInfo(cardId, lib){
+  const box = $('mCardInfo');
+  box.innerHTML = '<span class="dim">加载卡片信息…</span>';
+  try{
+    const c = await api(`/api/card/${cardId}?lib=${lib||0}`);
+    box.innerHTML = `<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:280px">
+        <div><b>${esc(c.fileName)}</b> <span class="dim">${esc(c.cardType||'')}</span></div>
+        <div class="dim mono" style="margin-top:2px">${esc(c.rootPath||'')}${c.folder?('\\'+esc(c.folder)):''}</div>
+        <div class="dim" style="margin-top:2px">${(c.size/1048576).toFixed(1)} MB · 改于 ${esc(c.mtime||'')} · 引用 ${c.modCount} 个 mod</div>
+      </div>
+      <div style="white-space:nowrap">
+        <span class="mk g">绿 ${c.green}</span> <span class="mk y">黄 ${c.yellow}</span> <span class="mk k">灰 ${c.red}</span> <span class="mk r">红 ${c.black}</span>
+      </div>
+      <div><button id="btnEditCard">编辑卡片</button> <button id="btnCardOld">寻找旧版</button></div>
+    </div>`;
+    $('btnEditCard').onclick = () => requestEdit(cardId, lib);
+    $('btnCardOld').onclick = () => openOld(cardId, lib);
+  }catch(e){
+    box.innerHTML = '<span class="dim">卡片信息加载失败：' + esc(e.message) + '</span>';
+  }
+}
+/* 引用明细渲染——按级别分组，组标题可折叠 */
+function refsHtml(list){
+  const order = [1,2,3,9];
+  const groups = {};
+  list.forEach((r,i) => {
+    const t = r.tier;
+    if(!groups[t]) groups[t] = [];
+    groups[t].push({r:r, i:i});
+  });
+  let html = '';
+  order.forEach(t => {
+    const g = groups[t];
+    if(!g || !g.length) return;
+    const label = t===9 ? '缺失（全库皆无）' : tierName(t);
+    html += `<tr class="grp" data-grp="${t}" title="点击折叠 / 展开"><td colspan="5" style="background:#22262d;cursor:pointer"><b>${label}</b> <span class="dim">${g.length} 项 ▾</span></td></tr>`;
+    g.forEach(x => {
+      const r = x.r;
+      const movable = (t === 2 || t === 3);
+      const tierCell = t===9 ? '<b style="color:var(--red)">无</b>'
+        : (t===3 ? '<span style="color:var(--gray)">冷冻库</span>' : tierName(t));
+      html += `<tr class="g-${t}" data-guid="${esc(r.guid)}" title="点击看还有哪些卡用它">
+        <td><input type="checkbox" class="rowchk" data-i="${x.i}" ${movable?'checked':''} ${movable?'':'disabled'}></td>
+        <td class="mono">${esc(r.guid)}</td><td class="dim">${esc(r.property||'')}</td>
+        <td class="mono dim reveal" data-path="${esc(r.filePath||'')}" title="在资源管理器中打开并选中">${esc(r.fileName||'')}</td>
+        <td>${tierCell}</td></tr>`;
+    });
+  });
+  return html || '<tr><td colspan="5" class="dim">这张卡没有 mod 引用</td></tr>';
+}
+function bindGroups(){
+  $('mBody').querySelectorAll('tr.grp').forEach(el => {
+    el.onclick = () => {
+      const t = el.dataset.grp;
+      const folded = el.dataset.folded !== '1';
+      el.dataset.folded = folded ? '1' : '';
+      $('mBody').querySelectorAll('tr.g-'+t).forEach(x => x.classList.toggle('hidden', folded));
+      const sp = el.querySelector('span');
+      if(sp) sp.textContent = sp.textContent.replace(folded ? '▾' : '▸', folded ? '▸' : '▾');
+    };
+  });
+}
+function updateSel(){
+  const n = document.querySelectorAll('#mBody .rowchk:checked').length;
+  $('mSel').textContent = '已选 ' + n;
+  $('btnMove').disabled = (n === 0);
+  $('btnMove').textContent = n > 0 ? ('搬入主库（' + n + '）') : '搬入主库';
+}
+async function doMove(){
+  const byTier = {};
+  document.querySelectorAll('#mBody .rowchk:checked').forEach(c => {
+    const r = state.refs[parseInt(c.dataset.i,10)];
+    if(!r || !r.guid) return;
+    if(r.tier !== 2 && r.tier !== 3) return;
+    if(!byTier[r.tier]) byTier[r.tier] = [];
+    byTier[r.tier].push(r.guid);
+  });
+  const tiers = Object.keys(byTier);
+  if(!tiers.length) return;
+  let total = 0;
+  tiers.forEach(t => total += byTier[t].length);
+  if(!confirm(`将 ${total} 个 mod 搬入主库？（缓存库为移动，冷冻库为复制）`)) return;
+  let moved = 0, skipped = 0, errs = [];
+  for(const t of tiers){
+    const r = await api('/api/move', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({guids: byTier[t], fromTier: parseInt(t,10), toTier:1})});
+    moved += r.moved.length; skipped += r.skipped.length; errs = errs.concat(r.errors||[]);
+  }
+  alert(`搬运完成：成功 ${moved} · 跳过 ${skipped} · 失败 ${errs.length}\n` + errs.slice(0,5).join('\n'));
+  $('overlay').classList.add('hidden');
+  await loadStats(); await loadFolders(); await reload();
+}
+
+/* ---------- 未被任何卡片引用的 mod（统计卡点入 · 一键移到缓存库） ---------- */
+let uvState = { all:[], shown:0, batch:200 };
+
+async function openUnused(){
+  uvState = { all:[], shown:0, batch:200 };
+  $('uvQ').value = '';
+  $('uvInfo').textContent = '加载中…';
+  $('uvBody').innerHTML = '<tr><td colspan="7" class="dim">加载中…</td></tr>';
+  $('ovUnused').classList.remove('hidden');
+  try{
+    const list = await api('/api/mods?page=1&size=0&filter=unused&q=');
+    /* 口径：仅主库（未引用 ∧ 最优副本在主库）；按字节数从大到小排——先搬大的，收益先兑现 */
+    uvState.all = (list || []).map(m => { m.sel = true; return m; });
+    uvState.all.sort((a,b) => (b.size||0) - (a.size||0));
+    uvState.all.forEach((m,i) => { m._i = i; });
+    renderUnused(true);
+  }catch(e){
+    $('uvInfo').textContent = '';
+    $('uvBody').innerHTML = `<tr><td colspan="7" class="dim">加载失败：${esc(e.message)}</td></tr>`;
+  }
+}
+function uvFiltered(){
+  const q = $('uvQ').value.trim().toLowerCase();
+  if(!q) return uvState.all;
+  return uvState.all.filter(m => (m.guid||'').toLowerCase().indexOf(q) >= 0
+    || (m.name||'').toLowerCase().indexOf(q) >= 0
+    || (m.fileName||'').toLowerCase().indexOf(q) >= 0);
+}
+function uvRow(m){
+  const movable = (m.tier === 1);
+  const tierCell = movable ? '主库' : (m.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
+  const size = m.size ? (m.size/1048576).toFixed(1) + ' MB' : '';
+  return `<tr><td><input type="checkbox" class="uvchk" data-i="${m._i}" ${(movable && m.sel) ? 'checked' : ''} ${movable ? '' : 'disabled'}></td>
+    <td class="mono">${esc(m.guid)}</td><td>${esc(m.name||'')}</td><td>${tierCell}</td>
+    <td class="mono dim">${esc(m.fileName||'')}</td><td class="dim">${size}</td><td>${fmt(m.dupCount)}</td></tr>`;
+}
+function renderUnused(reset){
+  const list = uvFiltered();
+  if(reset){ uvState.shown = 0; $('uvBody').innerHTML = ''; }
+  if(!list.length){
+    $('uvBody').innerHTML = '<tr><td colspan="7" class="dim">没有未被引用的 mod</td></tr>';
+    $('uvInfo').textContent = '共 0 条';
+    updateUvSel();
+    return;
+  }
+  const end = Math.min(list.length, uvState.shown + uvState.batch);
+  const html = list.slice(uvState.shown, end).map(uvRow).join('');
+  if(uvState.shown === 0) $('uvBody').innerHTML = html;
+  else $('uvBody').insertAdjacentHTML('beforeend', html);
+  uvState.shown = end;
+  $('uvInfo').textContent = `仅主库 · 共 ${list.length} 条（已显示 ${uvState.shown}）· 按大小从大到小`;
+  updateUvSel();
+}
+function updateUvSel(){
+  const n = uvState.all.filter(m => m.sel).length;
+  $('uvSel').textContent = '已选 ' + n;
+  $('btnUvMove').disabled = (n === 0);
+}
+/* 搬到缓存库 = 后台任务（逐条约数秒）——页面关掉也继续，重开可见进度与结果 */
+async function startMoveUnused(){
+  const picked = uvState.all.filter(m => m.sel).map(m => m.guid);
+  if(!picked.length){ alert('没有勾选任何 mod'); return; }
+  if(!confirm(`把 ${picked.length} 个「主库中未被任何卡片引用」的 mod 移到缓存库（mods_cache）？\n\n· 主库是游戏实际读取的库——移出后游戏不再加载它们\n· 搬运在后台进行，每个文件约数秒（磁盘 / 杀软开销）；关掉页面也会继续，随时可停\n· 随时可用「搬入主库」搬回`)) return;
+  try{
+    const r = await api('/api/move-unused/start', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({guids: picked})});
+    if(!r.ok){ alert(r.error || '启动失败'); return; }
+  }catch(e){ alert('启动失败：' + e.message); return; }
+  $('ovUnused').classList.add('hidden');
+  $('moveFloat').classList.remove('hidden');
+  pollMove();
+}
+let moveTimer = null;
+async function pollMove(){
+  if(moveTimer) clearInterval(moveTimer);
+  const tick = async () => {
+    let s = null;
+    try{ s = await api('/api/move-unused/status'); }catch(e){ return; }
+    if(!s) return;
+    const total = s.total || 0, done = s.done || 0;
+    $('moveInfo').textContent = `${s.running ? '进行中' : '已结束'} · ${s.message || ''} · ${done} / ${total}`
+      + ` · 成功 ${s.moved||0} · 跳过 ${s.skipped||0} · 失败 ${s.failed||0}`
+      + (s.running && s.current ? ` · 当前 ${s.current}` : '');
+    $('moveBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
+    $('moveErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,5).join(' | ') : '';
+    $('btnMoveStop').disabled = !s.running;
+    if(!s.running){
+      clearInterval(moveTimer); moveTimer = null;
+      await loadStats(); await loadFolders(); await reload();
+      setTimeout(() => $('moveFloat').classList.add('hidden'), 20000);
+    }
+  };
+  await tick();
+  moveTimer = setInterval(tick, 1500);
+}
+/* 页面重开时：任务还在跑就把进度窗拉回来 */
+async function restoreMove(){
+  try{
+    const s = await api('/api/move-unused/status');
+    if(s && s.running){ $('moveFloat').classList.remove('hidden'); pollMove(); }
+  }catch(e){}
+}
+
+/* ---------- 重复副本（统计卡点入 · 人工筛旧版 → 移到缓存库 + .old + 新旧版本记录） ---------- */
+let dupState = { all:[], shown:0, batch:60, olds:{}, order:null };
+
+async function openDup(){
+  dupState = { all:[], shown:0, batch:60, olds:{}, order:null };
+  $('dupQ').value = '';
+  $('dupInfo').textContent = '加载中…（逐份读 manifest）';
+  $('dupFoot').textContent = '';
+  $('dupBody').innerHTML = '<tr><td colspan="7" class="dim">加载中…</td></tr>';
+  $('ovDup').classList.remove('hidden');
+  await loadDup();
+}
+async function loadDup(){
+  try{
+    const r = await api('/api/dup');
+    dupState.all = r.items || [];
+    dupState.olds = {};
+    (r.olds || []).forEach(o => { dupState.olds[(o.oldPath||'').toLowerCase()] = o; });
+    renderDup(true);
+  }catch(e){
+    $('dupInfo').textContent = '';
+    $('dupBody').innerHTML = `<tr><td colspan="7" class="dim">加载失败：${esc(e.message)}</td></tr>`;
+  }
+}
+function dupFiltered(){
+  const q = $('dupQ').value.trim().toLowerCase();
+  let list = dupState.all;
+  if(q){
+    list = list.filter(g => {
+      if((g.guid||'').toLowerCase().indexOf(q) >= 0) return true;
+      return (g.files||[]).some(f => (f.fileName||'').toLowerCase().indexOf(q) >= 0
+        || (f.name||'').toLowerCase().indexOf(q) >= 0
+        || (f.version||'').toLowerCase().indexOf(q) >= 0
+        || (f.author||'').toLowerCase().indexOf(q) >= 0);
+    });
+  }
+  /* 排序只在本页打开时确定一次——操作后不重排，用户能看到刚处理那组的原位变化（否则点完列表就跳走，像没反应） */
+  if(!dupState.order){
+    const pend = list.filter(dupPending);
+    const done = list.filter(g => !dupPending(g));
+    dupState.order = pend.concat(done).map(g => g.guid);
+  }
+  const idx = {};
+  for(let i = 0; i < dupState.order.length; i++) idx[dupState.order[i]] = i;
+  return list.slice().sort((a,b) => {
+    const ia = idx[a.guid] === undefined ? 1e9 : idx[a.guid];
+    const ib = idx[b.guid] === undefined ? 1e9 : idx[b.guid];
+    return ia - ib;
+  });
+}
+/* 组内非旧版副本数（≥2 = 待确认——需要人工指定保留版本） */
+function dupLive(g){ return (g.files||[]).filter(f => !f.isOld).length; }
+function dupPending(g){ return dupLive(g) >= 2; }
+/* 每行的主操作：非旧版 → 「指定这个版本」（已是唯一非旧版的主库版本则不出按钮）；旧版 → 换用 / 正名 */
+function dupBtns(g, f){
+  const isOld = f.isOld;
+  const gid = esc(g.guid), path = esc(f.filePath||'');
+  if(!isOld){
+    if(f.tier === 1 && dupLive(g) <= 1){
+      return '<span class="dim">当前版本</span>';
+    }
+    return `<button data-act="keep" data-guid="${gid}" data-path="${path}" title="这一份成为主库当前版本；同 guid 其余非旧版副本自动判为旧版并移入缓存库">指定这个版本</button>`;
+  }
+  if(f.tier !== 1 && g.mainCount >= 1){
+    return `<button data-act="swap" data-guid="${gid}" data-path="${path}" title="与主库当前版本完全互换（位置 + 名字）">换用此版本</button>`;
+  }
+  if(f.tier !== 1){
+    return `<button data-act="promote" data-guid="${gid}" data-path="${path}" title="主库已无该 mod——搬入并去掉 .old 段">正名搬入主库</button>`;
+  }
+  return '';
+}
+function dupFileRow(g, f){
+  const size = f.size ? (f.size/1048576).toFixed(1) + ' MB' : '';
+  const ver = f.version ? esc(f.version) : '<span class="dim">—</span>';
+  const author = f.author ? esc(f.author) : '<span class="dim">—</span>';
+  const reg = dupState.olds[(f.filePath||'').toLowerCase()];
+  let tags = '';
+  if(f.isOld) tags += ' <span class="mk y">旧版</span>';
+  if(reg) tags += ' <span class="dim" title="已登记旧版：新版 ' + esc(reg.newName||'') + ' · ' + esc(reg.newVersion||'') + '">已登记</span>';
+  if(f.error) tags += ' <span class="mk r" title="' + esc(f.error) + '">读不到</span>';
+  const tierCell = f.tier === 1 ? '主库' : (f.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
+  const root = (f.rootPath||'').split('\\').pop() || '';
+  return `<tr class="dupfile" data-guid="${esc(g.guid)}">
+    <td>${tierCell} <span class="dim" style="font-size:11px">${esc(root)}</span></td>
+    <td class="mono">${esc(f.fileName||'')}${tags}</td>
+    <td>${ver}</td><td>${author}</td><td class="dim">${size}</td><td class="dim">${esc(f.mtime||'')}</td>
+    <td>${dupBtns(g, f)}</td></tr>`;
+}
+function renderDup(reset){
+  const list = dupFiltered();
+  if(reset){ dupState.shown = 0; $('dupBody').innerHTML = ''; }
+  if(!list.length){
+    $('dupBody').innerHTML = '<tr><td colspan="7" class="dim">没有重复副本</td></tr>';
+    $('dupInfo').textContent = '共 0 组';
+    return;
+  }
+  const end = Math.min(list.length, dupState.shown + dupState.batch);
+  const firstDone = list.findIndex(g => !dupPending(g));
+  let html = '';
+  for(let i = dupState.shown; i < end; i++){
+    const g = list[i];
+    const name = (g.files && g.files[0] && g.files[0].name) ? g.files[0].name : '';
+    if(i === firstDone){
+      html += `<tr class="grp"><td colspan="7" style="background:#1b1f24" class="dim">— 已确认（无需处理，共 ${list.length - firstDone} 组）—</td></tr>`;
+    }
+    const mark = dupPending(g) ? '' : ' <span class="dim">· 已确认</span>';
+    html += `<tr class="grp"><td colspan="7" style="background:#22262d"><b class="mono">${esc(g.guid)}</b> <span class="dim">${esc(name)}</span> · ${g.files.length} 份（主库 ${g.mainCount}）${mark}</td></tr>`;
+    html += g.files.map(f => dupFileRow(g, f)).join('');
+  }
+  if(dupState.shown === 0) $('dupBody').innerHTML = html;
+  else $('dupBody').insertAdjacentHTML('beforeend', html);
+  dupState.shown = end;
+  const pending = list.filter(dupPending).length;
+  $('dupInfo').textContent = `共 ${list.length} 组 · ${pending} 待确认（已显示 ${dupState.shown}）· 已登记旧版 ${Object.keys(dupState.olds).length} 条`;
+}
+/* 动作：指定这个版本 / 换用此版本 / 正名搬入主库（指定版本不弹确认框——声明写在弹窗上方） */
+async function doDupOp(act, guid, path, tier, btn){
+  let url = '/api/mod/keep-version', body = {guid:guid, path:path}, ask = '';
+  if(act === 'keep'){
+    ask = '';
+  } else if(act === 'swap'){
+    url = '/api/mod/swap';
+    ask = '把这一份与主库当前版本完全互换（位置 + 名字）？\n\n· 这一份正名进主库；主库那份加 .old 段移到缓存库';
+  } else if(act === 'promote'){
+    url = '/api/mod/promote';
+    ask = '把这份旧版搬入主库并正名（去掉 .old 段）？\n\n· 仅当主库当前没有该 mod 的版本';
+  } else if(act === 'move'){
+    url = '/api/move';
+    body = {guids:[guid], fromTier:tier, toTier:1};
+    ask = '把这一份搬入主库？';
+  }
+  if(ask && !confirm(ask)) return;
+  /* 反馈：按钮禁用 + 文案改「处理中…」· 底部状态栏显示进度（文件搬移 + 数据库更新） */
+  const label = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '处理中…'; }
+  $('dupFoot').textContent = '处理中：' + guid + ' —— 正在搬移文件并更新数据库…';
+  let msg = '完成';
+  try{
+    const r = await api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(r && r.ok === false){ msg = '失败：' + (r.error || '未知原因'); }
+    else if(r && r.errors && r.errors.length){ msg = '失败：' + r.errors.join(' / '); }
+    else if(r && r.detail){ msg = '完成：' + r.detail; }
+    else if(r && r.moved && r.moved.length){ msg = '完成：' + r.moved[0]; }
+  }catch(e){ msg = '失败：' + e.message; }
+  await loadStats();
+  const sc = $('ovDup').querySelector('.body').scrollTop;
+  await loadDup();
+  $('ovDup').querySelector('.body').scrollTop = sc;
+  if(btn){ btn.disabled = false; btn.textContent = label; }
+  $('dupFoot').textContent = msg;
+}
+
+/* ---------- 某 mod 的引用卡片（mod 列表 / 缺失清单 / 引用明细行 点入） ---------- */
+/* ---------- mod 弹窗：信息区 + 组成档案（明确点「查看 mod 组成」才建档——读容器中央目录条目清单） ---------- */
+let compState = { guid:null, files:[], row:null, dirs:[], entries:[], view:[], shown:0, batch:200, filter:'', dirFilter:'', loaded:false, textMap:{}, u3dMap:{} };
+let mcState = { guid:null, page:1, size:0, total:0, items:[] };
+/* unity3d 贴图浮层状态：pinned = 点条目后固定（不随鼠标移走），sel = 当前放大的贴图 pathId */
+let u3dState = { pinned:false, path:null, textures:null, loading:false, sel:null };
+
+/* 取该 mod 已解析的 unity3d 条目清单（组成区「已解析」标蓝判定） */
+async function loadU3dMap(guid){
+  compState.u3dMap = {};
+  try{
+    const r = await api(`/api/mod/${encodeURIComponent(guid)}/u3dmap`);
+    if(r && r.paths) r.paths.forEach(p => { compState.u3dMap[p] = true; });
+  }catch(e){
+  }
+}
+
+/* 信息区：mod 概况（本地行数据）+ 本地副本清单（每条可在资源管理器定位）+「查看 mod 组成」按钮 */
+async function loadModInfo(guid){
+  compState = { guid:guid, files:[], row:null, dirs:[], entries:[], view:[], shown:0, batch:200, filter:'', dirFilter:'', loaded:false, textMap:{}, u3dMap:{} };
+  u3dState = { pinned:false, path:null, textures:null, loading:false, sel:null };
+  $('u3dTip').classList.add('hidden');
+  loadU3dMap(guid);
+  $('mcComp').classList.add('hidden');
+  $('mcComp').innerHTML = '';
+  $('tip').classList.add('hidden');
+  $('mcModInfo').innerHTML = '<span class="dim">读取 mod 信息…</span>';
+  compState.row = (state.modRows || []).find(m => m.guid === guid) || null;
+  try{
+    compState.files = await api(`/api/mod/${encodeURIComponent(guid)}/files`) || [];
+  }catch(e){
+    $('mcModInfo').innerHTML = `<span class="dim">mod 信息读取失败：${esc(e.message)}</span>`;
+    return;
+  }
+  renderModInfo();
+}
+function renderModInfo(){
+  const m = compState.row;
+  const head = m
+    ? `<div><b>${esc(m.name || '(无名称)')}</b> <span class="dim mono">${esc(m.guid)}</span></div>
+       <div class="dim" style="margin-top:2px">版本 ${esc(m.version || '-')} · 作者 ${esc(m.author || '-')} · 被 ${fmt(m.used)} 张卡引用 · ${fmtSize(m.size)}</div>`
+    : `<div class="mono"><b>${esc(compState.guid)}</b></div>`;
+  const files = compState.files.length
+    ? compState.files.map(f => `<div style="margin-top:3px"><span class="mk">${esc(tierName(f.tier))}</span>
+        <span class="mono reveal" data-path="${esc(f.filePath || '')}" title="在资源管理器中打开并选中">${esc(f.fileName || '')}</span>
+        <span class="dim mono" style="font-size:11px">${esc(f.filePath || '')}</span></div>`).join('')
+    : '<div class="dim" style="margin-top:3px">本地没有该 mod 的文件</div>';
+  $('mcModInfo').innerHTML = `<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:300px">${head}
+        <div class="dim" style="margin-top:4px">本地副本：</div>${files}</div>
+      <div style="white-space:nowrap"><button id="btnComp"${compState.files.length ? '' : ' disabled'} title="读容器条目清单并建档（少数需求——只在点这里时才读文件）">查看 mod 组成</button></div>
+    </div>`;
+  $('btnComp').onclick = () => loadComposition(compState.guid, true);
+}
+
+/* 组成档案：打开 mod 时先读**已有档案**直接展示（不读容器）；点「重新读取」才重读文件并更新档案 */
+async function loadCachedComposition(guid){
+  try{
+    const d = await api(`/api/mod/${encodeURIComponent(guid)}/composition`);
+    if(!d || !d.exists) return;
+    applyComposition(d);
+  }catch(e){}
+}
+async function loadComposition(guid, force){
+  const btn = $('btnComp');
+  btn.disabled = true;
+  btn.textContent = force ? '重新读取…' : '读取容器…';
+  try{
+    const d = await api('/api/mod/composition', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({guid:guid, force:!!force})});
+    applyComposition(d);
+  }catch(e){
+    $('mcComp').classList.remove('hidden');
+    $('mcComp').innerHTML = `<b style="color:var(--red)">读取失败</b> <span class="dim">${esc(e.message)}</span>`;
+  }
+  btn.disabled = false;
+  btn.textContent = '查看 mod 组成';
+}
+/* 应用档案数据（首次建档 / 复用档案 / 打开即展示 三条路径共用） */
+function applyComposition(d){
+  compState.dirs = d.dirs || [];
+  compState.entries = d.entries || [];
+  compState.textMap = {};
+  const tx = d.texts || {};
+  Object.keys(tx).forEach(k => { compState.textMap[k] = tx[k]; });
+  compState.filter = '';
+  compState.dirFilter = '';
+  compState.loaded = true;
+  $('mcComp').classList.remove('hidden');
+  renderCompHead(d);
+  renderCompRows(true);
+  bindCompHover();
+}
+function renderCompHead(d){
+  const textN = Object.keys(compState.textMap || {}).length;
+  $('mcComp').innerHTML = `<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+      <b>mod 组成</b>
+      <span class="dim mono" style="font-size:11px">${esc(d.filePath || '')}</span>
+      <span class="grow"></span>
+      <button id="btnCompReveal"${d.filePath ? '' : ' disabled'}>在资源管理器中打开</button>
+      <button id="btnCompReload"${d.filePath ? '' : ' disabled'} title="重新读取文件并更新档案">重新读取</button>
+    </div>
+    <div class="dim" style="margin-top:3px">条目 ${fmt(d.entryCount)} · 原始合计 ${fmtSize(d.totalSize)} · 压缩合计 ${fmtSize(d.totalCompressed)} · 文件 ${fmtSize(d.size)} · 建档于 ${esc(d.analyzedAt || '')}${d.cached ? '（复用已有档案）' : '（本次新建）'}${textN ? ' · 可预览文本 ' + fmt(textN) + ' 份' : ''}</div>
+    <div id="compDirs" class="chips" style="margin:6px 0 0"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin:6px 0">
+      <input id="compQ" class="grow" placeholder="过滤条目路径…">
+      <span class="dim" id="compInfo" style="font-size:11px;white-space:nowrap"></span>
+    </div>
+    <div id="compRows" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--panel2);padding:4px"></div>`;
+  $('btnCompReveal').onclick = () => revealPath(d.filePath);
+  $('btnCompReload').onclick = () => loadComposition(compState.guid, true);
+  $('compQ').value = compState.filter;
+  $('compQ').addEventListener('input', () => { compState.filter = $('compQ').value; renderCompRows(true); });
+  $('compRows').addEventListener('scroll', e => {
+    const el = e.target;
+    if(el.scrollTop + el.clientHeight >= el.scrollHeight - 40) renderCompRows(false);
+  });
+  renderCompDirs();
+}
+/* 目录聚合 chips（点一个 = 只看该目录，再点取消）——目录数多时只铺前 40 个，其余用过滤框找 */
+function renderCompDirs(){
+  const box = $('compDirs');
+  if(!box) return;
+  const dirs = compState.dirs || [];
+  const html = dirs.slice(0, 40).map(d => {
+    const on = compState.dirFilter === d.path ? ' active' : '';
+    return `<span class="chip${on}" data-dir="${esc(d.path)}" title="${esc(d.path)}">${esc(d.path)} <b>${fmt(d.count)}</b> 项 · ${fmtSize(d.size)}</span>`;
+  }).join('');
+  box.innerHTML = html + (dirs.length > 40 ? `<span class="dim" style="font-size:11px">…共 ${fmt(dirs.length)} 个目录（用过滤框找）</span>` : '');
+  box.querySelectorAll('.chip').forEach(el => {
+    el.onclick = () => {
+      compState.dirFilter = (compState.dirFilter === el.dataset.dir) ? '' : el.dataset.dir;
+      renderCompDirs();
+      renderCompRows(true);
+    };
+  });
+}
+function compFiltered(){
+  const q = (compState.filter || '').toLowerCase();
+  const dir = compState.dirFilter;
+  let list = compState.entries || [];
+  if(dir) list = list.filter(e => e.indexOf(dir + '/') === 0);
+  if(q) list = list.filter(e => e.toLowerCase().indexOf(q) >= 0);
+  return list;
+}
+function renderCompRows(reset){
+  const box = $('compRows');
+  if(!box) return;
+  if(reset !== false){
+    compState.view = compFiltered();
+    compState.shown = 0;
+    box.innerHTML = '';
+  }
+  const list = compState.view || [];
+  if(!list.length){
+    box.innerHTML = '<div class="dim" style="padding:4px">没有匹配的条目</div>';
+    $('compInfo').textContent = '0 项';
+    return;
+  }
+  const end = Math.min(list.length, compState.shown + compState.batch);
+  const html = list.slice(compState.shown, end).map(row => {
+    const parts = row.split('\t');
+    const p = parts[0];
+    const sz = parts.length > 1 ? Number(parts[1]) : 0;
+    const isImg = /\.(png|jpe?g|gif|bmp)$/i.test(p);
+    const isU3d = /\.unity3d$/i.test(p);
+    const hasText = !!compState.textMap[p];
+    const thumb = isImg
+      ? `<img class="compThumb" loading="lazy" draggable="false" alt="" src="/api/mod/${encodeURIComponent(compState.guid)}/entry?path=${encodeURIComponent(p)}">`
+      : '<span style="width:18px;flex:0 0 auto"></span>';
+    const cls = 'comprow' + (hasText ? ' hastext' : '') + (isU3d ? ' u3d' : '') + (isU3d && compState.u3dMap[p] ? ' parsed' : '');
+    const title = isU3d
+      ? (compState.u3dMap[p] ? '已解析——悬停看贴图，点击固定浮层（' + p + '）' : '点击解析 unity3d 看内部贴图（' + p + '）')
+      : (hasText ? '悬停查看内容（' + p + '）' : p);
+    return `<div class="${cls}" style="display:flex;gap:8px;align-items:center;font-size:12px;padding:1px 4px" data-path="${esc(p)}" title="${esc(title)}">${thumb}<span class="mono grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p)}</span><span class="dim" style="white-space:nowrap">${fmtSize(sz)}</span></div>`;
+  }).join('');
+  if(compState.shown === 0) box.innerHTML = html;
+  else box.insertAdjacentHTML('beforeend', html);
+  compState.shown = end;
+  $('compInfo').textContent = `已显示 ${fmt(compState.shown)} / ${fmt(list.length)} 项`;
+}
+/* 文本条目悬停预览（内容已在档案里，不再读文件）；图片条目悬停看大图 */
+function bindCompHover(){
+  const box = $('compRows');
+  if(!box) return;
+  if(box.dataset.hoverBound === '1') return;
+  box.dataset.hoverBound = '1';
+  box.addEventListener('mousemove', e => {
+    const row = e.target.closest ? e.target.closest('.comprow') : null;
+    const tip = $('tip');
+    if(!row){ tip.classList.add('hidden'); return; }
+    const p = row.dataset.path;
+    const text = compState.textMap ? compState.textMap[p] : null;
+    const isImg = /\.(png|jpe?g|gif|bmp)$/i.test(p);
+    if(/\.unity3d$/i.test(p)){
+      tip.classList.add('hidden');
+      showU3dTip(row, p, e);
+      return;
+    }
+    if(text){
+      tip.className = 'tip comp';
+      tip.textContent = p + '\n' + '─'.repeat(30) + '\n' + text;
+    }else if(isImg){
+      tip.className = 'tip comp';
+      tip.innerHTML = `<div class="dim mono">${esc(p)}</div><img style="max-width:320px;max-height:260px;margin-top:4px" src="/api/mod/${encodeURIComponent(compState.guid)}/entry?path=${encodeURIComponent(p)}" alt="">`;
+    }else{
+      tip.classList.add('hidden');
+      return;
+    }
+    tip.classList.remove('hidden');
+    const w = tip.offsetWidth || 300;
+    let left = e.clientX + 14;
+    if(left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    let top = e.clientY + 16;
+    if(top + (tip.offsetHeight || 120) > window.innerHeight - 8) top = Math.max(8, e.clientY - (tip.offsetHeight || 120) - 10);
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  });
+  box.addEventListener('mouseleave', () => { $('tip').classList.add('hidden'); scheduleHideU3d(); });
+  box.addEventListener('click', e => {
+    const row = e.target.closest ? e.target.closest('.comprow') : null;
+    if(!row) return;
+    const p = row.dataset.path;
+    if(!/\.unity3d$/i.test(p)) return;
+    pinU3dTip(p);
+  });
+}
+
+/* ---------- unity3d 贴图浮层：悬停预览 → 点击条目固定 → 浮层内选中放大 ---------- */
+let u3dHideTimer = null;
+
+/* 浮层定位（跟随鼠标；超出视口则回收） */
+function positionU3dTip(ev){
+  const tip = $('u3dTip');
+  if(!ev) return;
+  const w = tip.offsetWidth || 380;
+  const h = tip.offsetHeight || 160;
+  let left = ev.clientX + 16;
+  if(left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+  let top = ev.clientY + 14;
+  if(top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8);
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+
+/* 延迟隐藏（未固定时）——留出鼠标从条目移进浮层的时间 */
+function scheduleHideU3d(){
+  if(u3dState.pinned) return;
+  if(u3dHideTimer) clearTimeout(u3dHideTimer);
+  u3dHideTimer = setTimeout(() => {
+    if(u3dState.pinned) return;
+    $('u3dTip').classList.add('hidden');
+    u3dState.path = null;
+    u3dState.textures = null;
+    u3dState.sel = null;
+  }, 260);
+}
+
+/* 悬停展示：先读档案（秒开），无档案则触发解析（首次较慢）；解析结果落档后标蓝 */
+async function showU3dTip(row, path, ev){
+  if(u3dState.pinned && u3dState.path !== path) return;
+  if(u3dHideTimer){ clearTimeout(u3dHideTimer); u3dHideTimer = null; }
+  const tip = $('u3dTip');
+  if(u3dState.path !== path){
+    u3dState.path = path;
+    u3dState.textures = null;
+    u3dState.sel = null;
+    u3dState.loading = false;
+    tip.innerHTML = '<div class="dim">读取 unity3d…</div>';
+  }
+  tip.classList.remove('hidden');
+  positionU3dTip(ev);
+  if(u3dState.textures || u3dState.loading) return;
+  u3dState.loading = true;
+  let data = null;
+  try{
+    data = await api(`/api/mod/${encodeURIComponent(compState.guid)}/u3d?path=${encodeURIComponent(path)}`);
+  }catch(e){
+    data = null;
+  }
+  if(!data || !data.exists){
+    tip.innerHTML = '<div class="dim">解析中…（首次较慢，之后走档案）</div>';
+    try{
+      const r = await fetch('/api/mod/u3d', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ guid: compState.guid, path: path })
+      });
+      data = await r.json();
+      if(!r.ok) throw new Error(data && data.error ? data.error : ('HTTP ' + r.status));
+    }catch(e){
+      u3dState.loading = false;
+      tip.innerHTML = `<div class="dim">解析失败：${esc(e.message)}</div>`;
+      return;
+    }
+  }
+  u3dState.loading = false;
+  if(u3dState.path !== path) return;
+  u3dState.textures = (data && data.textures) || [];
+  if(u3dState.textures.length) compState.u3dMap[path] = true;
+  renderU3dTip();
+}
+
+/* 点击条目 → 固定浮层（不随鼠标移走，可移入操作） */
+function pinU3dTip(path){
+  u3dState.pinned = true;
+  const tip = $('u3dTip');
+  tip.classList.remove('hidden');
+  if(u3dState.path === path && u3dState.textures){
+    renderU3dTip();
+    return;
+  }
+  u3dState.path = path;
+  u3dState.textures = null;
+  u3dState.sel = null;
+  u3dState.loading = false;
+  tip.innerHTML = '<div class="dim">读取 unity3d…</div>';
+  tip.style.left = Math.max(8, (window.innerWidth - 440) / 2) + 'px';
+  tip.style.top = Math.max(8, window.innerHeight / 4) + 'px';
+  showU3dTip(null, path, null);
+}
+
+/* 渲染浮层：标题 + 缩略图网格 + 选中大图 */
+function renderU3dTip(){
+  const tip = $('u3dTip');
+  const list = u3dState.textures || [];
+  if(!list.length){
+    tip.innerHTML = '<div class="dim">该包内没有贴图</div>';
+    return;
+  }
+  const head = `<div class="u3dHead"><b>贴图 ${list.length} 张</b>`
+    + `<span class="dim mono grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u3dState.path)}</span>`
+    + (u3dState.pinned ? '<button id="u3dClose" style="padding:0 6px">关闭</button>' : '<span class="dim">点击条目固定</span>')
+    + '</div>';
+  const grid = list.map((t, i) => {
+    const sel = u3dState.sel === t.pathId ? ' class="sel"' : '';
+    return `<img${sel} data-i="${i}" draggable="false" alt="" src="/api/mod/${encodeURIComponent(compState.guid)}/u3dtex?path=${encodeURIComponent(u3dState.path)}&id=${t.pathId}&size=thumb">`;
+  }).join('');
+  let big = '';
+  if(u3dState.sel != null){
+    const t = list.find(x => x.pathId === u3dState.sel);
+    big = '<div class="u3dBig"><div class="dim">' + (t ? (t.width + '×' + t.height + ' · 格式 ' + t.format) : '') + '</div>'
+      + `<img src="/api/mod/${encodeURIComponent(compState.guid)}/u3dtex?path=${encodeURIComponent(u3dState.path)}&id=${u3dState.sel}&size=full" alt=""></div>`;
+  }
+  tip.innerHTML = head + `<div class="u3dGrid">${grid}</div>` + big;
+  const close = $('u3dClose');
+  if(close){
+    close.onclick = () => {
+      u3dState.pinned = false;
+      u3dState.sel = null;
+      $('u3dTip').classList.add('hidden');
+    };
+  }
+  tip.querySelectorAll('.u3dGrid img').forEach(img => {
+    img.onclick = () => {
+      const t = list[Number(img.dataset.i)];
+      if(!t) return;
+      u3dState.sel = (u3dState.sel === t.pathId) ? null : t.pathId;
+      renderU3dTip();
+    };
+  });
+}
+
+/* 鼠标进入浮层：取消隐藏计时（允许从条目移进浮层内选图） */
+(function(){
+  const tip = $('u3dTip');
+  if(!tip) return;
+  tip.addEventListener('mouseenter', () => {
+    if(u3dHideTimer){ clearTimeout(u3dHideTimer); u3dHideTimer = null; }
+  });
+  tip.addEventListener('mouseleave', () => { scheduleHideU3d(); });
+})();
+
+async function openModCards(guid, label){
+  mcState = { guid:guid, page:1, size:0, total:0, items:[] };
+  $('mcTitle').textContent = `引用卡片 — ${label || guid}`;
+  $('mcGrid').innerHTML = '<div class="dim">加载中…</div>';
+  $('overlay').classList.add('hidden');
+  $('ovModCards').classList.remove('hidden');
+  await loadModInfo(guid);
+  await loadModCards();
+  await loadCachedComposition(guid);
+}
+async function loadModCards(){
+  const r = await api(`/api/mod/${encodeURIComponent(mcState.guid)}/cards?page=${mcState.page}&size=${mcState.size}`);
+  mcState.total = r.total || 0;
+  mcState.items = mcState.items.concat(r.items || []);
+  renderModCards();
+}
+function renderModCards(){
+  const grid = $('mcGrid');
+  grid.innerHTML = mcState.items.map(c => {
+    const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
+    return `<div class="item ${cardStateClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
+      <div class="meta"><div class="name">${esc(c.fileName)}</div>
+      <div class="sub">${esc(c.folder || '(根目录)')}</div></div></div>`;
+  }).join('') || '<div class="dim">没有卡片引用这个 mod</div>';
+  $('mcInfo').textContent = `${mcState.items.length} / ${mcState.total} 张`;
+  $('btnMcMore').disabled = (mcState.items.length >= mcState.total);
+}
+
+/* ---------- 扫描 ---------- */
+async function startScan(target){
+  const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({target})});
+  if(!r.ok){ alert(r.error || '启动失败'); return; }
+  $('scanFloat').classList.remove('hidden');
+  pollScan();
+}
+let timer = null;
+async function pollScan(){
+  if(timer) clearInterval(timer);
+  const tick = async () => {
+    const s = await api('/api/scan/status');
+    const total = s.seen || 0;
+    const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
+    $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`;
+    $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
+    $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
+    $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
+    $('btnScanMods').disabled = s.running;
+    $('btnScanCards').disabled = s.running;
+    if(!s.running){
+      clearInterval(timer); timer = null;
+      await loadStats(); await loadFolders(); await reload();
+      setTimeout(() => $('scanFloat').classList.add('hidden'), 20000);   /* 结束 20 秒后自动收起，可手动收起 */
+    }
+  };
+  await tick();
+  timer = setInterval(tick, 1500);
+}
+
+/* ---------- 页签与加载 ---------- */
+function switchTab(tab){
+  state.tab = tab; state.page = 1;
+  ['Cards','Mods','Missing'].forEach(t => $('tab'+t).classList.toggle('active', t.toLowerCase()===tab));
+  $('viewCards').classList.toggle('hidden', tab!=='cards');
+  $('viewMods').classList.toggle('hidden', tab!=='mods');
+  $('viewMissing').classList.toggle('hidden', tab!=='missing');
+  $('folderBar').classList.toggle('hidden', tab!=='cards');
+  const f = $('filter');
+  f.classList.toggle('hidden', tab==='missing');
+  f.value = 'all';
+  reload();
+}
+async function reload(){
+  try{
+    if(state.tab === 'cards') await loadCards();
+    else if(state.tab === 'mods') await loadMods();
+    else await loadMissing();
+  }catch(e){ $('footInfo').textContent = '加载失败：' + e.message; }
+}
+
+$('btnSettings').onclick = () => $('settingsCard').classList.toggle('hidden');
+$('chkAuth').onchange = e => {
+  /* 撤销授权——直接落盘（收紧方向，无需确认） */
+  if(!e.target.checked){ setAuth(false); return; }
+  /* 勾选 = 授权请求——先退回未勾显示，走四条声明确认窗；确认后才落盘授权 */
+  applyAuth(false);
+  askEditAuth(null);
+};
+$('btnEditClose').onclick = () => $('ovEdit').classList.add('hidden');
+$('btnEditReload').onclick = () => { loadParams(); loadStructure(); };
+$('btnOldClose').onclick = () => $('ovOld').classList.add('hidden');
+$('btnOldReload').onclick = () => openOld(editCtx.cardId, editCtx.lib);
+$('btnSave').onclick = () => saveSettings(true);
+$('btnAddModRoot').onclick = () => $('modRootsBody').appendChild(rootRow('mods'));
+$('btnAddCardRoot').onclick = () => $('cardRootsBody').appendChild(rootRow('cards'));
+$('btnPickGameRoot').onclick = pickGameRoot;
+$('gameRoot').addEventListener('change', () => { syncMainRoots().catch(e => alert('刷新级别 1 路径失败：' + e.message)); });
+$('btnScanMods').onclick = () => startScan('mods');
+$('btnScanCards').onclick = () => startScan('cards');
+$('btnScanFloatHide').onclick = () => $('scanFloat').classList.add('hidden');
+$('btnFoldFolders').onclick = () => {
+  state.foldFolders = !state.foldFolders;
+  try{ localStorage.setItem('kk.fold', state.foldFolders ? '1' : '0'); }catch(e){}
+  applyFold();
+};
+/* 列表滚动到底自动补下一批（卡片网格 / mod 表） */
+window.addEventListener('scroll', () => {
+  if(window.innerHeight + window.scrollY < document.body.scrollHeight - 500) return;
+  if(state.tab === 'cards') renderCardsChunk();
+  else if(state.tab === 'mods') renderMods(false);
+});
+$('btnReload').onclick = () => { state.page = 1; reload(); };
+/* 单页无上限——分页按钮退役（保留占位） */
+$('btnPrev').disabled = true;
+$('btnNext').disabled = true;
+$('tabCards').onclick = () => switchTab('cards');
+$('tabMods').onclick = () => switchTab('mods');
+$('tabMissing').onclick = () => switchTab('missing');
+$('btnCloseModal').onclick = () => $('overlay').classList.add('hidden');
+$('btnMove').onclick = doMove;
+$('btnCheckAll').onclick = () => { document.querySelectorAll('#mBody .rowchk').forEach(c=>c.checked=true); updateSel(); };
+$('btnCheckNone').onclick = () => { document.querySelectorAll('#mBody .rowchk').forEach(c=>c.checked=false); updateSel(); };
+$('q').addEventListener('keydown', e => { if(e.key==='Enter'){ state.page=1; reload(); } });
+
+/* 卡片交互：点击开引用明细 · 悬停放大 + 跟随鼠标注释 */
+$('viewCards').addEventListener('click', e => {
+  const it = e.target.closest ? e.target.closest('.item') : null;
+  if(it && it.dataset.id) openRefs(parseInt(it.dataset.id,10), 0, parseInt(it.dataset.lib||'0',10));
+});
+$('viewCards').addEventListener('mousemove', e => {
+  const box = $('tip');
+  const it = e.target.closest ? e.target.closest('.item') : null;
+  if(!it){ box.classList.add('hidden'); return; }
+  box.innerHTML = `<b style="color:var(--green)">绿 ${it.dataset.g}</b> · <b style="color:var(--yellow)">黄 ${it.dataset.y}</b> · <b style="color:var(--gray)">灰 ${it.dataset.c}</b> · <b style="color:var(--red)">红 ${it.dataset.m}</b>`;
+  box.classList.remove('hidden');
+  box.style.left = (e.clientX + 14) + 'px';
+  box.style.top = (e.clientY + 16) + 'px';
+});
+$('viewCards').addEventListener('mouseleave', () => $('tip').classList.add('hidden'));
+
+/* mod 列表 / 缺失清单 行点击 → 引用卡片；文件名列 → 资源管理器定位；表头点击 → 升 / 降序 */
+$('modsTable').addEventListener('click', e => {
+  const rev = e.target.closest ? e.target.closest('.reveal') : null;
+  if(rev){
+    revealPath(rev.dataset.path);
+    return;
+  }
+  const th = e.target.closest ? e.target.closest('th[data-sort]') : null;
+  if(th){ toggleSort(th.dataset.sort); return; }
+  const tr = e.target.closest ? e.target.closest('tr[data-guid]') : null;
+  if(tr) openModCards(tr.dataset.guid, tr.dataset.guid);
+});
+/* 作者筛选浮层（Excel 式——数据来自 /api/authors，勾选清单不随 mod 行重算） */
+$('btnAuthorFilter').onclick = e => {
+  e.stopPropagation();
+  if($('auPanel').classList.contains('hidden')) openAuthorFilter();
+  else closeAuthorFilter();
+};
+$('auApply').onclick = applyAuthorFilter;
+$('auNone').onclick = () => { state.modAuthors = []; closeAuthorFilter(); updateAuthorMark(); renderMods(true); };
+$('auCancel').onclick = closeAuthorFilter;
+$('auQ').addEventListener('input', () => renderAuList());
+$('auList').addEventListener('change', e => {
+  const c = e.target.closest ? e.target.closest('.auchk') : null;
+  if(!c) return;
+  const lab = c.closest ? c.closest('label') : null;
+  const name = lab ? lab.dataset.name : '';
+  if(c.checked) state.auPending.add(name);
+  else state.auPending.delete(name);
+  auFoot(auHits().length);
+});
+document.addEventListener('mousedown', e => {
+  const p = $('auPanel');
+  if(p.classList.contains('hidden')) return;
+  if(p.contains(e.target)) return;
+  if(e.target.closest && e.target.closest('#btnAuthorFilter')) return;
+  closeAuthorFilter();
+});
+/* 缺失清单：点 guid 行头 → 传统弹窗；点 ▸ → 展开全部卡片；点卡片 → 该卡的引用明细 */
+$('viewMissing').addEventListener('click', e => {
+  const btn = e.target.closest ? e.target.closest('.mzbtn') : null;
+  if(btn){
+    const box = btn.closest('.mz');
+    if(box) mzToggle(box, btn);
+    return;
+  }
+  const it = e.target.closest ? e.target.closest('.item') : null;
+  if(it && it.dataset.id){
+    openRefs(parseInt(it.dataset.id,10), 0, parseInt(it.dataset.lib||'0',10));
+    return;
+  }
+  const head = e.target.closest ? e.target.closest('.mzhead .mono') : null;
+  if(head){
+    const box = head.closest('.mz');
+    if(box) openModCards(box.dataset.guid, box.dataset.guid + '（缺失）');
+  }
+});
+
+/* 引用明细：整行点击 → 该 mod 的引用卡片；文件名列 → 资源管理器打开并选中 */
+$('mBody').addEventListener('click', e => {
+  const rev = e.target.closest ? e.target.closest('.reveal') : null;
+  if(rev){
+    revealPath(rev.dataset.path);
+    return;
+  }
+  const tr = e.target.closest ? e.target.closest('tr[data-guid]') : null;
+  if(tr) openModCards(tr.dataset.guid, tr.dataset.guid);
+});
+
+/* 引用卡片弹窗 */
+$('btnMcClose').onclick = () => { $('ovModCards').classList.add('hidden'); $('tip').classList.add('hidden'); };
+$('btnMcMore').onclick = async () => { mcState.page = mcState.page + 1; await loadModCards(); };
+
+/* 未被引用的 mod 弹窗（统计卡点入 · 一键移到 mod_cache） */
+$('stats').addEventListener('click', e => {
+  const el = e.target.closest ? e.target.closest('.stat[data-open]') : null;
+  if(!el) return;
+  if(el.dataset.open === 'unused') openUnused();
+  else if(el.dataset.open === 'dup') openDup();
+  else if(el.dataset.open === 'miss') switchTab('missing');
+  else if(el.dataset.open === 'todo') openTodos();
+});
+/* ---------- 待办清单（统计卡点入 · 目前只有「离线库」一类） ---------- */
+let tdState = { items: [] };
+async function openTodos(){
+  $('ovTodo').classList.remove('hidden');
+  await loadTodos();
+}
+async function loadTodos(){
+  $('tdBody').innerHTML = '<div class="dim" style="padding:6px">读取中…</div>';
+  const r = await api('/api/todos');
+  tdState.items = (r && r.items) ? r.items : [];
+  $('tdInfo').textContent = tdState.items.length ? (tdState.items.length + ' 条') : '无';
+  renderTodos();
+}
+/* 待办条目文案按 kind 组装——离线库类型从库根配置取路径与备注（配置是唯一真相源，不双写） */
+function tdRootOf(key){
+  const roots = state.roots || {};
+  const all = [].concat(roots.modRoots || [], roots.cardRoots || []);
+  for(let i=0;i<all.length;i++){
+    if((all[i].path||'').trim().toLowerCase() === key) return all[i];
+  }
+  return null;
+}
+function tdIsMods(key){
+  const list = (state.roots || {}).modRoots || [];
+  for(let i=0;i<list.length;i++){
+    if((list[i].path||'').trim().toLowerCase() === key) return true;
+  }
+  return false;
+}
+function renderTodos(){
+  const items = tdState.items || [];
+  $('tdFoot').textContent = items.length ? (items.length + ' 条待办') : '';
+  if(!items.length){
+    $('tdBody').innerHTML = '<div class="dim" style="padding:10px">没有待办。</div>';
+    return;
+  }
+  $('tdBody').innerHTML = items.map(t => {
+    const e = tdRootOf(t.key);
+    const path = e ? e.path : t.key;
+    const note = e ? (e.note||'') : '';
+    const kindTxt = (t.kind === 'offline') ? '库已离线' : t.kind;
+    return `<div class="tditem" data-id="${t.id}" data-kind="${esc(t.kind)}" data-path="${esc(path)}" data-mods="${tdIsMods(t.key)?'1':'0'}">
+      <div><b style="color:var(--yellow)">${esc(kindTxt)}</b> <span class="mono dim" style="font-size:12px">${esc(path)}</span></div>
+      <div class="dim" style="font-size:12px;margin:4px 0 6px">这个地址不存在了，或者库里一个东西都没有。写一条备注说明东西放哪了——库内容仍能从数据库正常读取；也可以直接上线或彻底删除数据。</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input class="tdnote mono" style="flex:1;min-width:220px" value="${esc(note)}" placeholder="备注：这东西你放哪了…">
+        <button class="tdsave primary">保存备注</button>
+        <button class="tdon">点击上线</button>
+        <button class="tdpurge danger">彻底删除数据</button>
+        <button class="tdclose">关闭这条</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+$('ovTodo').addEventListener('click', async e => {
+  const box = e.target.closest ? e.target.closest('.tditem') : null;
+  if(!box) return;
+  const id = parseInt(box.dataset.id,10);
+  const kind = box.dataset.mods === '1' ? 'mods' : 'cards';
+  const path = box.dataset.path;
+  const t = e.target;
+  if(t.classList.contains('tdclose')){
+    await api('/api/todos/close', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await loadTodos(); await loadStats(); return;
+  }
+  if(t.classList.contains('tdon')){
+    const r = await api('/api/roots/offline', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind, path, offline:false})});
+    if(!r || !r.ok){ alert((r && r.error) || '上线失败'); return; }
+    await loadSettings(); await loadTodos(); await loadFolders(); await loadStats(); return;
+  }
+  if(t.classList.contains('tdpurge')){
+    if(!confirm('彻底删除数据？\n\n该库的数据库文件将被删除，这条库根也会从列表里移除——内容就此消失。\n磁盘上的原始文件不会被删除。')) return;
+    const r = await api('/api/roots/purge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind, path})});
+    if(!r || !r.ok){ alert((r && r.error) || '删除失败'); return; }
+    await loadSettings(); await loadTodos(); await loadFolders(); await loadStats(); return;
+  }
+  if(t.classList.contains('tdsave')){
+    const roots = state.roots || {};
+    const note = box.querySelector('.tdnote').value.trim();
+    const body = { gameRoot: roots.gameRoot || '', modRoots: [], cardRoots: [] };
+    (roots.modRoots||[]).forEach(r => body.modRoots.push({ tier:r.tier, path:r.path, recurse:r.recurse, readOnly:r.readOnly, locked:r.locked, offline:r.offline, note:r.note }));
+    (roots.cardRoots||[]).forEach(r => body.cardRoots.push({ tier:r.tier, path:r.path, recurse:r.recurse, readOnly:r.readOnly, locked:r.locked, offline:r.offline, note:r.note }));
+    const target = kind === 'mods' ? body.modRoots : body.cardRoots;
+    target.forEach(r => { if((r.path||'').trim().toLowerCase() === path.toLowerCase()) r.note = note; });
+    const rr = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(!rr || !rr.ok){ alert('保存备注失败'); return; }
+    state.roots = rr.roots || state.roots;
+    renderRoots(); updateSettingsHint();
+    /* 写了备注 = 这件事处理完了——这条待办随之销掉 */
+    await api('/api/todos/close', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    await loadTodos(); await loadStats(); return;
+  }
+});
+$('btnTdClose').onclick = () => $('ovTodo').classList.add('hidden');
+$('btnTdReload').onclick = () => loadTodos();
+
+$('btnUvClose').onclick = () => $('ovUnused').classList.add('hidden');
+$('btnUvMove').onclick = startMoveUnused;
+$('btnMoveStop').onclick = () => api('/api/move-unused/stop', {method:'POST'}).catch(e => alert('停止失败：' + e.message));
+$('btnMoveFloatHide').onclick = () => $('moveFloat').classList.add('hidden');
+$('uvAll').onclick = () => { uvState.all.forEach(m => { m.sel = true; }); renderUnused(true); };
+$('uvNone').onclick = () => { uvState.all.forEach(m => { m.sel = false; }); renderUnused(true); };
+$('uvQ').addEventListener('input', () => renderUnused(true));
+$('uvBody').addEventListener('change', e => {
+  const c = e.target.closest ? e.target.closest('.uvchk') : null;
+  if(!c) return;
+  const m = uvState.all[parseInt(c.dataset.i, 10)];
+  if(m) m.sel = c.checked;
+  updateUvSel();
+});
+/* 弹窗内滚动到底自动补下一批（列表可上万条，不一次铺满 DOM） */
+$('ovUnused').querySelector('.body').addEventListener('scroll', e => {
+  const el = e.target;
+  if(el.scrollTop + el.clientHeight >= el.scrollHeight - 200) renderUnused(false);
+});
+/* mod 信息区：副本文件名 → 资源管理器定位 */
+$('mcModInfo').addEventListener('click', e => {
+  const rev = e.target.closest ? e.target.closest('.reveal') : null;
+  if(rev) revealPath(rev.dataset.path);
+});
+$('mcGrid').addEventListener('click', e => {
+  const it = e.target.closest ? e.target.closest('.item') : null;
+  if(it && it.dataset.id){ $('ovModCards').classList.add('hidden'); openRefs(parseInt(it.dataset.id,10), 0, parseInt(it.dataset.lib||'0',10)); }
+});
+
+/* 重复副本弹窗（统计卡点入 · 指定这个版本 / 换用此版本 / 正名搬入主库） */
+$('btnDupClose').onclick = () => $('ovDup').classList.add('hidden');
+$('btnDupReload').onclick = () => loadDup();
+$('dupQ').addEventListener('input', () => renderDup(true));
+$('dupBody').addEventListener('click', e => {
+  const b = e.target.closest ? e.target.closest('button[data-act]') : null;
+  if(!b) return;
+  doDupOp(b.dataset.act, b.dataset.guid, b.dataset.path, parseInt(b.dataset.tier||'0',10), b);
+});
+$('ovDup').querySelector('.body').addEventListener('scroll', e => {
+  const el = e.target;
+  if(el.scrollTop + el.clientHeight >= el.scrollHeight - 200) renderDup(false);
+});
+
+(async function(){
+  await loadSettings();
+  restoreUi();                 /* 记忆：选中的文件夹 + 折叠态 */
+  await loadStats();
+  await loadFolders();
+  await reload();
+  pollScan();
+  restoreMove();               /* 后台搬运任务还在跑就把进度窗拉回来 */
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# 编译产物（可重建）
+bin/
+obj/
+
+# 调试产物区（双槽 exe + 运行时数据）
+dist/
+
+# 发布产物——exe / 压缩包不入仓，走 Release 附件
+revealer/*.zip
+revealer/kkmanager*/KMR.exe
+
+# 运行时数据库与卡片留档
+data/
+card_archive/
+
+# 编辑器 / 本地临时
+.vs/
+*.user
+CatTemp/
