@@ -1374,7 +1374,7 @@ namespace KKManager.Data
             }
             catch (Exception ex)
             {
-                return "文件操作失败：" + ex.GetType().Name + " " + ex.Message;
+                return "文件操作失败" + FileBusyHint(ex);
             }
             try
             {
@@ -1475,7 +1475,7 @@ namespace KKManager.Data
                 }
                 catch (Exception ex)
                 {
-                    skipped.Add("文件操作失败（" + ex.GetType().Name + " " + ex.Message + "）：" + r.FilePath);
+                    skipped.Add("文件操作失败" + FileBusyHint(ex) + "：" + r.FilePath);
                     continue;
                 }
                 if (MoveModFile(cfg, guid, r.FilePath, r.RootPath, dest, Tier.Cache, oldDir, oldName) == null)
@@ -1513,7 +1513,7 @@ namespace KKManager.Data
                     }
                     catch (Exception ex)
                     {
-                        return "保留份正名失败：" + ex.GetType().Name + " " + ex.Message;
+                        return "保留份正名失败" + FileBusyHint(ex) + " · " + keep.FilePath;
                     }
                     if (MoveModFile(cfg, guid, keep.FilePath, keep.RootPath, renamed, Tier.Main, keep.RootPath, keepName) == null)
                     {
@@ -1545,7 +1545,7 @@ namespace KKManager.Data
                 }
                 catch (Exception ex)
                 {
-                    return "保留份搬入主库失败：" + ex.GetType().Name + " " + ex.Message;
+                    return "保留份搬入主库失败" + FileBusyHint(ex);
                 }
                 string moved;
                 if (readOnlySource)
@@ -1575,6 +1575,12 @@ namespace KKManager.Data
                 detail = detail + " · 跳过 " + skipped.Count + " 份：" + string.Join("；", skipped);
             }
             return null;
+        }
+
+        /// <summary>文件操作失败的统一说明——补上「谁可能占用」与「怎么办」（失败可执行化：不静默、不让人猜）。</summary>
+        internal static string FileBusyHint(Exception ex)
+        {
+            return "（文件被其他程序占用——游戏运行中 / 资源管理器正在预览 / 杀毒软件扫描都会占用；关闭游戏或稍后重试）：" + ex.GetType().Name + " " + ex.Message;
         }
 
         /// <summary>把一份旧版与主库当前版本完全互换（位置 + 名字）——选错版本时的纠正路径；成功返回 null，否则返回原因。</summary>
@@ -1639,7 +1645,7 @@ namespace KKManager.Data
             }
             catch (Exception ex)
             {
-                return "主库改名失败：" + ex.GetType().Name + " " + ex.Message;
+                return "主库改名失败" + FileBusyHint(ex) + " · " + main.FilePath;
             }
             bool readOnlySource = RootsRules.IsReadOnlyRoot(cfg, oldRec.RootPath);
             try
@@ -1662,14 +1668,14 @@ namespace KKManager.Data
                 }
                 catch (Exception ex2)
                 {
-                    back = "；回滚主库改名也失败：" + ex2.GetType().Name + " " + ex2.Message;
+                    back = "；回滚主库改名也失败" + FileBusyHint(ex2);
                 }
                 string tail = "";
                 if (back != null)
                 {
                     tail = back;
                 }
-                return "旧版搬入主库失败：" + ex.GetType().Name + " " + ex.Message + tail;
+                return "旧版搬入主库失败" + FileBusyHint(ex) + tail;
             }
             string finalOldPath = Path.Combine(oldDir, mainOldName);
             try
@@ -1679,7 +1685,7 @@ namespace KKManager.Data
             }
             catch (Exception ex)
             {
-                return "主库那份移入缓存库失败：" + ex.GetType().Name + " " + ex.Message + "（主库现有两份，可重扫后手动整理）";
+                return "主库那份移入缓存库失败" + FileBusyHint(ex) + "（主库现有两份，可重扫后手动整理）";
             }
 
             // [段4] 数据库：两行位置互换 + 旧版登记改指新的旧版
@@ -1785,7 +1791,7 @@ namespace KKManager.Data
             }
             catch (Exception ex)
             {
-                return "文件操作失败：" + ex.GetType().Name + " " + ex.Message;
+                return "文件操作失败" + FileBusyHint(ex);
             }
             try
             {

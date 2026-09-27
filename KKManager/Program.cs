@@ -429,7 +429,8 @@ namespace KKManager
                 ScanResult r = Scanner.ScanMods(hub, cfg, force, m => Console.WriteLine(m));
                 Console.WriteLine();
                 Console.WriteLine("mod 扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
-                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped + "  失败 " + r.Failed);
+                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped + "  失败 " + r.Failed
+                    + "  清理 " + r.Removed);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -452,7 +453,7 @@ namespace KKManager
                 Console.WriteLine();
                 Console.WriteLine("卡片扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
-                    + "  非卡 " + r.NonCard + "  失败 " + r.Failed);
+                    + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
                 foreach (string e in r.Errors)
                 {

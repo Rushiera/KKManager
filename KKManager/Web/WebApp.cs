@@ -59,6 +59,8 @@ namespace KKManager.Web
 
         /// <summary>缩略图字节数。</summary>
         public long ThumbBytes { get; set; }
+        /// <summary>本次扫描清理的已消失记录数。</summary>
+        public int Removed { get; set; }
 
         /// <summary>开始时刻。</summary>
         public string StartedAt { get; set; }
@@ -733,6 +735,7 @@ namespace KKManager.Web
                     failed = s.Failed,
                     refs = s.Refs,
                     thumbMB = Math.Round(s.ThumbBytes / 1024.0 / 1024.0, 1),
+                    removed = s.Removed,
                     startedAt = s.StartedAt,
                     finishedAt = s.FinishedAt,
                     errors = s.Errors
@@ -1706,7 +1709,7 @@ namespace KKManager.Web
             }
             catch (Exception ex)
             {
-                detail = "文件操作失败：" + ex.GetType().Name + " " + ex.Message;
+                detail = "文件操作失败" + StoreHub.FileBusyHint(ex);
                 return MoveFailed;
             }
 
@@ -1966,6 +1969,7 @@ namespace KKManager.Web
                             _scan.Failed = r.Failed;
                             _scan.Refs = r.RefEntries;
                             _scan.ThumbBytes = r.ThumbBytes;
+                            _scan.Removed = r.Removed;
                             _scan.Errors.AddRange(r.Errors);
                             _scan.Message = "扫描完成，用时 " + r.Elapsed.TotalSeconds.ToString("F1") + " 秒";
                         }

@@ -169,6 +169,8 @@
   .tditem{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--panel2)}
   /* 重复副本：整行点击 = 该行的操作（操作可逆——点错再点另一份即可）；「查看引用关系」跳转定位后短暂高亮该行 */
   tr.flash td{background:#2f3b46 !important}
+  /* 无操作行（已是主库当前版本 / 旧版在主库）——光标恢复常态，点击给说明而不是「没反应」 */
+  table.list tr[data-guid].noact{cursor:default}
 </style>
 </head>
 <body>
@@ -1702,7 +1704,9 @@ function dupFileRow(g, f){
   if(f.error) tags += ' <span class="mk r" title="' + esc(f.error) + '">读不到</span>';
   const tierCell = f.tier === 1 ? '主库' : (f.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
   const root = (f.rootPath||'').split('\\').pop() || '';
-  return `<tr class="dupfile" data-guid="${esc(g.guid)}" data-act="${dupRowAct(g, f)}" data-path="${esc(f.filePath||'')}" data-tier="${f.tier || 0}">
+  const act = dupRowAct(g, f);
+  const note = act ? '' : (f.isOld ? '旧版文件位于主库——请重扫核对' : '已是主库当前版本（其余副本已判旧版）');
+  return `<tr class="dupfile${act ? '' : ' noact'}" data-guid="${esc(g.guid)}" data-act="${act}" data-note="${note}" data-path="${esc(f.filePath||'')}" data-tier="${f.tier || 0}">
     <td>${tierCell} <span class="dim" style="font-size:11px">${esc(root)}</span></td>
     <td class="mono">${esc(f.fileName||'')}${tags}</td>
     <td>${ver}</td><td>${author}</td><td class="dim">${size}</td><td class="dim">${esc(f.mtime||'')}</td>
@@ -2223,7 +2227,8 @@ async function pollScan(){
     const s = await api('/api/scan/status');
     const total = s.seen || 0;
     const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
-    $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`;
+    $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
+      + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '');
     $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
     $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
@@ -2543,8 +2548,18 @@ $('dupBody').addEventListener('click', e => {
     return;
   }
   /* 整行点击 = 该行的操作（与按钮同一判据；操作可逆，点错再点另一份即可） */
+  const grp = e.target.closest ? e.target.closest('tr.grp') : null;
+  if(grp){
+    /* 分组标题行（guid 行）本身不带操作——给一句说明，别让人以为坏了 */
+    $('dupFoot').textContent = '这一行是分组标题（guid）——操作请点下面的副本行（或行内「查看引用关系」）';
+    return;
+  }
   const tr = e.target.closest ? e.target.closest('tr.dupfile') : null;
-  if(!tr || !tr.dataset.act) return;
+  if(!tr) return;
+  if(!tr.dataset.act){
+    $('dupFoot').textContent = '这一份无需操作——' + (tr.dataset.note || '已是主库当前版本');
+    return;
+  }
   const mb = tr.querySelector(`button[data-act="${tr.dataset.act}"]`);
   doDupOp(tr.dataset.act, tr.dataset.guid, tr.dataset.path, parseInt(tr.dataset.tier||'0',10), mb);
 });
