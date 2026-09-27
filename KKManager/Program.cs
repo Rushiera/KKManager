@@ -600,22 +600,34 @@ namespace KKManager
                 {
                     Console.WriteLine("[哈希] 算不出：" + e);
                 }
+                // 引用卡片——与面板组标题行最右侧的缩略图区同一数据源、同一批量查询：每组总数 + 前三张卡片名（文本面核对通道）
+                List<string> dupGuids = new List<string>();
+                foreach (DupGroup g in groups)
+                {
+                    dupGuids.Add(g.Guid);
+                }
+                Dictionary<string, DupCardRefs> cardRefs = hub.QueryDupCardRefs(cfg, dupGuids, 3);
                 foreach (DupGroup g in groups)
                 {
                     Console.WriteLine();
                     Console.WriteLine("● " + g.Guid + "（" + g.Files.Count + " 份 · 主库 " + g.MainCount + "）");
-                    // 引用卡片——与面板组标题行最右侧的缩略图区同一数据源：总数 + 前三张卡片名（文本面核对通道）
-                    List<CardRow> refCards = hub.QueryCardsByMod(cfg, g.Guid, 1, 3);
+                    DupCardRefs refs = null;
+                    cardRefs.TryGetValue(g.Guid, out refs);
                     string refNames = "";
-                    foreach (CardRow c in refCards)
+                    long refTotal = 0;
+                    if (refs != null)
                     {
-                        if (refNames.Length > 0)
+                        refTotal = refs.Total;
+                        foreach (CardRow c in refs.Top)
                         {
-                            refNames = refNames + " · ";
+                            if (refNames.Length > 0)
+                            {
+                                refNames = refNames + " · ";
+                            }
+                            refNames = refNames + c.FileName;
                         }
-                        refNames = refNames + c.FileName;
                     }
-                    Console.WriteLine("    引用卡片 " + hub.CountCardsByMod(cfg, g.Guid) + " 张" + (refNames.Length > 0 ? "（前三张 " + refNames + "）" : ""));
+                    Console.WriteLine("    引用卡片 " + refTotal + " 张" + (refNames.Length > 0 ? "（前三张 " + refNames + "）" : ""));
                     foreach (ModFileRecord f in g.Files)
                     {
                         ModInfo info = ZipModReader.Parse(f.FilePath);

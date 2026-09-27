@@ -655,6 +655,63 @@ namespace KKManager.Data
             }
             return n;
         }
+        /// <summary>重复副本组的引用卡片（跨库合并）——每组总数 + 前 top 张；一次批量查询，不再逐组重算四色聚合。</summary>
+        public Dictionary<string, DupCardRefs> QueryDupCardRefs(RootsConfig cfg, List<string> guids, int top)
+        {
+            Dictionary<string, DupCardRefs> map = new Dictionary<string, DupCardRefs>(StringComparer.Ordinal);
+            if (guids == null || guids.Count == 0)
+            {
+                return map;
+            }
+            // [段1] 每个 guid 恒有条目——无引用的组显式记 0（消费方不靠字段缺失猜）
+            foreach (string g in guids)
+            {
+                if (!map.ContainsKey(g))
+                {
+                    map[g] = new DupCardRefs();
+                }
+            }
+            // [段2] 逐库取计数与前 top 行——轻量查询（不含四色聚合）
+            foreach (Store s in AllStores(cfg))
+            {
+                int lib = LibOfStore(s);
+                Dictionary<string, long> counts = s.CountCardsByMods(guids);
+                foreach (KeyValuePair<string, long> kv in counts)
+                {
+                    DupCardRefs hit = null;
+                    if (map.TryGetValue(kv.Key, out hit))
+                    {
+                        hit.Total = hit.Total + kv.Value;
+                    }
+                }
+                foreach (CardRefRow row in s.RefCardsByMods(guids))
+                {
+                    DupCardRefs hit = null;
+                    if (!map.TryGetValue(row.Guid, out hit))
+                    {
+                        continue;
+                    }
+                    CardRow cr = new CardRow();
+                    cr.Id = row.Id;
+                    cr.FileName = row.FileName;
+                    cr.RootPath = row.RootPath;
+                    cr.Folder = row.Folder;
+                    cr.HasThumb = row.HasThumb;
+                    cr.Lib = lib;
+                    hit.Top.Add(cr);
+                }
+            }
+            // [段3] 跨库合并后统一排序取前 top——与「引用卡片」弹窗同一排序口径
+            foreach (KeyValuePair<string, DupCardRefs> kv in map)
+            {
+                kv.Value.Top.Sort(CompareCardsByMod);
+                if (kv.Value.Top.Count > top)
+                {
+                    kv.Value.Top.RemoveRange(top, kv.Value.Top.Count - top);
+                }
+            }
+            return map;
+        }
 
         /// <summary>某 guid 的全部文件副本（跨库）。</summary>
         public List<RefRow> QueryModFiles(RootsConfig cfg, string guid)

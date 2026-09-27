@@ -1143,10 +1143,14 @@ namespace KKManager.Web
                 RootsConfig cfg = LoadConfig();
                 List<DupGroup> groups = _hub.ListDuplicateGroups(cfg);
                 List<ModFileRecord> allFiles = new List<ModFileRecord>();
+                List<string> dupGuids = new List<string>();
                 foreach (DupGroup g in groups)
                 {
                     allFiles.AddRange(g.Files);
+                    dupGuids.Add(g.Guid);
                 }
+                // 引用卡片——组标题行最右侧缩略图区：一次批量查询（每组总数 + 前三张），不再逐组重算四色聚合
+                Dictionary<string, DupCardRefs> cardRefs = _hub.QueryDupCardRefs(cfg, dupGuids, 3);
                 // MD5 只算冲突文件（重复副本组内），且只在打开本面板时补齐一次——算过就忽略（档案落主库 mod_hash）
                 int computed = 0;
                 List<string> hashErrors = new List<string>();
@@ -1199,13 +1203,18 @@ namespace KKManager.Web
                             error = info.Error
                         });
                     }
-                    // 引用这个 guid 的卡片——面板组标题行最右侧的缩略图区（只取前三张，其余走「查看更多」叠层弹窗）
+                    // 引用这个 guid 的卡片——从批量查询结果取（与组标题行缩略图区同一份数据；只取前三张，其余走「查看更多」叠层弹窗）
+                    DupCardRefs refs = null;
+                    cardRefs.TryGetValue(g.Guid, out refs);
                     List<object> cards = new List<object>();
-                    foreach (CardRow c in _hub.QueryCardsByMod(cfg, g.Guid, 1, 3))
+                    if (refs != null)
                     {
-                        cards.Add(new { id = c.Id, lib = c.Lib, hasThumb = c.HasThumb, fileName = c.FileName });
+                        foreach (CardRow c in refs.Top)
+                        {
+                            cards.Add(new { id = c.Id, lib = c.Lib, hasThumb = c.HasThumb, fileName = c.FileName });
+                        }
                     }
-                    items.Add(new { guid = g.Guid, mainCount = g.MainCount, files = files, cards = cards, cardTotal = _hub.CountCardsByMod(cfg, g.Guid) });
+                    items.Add(new { guid = g.Guid, mainCount = g.MainCount, files = files, cards = cards, cardTotal = refs == null ? 0 : refs.Total });
                 }
                 List<ModOldRecord> olds = new List<ModOldRecord>();
                 foreach (ModOldRecord o in _hub.Core.ListModOld())

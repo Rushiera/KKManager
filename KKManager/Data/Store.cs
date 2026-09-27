@@ -118,6 +118,28 @@ namespace KKManager.Data
         public bool HasThumb { get; set; }
     }
 
+    /// <summary>引用卡片轻量行——重复副本组标题行的缩略图区用（按 guid 批量取，不走四色聚合）。</summary>
+    public class CardRefRow
+    {
+        /// <summary>被引用的 mod guid。</summary>
+        public string Guid { get; set; }
+
+        /// <summary>卡片 id。</summary>
+        public long Id { get; set; }
+
+        /// <summary>文件名。</summary>
+        public string FileName { get; set; }
+
+        /// <summary>所属库根路径。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>相对库根的文件夹（根目录为空串）。</summary>
+        public string Folder { get; set; }
+
+        /// <summary>是否有缩略图。</summary>
+        public bool HasThumb { get; set; }
+    }
+
     /// <summary>mod 行（查询结果）。</summary>
     public class ModRow
     {
@@ -403,6 +425,16 @@ namespace KKManager.Data
 
         /// <summary>主库副本数。</summary>
         public int MainCount { get; set; }
+    }
+
+    /// <summary>重复副本组的引用卡片——总数 + 前几张（组标题行缩略图区；批量查询，不走四色聚合）。</summary>
+    public class DupCardRefs
+    {
+        /// <summary>引用该 guid 的卡片总数（跨库）。</summary>
+        public long Total { get; set; }
+
+        /// <summary>前几张引用卡片（按库根 / 文件夹 / 文件名排序）。</summary>
+        public List<CardRow> Top { get; } = new List<CardRow>();
     }
 
     /// <summary>某 guid 的副本计数（重复副本判定用——总数 / 非旧版数）。</summary>
@@ -1822,6 +1854,78 @@ namespace KKManager.Data
                 }
                 return Convert.ToInt64(v);
             }
+        }
+        /// <summary>一批 guid 各自的引用卡片总数（单库口径——批量版；重复副本面板一次拿完，不再逐组查询）。</summary>
+        public Dictionary<string, long> CountCardsByMods(List<string> guids)
+        {
+            Dictionary<string, long> map = new Dictionary<string, long>(StringComparer.Ordinal);
+            if (guids == null || guids.Count == 0)
+            {
+                return map;
+            }
+            // [段1] 参数化 IN 子句——一 guid 一参数，不拼字面量
+            List<string> names = new List<string>();
+            for (int i = 0; i < guids.Count; i = i + 1)
+            {
+                names.Add("$g" + i.ToString());
+            }
+            string sql = "SELECT mod_guid, COUNT(DISTINCT card_id) FROM card_mod WHERE mod_guid IN (" + string.Join(",", names) + ") GROUP BY mod_guid";
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                for (int i = 0; i < guids.Count; i = i + 1)
+                {
+                    cmd.Parameters.AddWithValue(names[i], guids[i]);
+                }
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        map[r.GetString(0)] = r.GetInt64(1);
+                    }
+                }
+            }
+            return map;
+        }
+        /// <summary>一批 guid 的引用卡片轻量行（不含四色聚合——缩略图区专用；排序与截断由跨库合并方统一做，保证与「引用卡片」弹窗同一口径）。</summary>
+        public List<CardRefRow> RefCardsByMods(List<string> guids)
+        {
+            List<CardRefRow> list = new List<CardRefRow>();
+            if (guids == null || guids.Count == 0)
+            {
+                return list;
+            }
+            // [段1] 参数化 IN 子句——一 guid 一参数
+            List<string> names = new List<string>();
+            for (int i = 0; i < guids.Count; i = i + 1)
+            {
+                names.Add("$g" + i.ToString());
+            }
+            // [段2] 一次取全部匹配行——card_mod 先按 (guid, card_id) 去重，与计数口径一致（同一卡多行只算一次）
+            string sql = @"SELECT cm.mod_guid, c.id, c.file_name, c.root_path, c.folder, (c.thumb IS NOT NULL)
+                             FROM (SELECT DISTINCT mod_guid, card_id FROM card_mod WHERE mod_guid IN (" + string.Join(",", names) + @")) cm
+                             JOIN card c ON c.id = cm.card_id";
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                for (int i = 0; i < guids.Count; i = i + 1)
+                {
+                    cmd.Parameters.AddWithValue(names[i], guids[i]);
+                }
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        CardRefRow row = new CardRefRow();
+                        row.Guid = r.GetString(0);
+                        row.Id = r.GetInt64(1);
+                        row.FileName = r.GetString(2);
+                        row.RootPath = r.IsDBNull(3) ? null : r.GetString(3);
+                        row.Folder = r.IsDBNull(4) ? "" : r.GetString(4);
+                        row.HasThumb = r.GetInt64(5) != 0;
+                        list.Add(row);
+                    }
+                }
+            }
+            return list;
         }
 
         /// <summary>某个 guid 在本库的副本行（含 size / mtime，供跨库重算用）。</summary>
