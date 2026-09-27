@@ -57,6 +57,10 @@ namespace KKManager
                     return ScanModsCommand(db, rest, force);
                 case "scan-cards":
                     return ScanCardsCommand(db, rest, force, thumb, quality);
+                case "scan-main":
+                    return ScanScopeCommand(db, force, ScanScope.Preset, thumb, quality);
+                case "scan-extra":
+                    return ScanScopeCommand(db, force, ScanScope.Extra, thumb, quality);
                 case "stats":
                     return StatsCommand(db);
                 case "authors":
@@ -112,6 +116,8 @@ namespace KKManager
             Console.WriteLine("  thumb     <card.png> <out.jpg>        导出缩略图（离线核对）");
             Console.WriteLine("  scan-mods [目录...]                   扫描 mod 库（无目录则用已配置的库根）");
             Console.WriteLine("  scan-cards [目录...]                  扫描卡片库（无目录则用已配置的库根）");
+            Console.WriteLine("  scan-main                             扫描主要库（预置条目——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio）");
+            Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
             Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者）");
@@ -455,6 +461,33 @@ namespace KKManager
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
+                foreach (string e in r.Errors)
+                {
+                    Console.WriteLine("  ! " + e);
+                }
+            }
+            return 0;
+        }
+        /// <summary>按范围扫描（面板「扫描主要 / 追加库扫描」的 CLI 通道）——mod 与卡片两轮，结果合并展示；离线库一律跳过。</summary>
+        private static int ScanScopeCommand(string db, bool force, ScanScope scope, int thumb, int quality)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig disk = hub.Core.LoadRoots();
+                RootsRules.Normalize(disk);
+                hub.EnsureMigrated(disk);
+                Console.WriteLine("库: " + hub.CorePath);
+                Console.WriteLine(scope == ScanScope.Preset
+                    ? "范围: 主要库——预置条目（mod 主库 / 缓存库槽位 + 卡片 female / coordinate / Studio）"
+                    : "范围: 追加库——使用者添加的库根（mod 冷冻库 + 卡片附加库）");
+                System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+                ScanResult r = new ScanResult();
+                r.Merge(Scanner.ScanMods(hub, disk, null, scope, force, m => Console.WriteLine(m)));
+                r.Merge(Scanner.ScanCards(hub, disk, null, scope, force, thumb, quality, m => Console.WriteLine(m)));
+                Console.WriteLine();
+                Console.WriteLine("扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
+                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
+                    + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);

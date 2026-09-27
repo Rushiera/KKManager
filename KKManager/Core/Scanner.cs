@@ -6,6 +6,19 @@ using KKManager.Data;
 
 namespace KKManager.Core
 {
+    /// <summary>扫描范围——All 全部库根 · Preset 预置条目（主库 / 缓存库槽位）· Extra 使用者添加的库根。</summary>
+    public enum ScanScope
+    {
+        /// <summary>全部库根。</summary>
+        All,
+
+        /// <summary>预置条目——mod 主库 + 缓存库槽位 + 卡片 3 条锁定主库。</summary>
+        Preset,
+
+        /// <summary>使用者添加的库根——mod 冷冻库 + 卡片附加库。</summary>
+        Extra
+    }
+
     /// <summary>扫描统计。</summary>
     public class ScanResult
     {
@@ -37,6 +50,30 @@ namespace KKManager.Core
 
         /// <summary>错误明细（上限 200 条）。</summary>
         public List<string> Errors { get; } = new List<string>();
+        /// <summary>并入另一轮扫描的计数（「扫描主要 / 追加库扫描」是两轮扫描，面板合并展示）——耗时相加，错误明细续接。</summary>
+        public void Merge(ScanResult other)
+        {
+            if (other == null)
+            {
+                return;
+            }
+            Seen += other.Seen;
+            Added += other.Added;
+            Skipped += other.Skipped;
+            Failed += other.Failed;
+            NonCard += other.NonCard;
+            RefEntries += other.RefEntries;
+            ThumbBytes += other.ThumbBytes;
+            Removed += other.Removed;
+            Elapsed += other.Elapsed;
+            foreach (string e in other.Errors)
+            {
+                if (Errors.Count < 200)
+                {
+                    Errors.Add(e);
+                }
+            }
+        }
 
         /// <summary>本次扫描判定为「该离线」的库根路径——目录不存在或枚举到 0 个东西（预置条目不在此列）；由调用方置位配置并生成待办。</summary>
         public List<string> OfflineRoots { get; } = new List<string>();
@@ -51,11 +88,11 @@ namespace KKManager.Core
         /// <summary>扫描 mod 库（按级别升序）——按库根路由到对应库文件；库根不存在时出声跳过，不代建目录。</summary>
         public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, bool force, Action<string> log)
         {
-            return ScanMods(hub, cfg, null, force, log);
+            return ScanMods(hub, cfg, null, ScanScope.All, force, log);
         }
 
-        /// <summary>扫描 mod 库——only 非空时只扫该条库根（面板「更新本库」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
-        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, RootEntry only, bool force, Action<string> log)
+        /// <summary>扫描 mod 库——only 非空时只扫该条库根（面板「更新本库」）· scope 限定预置条目 / 使用者添加的库根（面板「扫描主要 / 追加库扫描」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
+        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, Action<string> log)
         {
             Stopwatch watch = Stopwatch.StartNew();
             ScanResult result = new ScanResult();
@@ -64,6 +101,10 @@ namespace KKManager.Core
             foreach (RootEntry root in roots)
             {
                 if (only != null && !SamePath(root.path, only.path))
+                {
+                    continue;
+                }
+                if (!InScope(root, scope, true))
                 {
                     continue;
                 }
@@ -187,11 +228,11 @@ namespace KKManager.Core
         /// <summary>扫描卡片库（按级别升序），提取 mod 声明与缩略图——按库根路由到对应库文件。</summary>
         public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, bool force, int thumbWidth, int thumbQuality, Action<string> log)
         {
-            return ScanCards(hub, cfg, null, force, thumbWidth, thumbQuality, log);
+            return ScanCards(hub, cfg, null, ScanScope.All, force, thumbWidth, thumbQuality, log);
         }
 
-        /// <summary>扫描卡片库——only 非空时只扫该条库根（面板「更新本库」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
-        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, RootEntry only, bool force, int thumbWidth, int thumbQuality, Action<string> log)
+        /// <summary>扫描卡片库——only 非空时只扫该条库根（面板「更新本库」）· scope 限定预置条目 / 使用者添加的库根（面板「扫描主要 / 追加库扫描」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
+        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, Action<string> log)
         {
             Stopwatch watch = Stopwatch.StartNew();
             ScanResult result = new ScanResult();
@@ -200,6 +241,10 @@ namespace KKManager.Core
             foreach (RootEntry root in roots)
             {
                 if (only != null && !SamePath(root.path, only.path))
+                {
+                    continue;
+                }
+                if (!InScope(root, scope, false))
                 {
                     continue;
                 }
@@ -425,6 +470,20 @@ namespace KKManager.Core
             string x = (a ?? "").Trim().TrimEnd('\\', '/');
             string y = (b ?? "").Trim().TrimEnd('\\', '/');
             return string.Equals(x, y, StringComparison.OrdinalIgnoreCase);
+        }
+        /// <summary>库根是否落在本次扫描范围内——预置条目 = 锁定主库 / mod 缓存库槽位（不可离线的那些），其余为使用者添加的库根。</summary>
+        private static bool InScope(RootEntry root, ScanScope scope, bool isMods)
+        {
+            if (scope == ScanScope.All)
+            {
+                return true;
+            }
+            bool preset = !RootsRules.CanOffline(root, isMods);
+            if (scope == ScanScope.Preset)
+            {
+                return preset;
+            }
+            return !preset;
         }
 
         /// <summary>枚举文件——failed 为真表示枚举本身失败（此时空结果不代表目录为空）。</summary>

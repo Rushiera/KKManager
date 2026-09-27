@@ -1914,17 +1914,17 @@ namespace KKManager.Web
                         RootsConfig cfg = hub.Core.LoadRoots();
                         RootsRules.Normalize(cfg);
                         hub.EnsureMigrated(cfg);
+                        int thumbWidth = int.Parse(hub.Core.GetSetting("thumbWidth") ?? "256");
+                        int quality = int.Parse(hub.Core.GetSetting("quality") ?? "82");
+                        Action<string> log = m => SetMessage(m);
                         bool isMods = target == "mods";
-                        List<RootEntry> roots = isMods ? cfg.ModRootsOrdered() : cfg.CardRootsOrdered();
-                        if (roots.Count == 0)
-                        {
-                            throw new InvalidOperationException(isMods ? "未设置 mod 库根" : "未设置卡片库根");
-                        }
-                        // 单库更新（面板「更新本库」）——只扫这一条；离线库不参与扫描
+
+                        // [段1] 单库更新（面板「更新本库」）——只扫这一条；离线库不参与扫描
                         RootEntry only = null;
                         if (!string.IsNullOrWhiteSpace(rootPath))
                         {
-                            foreach (RootEntry e in roots)
+                            List<RootEntry> list = isMods ? cfg.ModRootsOrdered() : cfg.CardRootsOrdered();
+                            foreach (RootEntry e in list)
                             {
                                 if (string.Equals((e.path ?? "").Trim(), rootPath.Trim(), StringComparison.OrdinalIgnoreCase))
                                 {
@@ -1941,25 +1941,40 @@ namespace KKManager.Web
                                 throw new InvalidOperationException("该库已离线——先上线再更新：" + only.path);
                             }
                         }
-                        lock (ScanLock)
-                        {
-                            _scan.RootCount = only == null ? roots.Count : 1;
-                        }
 
-                        Action<string> log = m => SetMessage(m);
-                        ScanAction scan;
-                        if (isMods)
+                        // [段2] 扫描范围——main = 预置条目（mod 主库 + 缓存库槽位 + 卡片 3 条锁定主库）· extra = 使用者添加的库根（不分卡片与 mod，离线库跳过）
+                        ScanResult r = new ScanResult();
+                        if (target == "main" || target == "extra")
                         {
-                            scan = () => Scanner.ScanMods(hub, cfg, only, force, log);
+                            ScanScope scope = target == "main" ? ScanScope.Preset : ScanScope.Extra;
+                            lock (ScanLock)
+                            {
+                                _scan.RootCount = cfg.ModRootsOrdered().Count + cfg.CardRootsOrdered().Count;
+                            }
+                            r.Merge(Scanner.ScanMods(hub, cfg, null, scope, force, log));
+                            r.Merge(Scanner.ScanCards(hub, cfg, null, scope, force, thumbWidth, quality, log));
                         }
                         else
                         {
-                            int thumbWidth = int.Parse(hub.Core.GetSetting("thumbWidth") ?? "256");
-                            int quality = int.Parse(hub.Core.GetSetting("quality") ?? "82");
-                            scan = () => Scanner.ScanCards(hub, cfg, only, force, thumbWidth, quality, log);
+                            List<RootEntry> roots = isMods ? cfg.ModRootsOrdered() : cfg.CardRootsOrdered();
+                            if (roots.Count == 0)
+                            {
+                                throw new InvalidOperationException(isMods ? "未设置 mod 库根" : "未设置卡片库根");
+                            }
+                            lock (ScanLock)
+                            {
+                                _scan.RootCount = only == null ? roots.Count : 1;
+                            }
+                            if (isMods)
+                            {
+                                r = Scanner.ScanMods(hub, cfg, only, ScanScope.All, force, log);
+                            }
+                            else
+                            {
+                                r = Scanner.ScanCards(hub, cfg, only, ScanScope.All, force, thumbWidth, quality, log);
+                            }
                         }
 
-                        ScanResult r = scan();
                         lock (ScanLock)
                         {
                             _scan.Seen = r.Seen;

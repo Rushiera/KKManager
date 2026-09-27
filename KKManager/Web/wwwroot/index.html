@@ -176,8 +176,8 @@
 <body>
 <header>
   <h1>KK Manager <span>by Rushiera</span></h1>
-  <button class="primary" id="btnScanMods">扫描 mod 库</button>
-  <button class="primary" id="btnScanCards">扫描卡片库</button>
+  <button class="primary" id="btnScanMain" title="扫描主要库——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio（预置条目）">扫描主要</button>
+  <button class="primary" id="btnScanExtra" title="扫描追加库——使用者自己添加的库根（mod 冷冻库 + 卡片附加库）；离线库跳过">追加库扫描</button>
   <button id="btnSettings">库根设置</button>
   <label class="authbox" id="authBox" title="默认不授权——勾选后须确认声明才授权，随时可撤销"><input type="checkbox" id="chkAuth">编辑授权</label>
   <span class="grow"></span>
@@ -2214,6 +2214,7 @@ function renderModCards(){
 }
 
 /* ---------- 扫描 ---------- */
+const SCAN_TARGET = {main:'主要库', extra:'追加库', mods:'mod 库', cards:'卡片库'};
 async function startScan(target){
   const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({target})});
   if(!r.ok){ alert(r.error || '启动失败'); return; }
@@ -2227,13 +2228,13 @@ async function pollScan(){
     const s = await api('/api/scan/status');
     const total = s.seen || 0;
     const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
-    $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
+    $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${SCAN_TARGET[s.target]||s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
       + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '');
     $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
     $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
-    $('btnScanMods').disabled = s.running;
-    $('btnScanCards').disabled = s.running;
+    $('btnScanMain').disabled = s.running;
+    $('btnScanExtra').disabled = s.running;
     if(!s.running){
       clearInterval(timer); timer = null;
       await loadStats(); await loadFolders(); await reload();
@@ -2285,8 +2286,8 @@ $('btnSortMtime').onclick = () => setCardSort('mtime');
 $('btnSortSize').onclick = () => setCardSort('size');
 $('btnPickGameRoot').onclick = pickGameRoot;
 $('gameRoot').addEventListener('change', () => { syncMainRoots().catch(e => alert('刷新级别 1 路径失败：' + e.message)); });
-$('btnScanMods').onclick = () => startScan('mods');
-$('btnScanCards').onclick = () => startScan('cards');
+$('btnScanMain').onclick = () => startScan('main');
+$('btnScanExtra').onclick = () => startScan('extra');
 $('btnScanFloatHide').onclick = () => $('scanFloat').classList.add('hidden');
 $('btnFoldFolders').onclick = () => {
   state.foldFolders = !state.foldFolders;
