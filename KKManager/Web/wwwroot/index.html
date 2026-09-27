@@ -267,7 +267,7 @@
     <button id="btnReload">刷新</button>
   </div>
 
-  <div class="row" style="margin-bottom:6px;align-items:center">
+  <div class="row" id="foldRow" style="margin-bottom:6px;align-items:center">
     <button id="btnFoldFolders">折叠文件夹</button>
     <span class="dim" id="foldHint">折叠后每个库只占一排（点根名下方的 chip 切换文件范围）</span>
   </div>
@@ -2356,6 +2356,7 @@ async function switchTab(tab){
   $('viewMods').classList.toggle('hidden', tab!=='mods');
   $('viewMissing').classList.toggle('hidden', tab!=='missing');
   $('folderBar').classList.toggle('hidden', tab!=='cards');
+  $('foldRow').classList.toggle('hidden', tab!=='cards');
   $('sortBar').classList.toggle('hidden', tab!=='cards');
   const f = $('filter');
   f.classList.toggle('hidden', tab==='missing');

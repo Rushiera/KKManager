@@ -123,6 +123,26 @@ namespace KKManager.Web
         private static readonly System.Threading.SemaphoreSlim RequestGate = new System.Threading.SemaphoreSlim(1, 1);
         /// <summary>文件夹选择框是否已弹出（0=空闲 1=占用）——防止一次点出多个看不见的模态框。</summary>
         private static int BrowseActive;
+        /// <summary>浏览框宿主窗句柄（枚举本线程顶层窗口时排除它）。</summary>
+        private static IntPtr BrowseHostHandle;
+        /// <summary>选择框句柄（找到后记录——超时主动关闭用；IntPtr.Zero = 未找到）。</summary>
+        private static IntPtr BrowseDlgHandle;
+        /// <summary>浏览框所在线程 ID（EnumThreadWindows 只枚举该线程创建的顶层窗口）。</summary>
+        private static uint BrowseThreadId;
+        /// <summary>置顶定时器——Tick 由选择框的模态消息循环泵动，不额外起线程。</summary>
+        private static System.Windows.Forms.Timer BrowseTopTimer;
+        /// <summary>置顶定时器已 Tick 次数（诊断——Tick 在推进即说明消息循环活着）。</summary>
+        private static int BrowseTopTicks;
+        /// <summary>置顶是否曾成功过（诊断用——不再据此停表：框可能先创建后显示，显示时会重置 z-order）。</summary>
+        private static bool BrowseTopDone;
+        /// <summary>上次记录的选择框可见状态（诊断——只在状态变化时出声）。</summary>
+        private static bool BrowseLastVisible;
+        /// <summary>本轮枚举到的对话框类窗口（优先置顶对象）。</summary>
+        private static List<IntPtr> BrowseDlgFound;
+        /// <summary>本轮枚举到的其它可见顶层窗口（没找到对话框类时的备选）。</summary>
+        private static List<IntPtr> BrowseOtherFound;
+        /// <summary>EnumThreadWindows 回调委托——存字段防 GC 回收。</summary>
+        private static readonly EnumThreadProc BrowseEnumProcRef = BrowseEnumProc;
         private static ScanState _scan = new ScanState();
         private static readonly object ScanLock = new object();
         /// <summary>「未引用 mod 移到缓存库」后台任务状态（含最近一次结果）。</summary>
@@ -267,6 +287,154 @@ namespace KKManager.Web
         /// <summary>把窗口带到前台——弹框不抢焦点时把可见窗口提到最前。</summary>
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+        /// <summary>调整窗口 z-order / 位置 / 尺寸——HWND_TOPMOST 让选择框压过全屏浏览器（不依赖抢前台）。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        /// <summary>枚举指定线程创建的顶层窗口。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool EnumThreadWindows(uint dwThreadId, EnumThreadProc lpfn, IntPtr lParam);
+        /// <summary>取窗口类名（Win32 对话框为 #32770）。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+        /// <summary>取窗口标题（诊断用）。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        /// <summary>窗口是否可见（诊断用）。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        /// <summary>投递窗口消息——超时主动关闭选择框（WM_CLOSE）。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        /// <summary>显示窗口——SHBrowseForFolder 先创建后显示，本方法兜底把「已创建但未显示」的框显示出来。</summary>
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        /// <summary>取当前系统线程 ID（EnumThreadWindows 的入参）。</summary>
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+        /// <summary>EnumThreadWindows 回调签名。</summary>
+        private delegate bool EnumThreadProc(IntPtr hWnd, IntPtr lParam);
+
+        /// <summary>z-order 目标——置顶（HWND_TOPMOST）。</summary>
+        private static readonly IntPtr HwndTopmost = new IntPtr(-1);
+        /// <summary>SetWindowPos 标志——不移动。</summary>
+        private const uint SwpNoMove = 0x0002;
+        /// <summary>SetWindowPos 标志——不改尺寸。</summary>
+        private const uint SwpNoSize = 0x0001;
+        /// <summary>SetWindowPos 标志——需要时显示。</summary>
+        private const uint SwpShowWindow = 0x0040;
+        /// <summary>WM_CLOSE 消息号。</summary>
+        private const uint WmClose = 0x0010;
+        /// <summary>ShowWindow 的 nCmdShow——正常显示。</summary>
+        private const int SwShownormal = 1;
+        /// <summary>Win32 对话框窗口类名——FolderBrowserDialog 的宿主类。</summary>
+        private const string DialogClassName = "#32770";
+
+        /// <summary>启动置顶定时器——Tick 由 ShowDialog 的模态消息循环泵动，把选择框提到最上层。</summary>
+        private static void StartBrowseTopTimer()
+        {
+            BrowseThreadId = GetCurrentThreadId();
+            BrowseTopTicks = 0;
+            BrowseTopDone = false;
+            BrowseDlgHandle = IntPtr.Zero;
+            System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+            timer.Interval = 200;
+            timer.Tick += BrowseTopOnTick;
+            BrowseTopTimer = timer;
+            timer.Start();
+            Console.WriteLine("[浏览] 置顶定时器已启动——线程 " + BrowseThreadId.ToString() + " · 每 200 ms 扫一次");
+        }
+
+        /// <summary>停止并释放置顶定时器（幂等）。</summary>
+        private static void StopBrowseTopTimer()
+        {
+            System.Windows.Forms.Timer timer = BrowseTopTimer;
+            if (timer == null)
+            {
+                return;
+            }
+            timer.Stop();
+            timer.Dispose();
+            BrowseTopTimer = null;
+        }
+
+        /// <summary>置顶定时器 Tick——枚举本线程顶层窗口，把选择框（#32770）提到最上层；不可见则强制显示，持续执行到对话框关闭（框可能先创建后显示，显示时会重置 z-order，故不一次成功即停）。</summary>
+        private static void BrowseTopOnTick(object sender, EventArgs e)
+        {
+            BrowseTopTicks = BrowseTopTicks + 1;
+            BrowseDlgFound = new List<IntPtr>();
+            BrowseOtherFound = new List<IntPtr>();
+            EnumThreadWindows(BrowseThreadId, BrowseEnumProcRef, IntPtr.Zero);
+            List<IntPtr> found = BrowseDlgFound;
+            if (found.Count == 0)
+            {
+                found = BrowseOtherFound;
+            }
+            if (found.Count == 0)
+            {
+                if (BrowseTopTicks <= 3)
+                {
+                    Console.WriteLine("[浏览] 置顶扫描 #" + BrowseTopTicks + "：本线程还没有可置顶的顶层窗口");
+                }
+                return;
+            }
+            IntPtr dlg = found[0];
+            BrowseDlgHandle = dlg;
+            bool visible = IsWindowVisible(dlg);
+            bool first = BrowseTopTicks <= 5;
+            bool changed = visible != BrowseLastVisible;
+            if (!visible)
+            {
+                // [段1] 框已创建但未显示——强制显示（创建与显示之间会泵消息，定时器可能插在中间）
+                ShowWindow(dlg, SwShownormal);
+            }
+            // [段2] 持续置顶——每 200 ms 一次（幂等，代价可忽略），直到对话框关闭才停表
+            bool ok = SetWindowPos(dlg, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpShowWindow);
+            int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            if (ok)
+            {
+                BrowseTopDone = true;
+            }
+            if (first || changed || !ok)
+            {
+                Console.WriteLine("[浏览] 置顶扫描 #" + BrowseTopTicks + "：句柄 " + dlg.ToString()
+                    + " · 可见=" + (visible ? "是" : "否（已强制显示）")
+                    + " · SetWindowPos " + (ok ? "成功" : "失败（Win32 错误 " + err.ToString() + "）"));
+            }
+            BrowseLastVisible = visible;
+        }
+
+        /// <summary>EnumThreadWindows 回调——收集本线程顶层窗口（#32770 优先 · 其它可见窗备选），并打印诊断。</summary>
+        private static bool BrowseEnumProc(IntPtr hWnd, IntPtr lParam)
+        {
+            StringBuilder cls = new StringBuilder(256);
+            GetClassName(hWnd, cls, 256);
+            string clsName = cls.ToString();
+            StringBuilder title = new StringBuilder(256);
+            GetWindowText(hWnd, title, 256);
+            bool visible = IsWindowVisible(hWnd);
+            if (BrowseTopTicks <= 3)
+            {
+                Console.WriteLine("[浏览]   顶层窗 " + hWnd.ToString() + " 类=" + clsName
+                    + " 标题=" + title.ToString() + " 可见=" + (visible ? "是" : "否"));
+            }
+            if (hWnd == BrowseHostHandle)
+            {
+                return true;
+            }
+            if (clsName == DialogClassName)
+            {
+                if (BrowseDlgFound != null)
+                {
+                    BrowseDlgFound.Add(hWnd);
+                }
+                return true;
+            }
+            if (visible && BrowseOtherFound != null)
+            {
+                BrowseOtherFound.Add(hWnd);
+            }
+            return true;
+        }
         /// <summary>面板版本（程序集版本）——回给前端显示，便于一眼核对「跑的是哪一份产物」。</summary>
         private static string PanelVersion()
         {
@@ -1058,6 +1226,7 @@ namespace KKManager.Web
                 string picked = null;
                 string error = null;
                 context.Response.ContentType = "application/json; charset=utf-8";
+                Console.WriteLine("[浏览] 请求到达——开一个文件夹选择框");
                 // 防叠：上一个选择框未关闭时不再弹新的（满屏看不见的模态框是最坏情况）
                 if (System.Threading.Interlocked.CompareExchange(ref BrowseActive, 1, 0) != 0)
                 {
@@ -1091,18 +1260,24 @@ namespace KKManager.Web
                             host.Controls.Add(hint);
                             host.Show();
                             host.Activate();
-                            SetForegroundWindow(host.Handle);
-                            Console.WriteLine("[浏览] 宿主窗已显示 @" + host.Location.X + "," + host.Location.Y);
+                            bool fg = SetForegroundWindow(host.Handle);
+                            BrowseHostHandle = host.Handle;
+                            Console.WriteLine("[浏览] 宿主窗已显示 @" + host.Location.X + "," + host.Location.Y
+                                + " · 句柄 " + host.Handle.ToString()
+                                + " · SetForegroundWindow " + (fg ? "成功" : "失败（前台锁定——不阻塞，靠置顶兜底）"));
+                            StartBrowseTopTimer();
                             using (System.Windows.Forms.FolderBrowserDialog dlg = new System.Windows.Forms.FolderBrowserDialog())
                             {
                                 dlg.Description = "选择文件夹";
                                 dlg.ShowNewFolderButton = true;
                                 System.Windows.Forms.DialogResult result = dlg.ShowDialog(host);
+                                StopBrowseTopTimer();
                                 if (result == System.Windows.Forms.DialogResult.OK)
                                 {
                                     picked = dlg.SelectedPath;
                                 }
-                                Console.WriteLine("[浏览] 对话框已关闭——" + (picked == null ? "取消 / 未选" : "已选 " + picked));
+                                Console.WriteLine("[浏览] 对话框已关闭——" + (picked == null ? "取消 / 未选" : "已选 " + picked)
+                                    + " · 置顶 " + (BrowseTopDone ? "已生效" : "未生效") + " · Tick " + BrowseTopTicks.ToString());
                             }
                         }
                     }
@@ -1125,8 +1300,19 @@ namespace KKManager.Web
                 bool finished = await Task.Run(() => done.Wait(TimeSpan.FromSeconds(300)));
                 if (!finished)
                 {
-                    Console.WriteLine("[浏览] 等待超时（300 秒）");
-                    await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"timeout\",\"error\":\"300 秒内未操作——框可能仍在屏幕上（按 Esc 关掉），之后可再点一次\"}");
+                    IntPtr stuck = BrowseDlgHandle;
+                    Console.WriteLine("[浏览] 等待超时（300 秒）——选择框句柄 " + stuck.ToString()
+                        + " · 置顶 " + (BrowseTopDone ? "已生效" : "未生效") + " · Tick " + BrowseTopTicks.ToString());
+                    if (stuck != IntPtr.Zero)
+                    {
+                        bool sent = PostMessage(stuck, WmClose, IntPtr.Zero, IntPtr.Zero);
+                        Console.WriteLine("[浏览] 超时主动关闭——WM_CLOSE " + (sent ? "已投递" : "投递失败"));
+                    }
+                    else
+                    {
+                        Console.WriteLine("[浏览] 超时主动关闭——没记录到选择框句柄（框若仍开着请按 Esc）");
+                    }
+                    await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"timeout\",\"error\":\"300 秒内未操作——已尝试自动关闭选择框；若框仍可见请按 Esc，之后可再点一次\"}");
                     return;
                 }
                 if (error != null)
@@ -1134,6 +1320,7 @@ namespace KKManager.Web
                     await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"exception\",\"error\":\"" + EscapeJson(error) + "\"}");
                     return;
                 }
+                Console.WriteLine("[浏览] 请求完成——" + (picked == null ? "未选（取消）" : "已选 " + picked));
                 await context.Response.WriteAsync("{\"ok\":" + (picked != null ? "true" : "false") + ",\"stage\":\"done\",\"path\":\"" + EscapeJson(picked == null ? "" : picked) + "\"}");
             });
 
