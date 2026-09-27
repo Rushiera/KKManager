@@ -1199,7 +1199,13 @@ namespace KKManager.Web
                             error = info.Error
                         });
                     }
-                    items.Add(new { guid = g.Guid, mainCount = g.MainCount, files = files });
+                    // 引用这个 guid 的卡片——面板组标题行最右侧的缩略图区（只取前三张，其余走「查看更多」叠层弹窗）
+                    List<object> cards = new List<object>();
+                    foreach (CardRow c in _hub.QueryCardsByMod(cfg, g.Guid, 1, 3))
+                    {
+                        cards.Add(new { id = c.Id, lib = c.Lib, hasThumb = c.HasThumb, fileName = c.FileName });
+                    }
+                    items.Add(new { guid = g.Guid, mainCount = g.MainCount, files = files, cards = cards, cardTotal = _hub.CountCardsByMod(cfg, g.Guid) });
                 }
                 List<ModOldRecord> olds = new List<ModOldRecord>();
                 foreach (ModOldRecord o in _hub.Core.ListModOld())

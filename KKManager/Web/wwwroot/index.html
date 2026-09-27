@@ -72,6 +72,9 @@
   .dim{color:var(--dim)}
   .hidden{display:none !important}
   .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
+  /* 弹窗层级：基础 50 · 叠加层（在重复副本之上打开 mod）55 · 引用明细 58 · 悬停浮层 60 / 70 */
+  #ovModCards{z-index:55}
+  #overlay{z-index:58}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
   .modal.wide{width:min(1120px,96vw)}
   .modal header{position:static;border:0;background:transparent;padding:12px 14px 6px}
@@ -167,10 +170,16 @@
   .offmark{background:#000;color:#e8e8e8;padding:0 4px;border-radius:3px;font-size:11px}
   /* 待办条目 */
   .tditem{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--panel2)}
-  /* 重复副本：整行点击 = 该行的操作（操作可逆——点错再点另一份即可）；「查看引用关系」跳转定位后短暂高亮该行 */
-  tr.flash td{background:#2f3b46 !important}
+  /* 重复副本：整行点击 = 该行的操作（操作可逆——点错再点另一份即可）；「查看引用关系」为叠层打开，不再跳页签定位 */
   /* 无操作行（已是主库当前版本 / 旧版在主库）——光标恢复常态，点击给说明而不是「没反应」 */
   table.list tr[data-guid].noact{cursor:default}
+  /* 重复副本组标题行最右侧：引用这个 guid 的卡片缩略图（前三张 + 查看更多）——一眼看出哪些卡在用它 */
+  .dupgrp{display:flex;align-items:center;gap:10px}
+  .dupthumbs{display:flex;align-items:center;gap:4px;flex:0 0 auto;cursor:pointer}
+  .dupth{width:26px;height:36px;object-fit:cover;border:1px solid var(--line);border-radius:4px;background:var(--panel2);display:block}
+  .dupthumbs:hover .dupth{border-color:var(--accent)}
+  .dupmore{font-size:11px;color:var(--accent);border:1px solid var(--line);border-radius:4px;padding:3px 6px;white-space:nowrap;background:var(--panel2)}
+  .dupthumbs:hover .dupmore{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -380,7 +389,7 @@
       <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px">
         <input id="dupQ" class="grow" placeholder="过滤 guid / 名称 / 文件名 / 版本 / 作者…">
       </div>
-      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝跳到 mod 清单并打开这个 mod（看哪些卡片在用它）。<b>文件名下方小字</b>＝这一份的完整文件系统路径；<b>md5</b>＝内容指纹（只算有重复的 mod，算过就留档、不再重算）——同一 guid 各份 <b>md5 不同</b>、或<b>创建 / 修改时间不同</b>、且这组还没挑过版本时，对应格标<b>红块</b>提醒你先看清再选；已挑过的组不标红。</div>
+      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝在本窗口之上<b>叠一层</b>打开这个 mod（看哪些卡片在用它）——不离开这里，关掉上层即回到本窗口原位。<b>guid 行最右侧</b>＝引用这个 mod 的卡片缩略图（前三张——点缩略图或「查看更多」看全部，同样是叠层窗口）。<b>文件名下方小字</b>＝这一份的完整文件系统路径；<b>md5</b>＝内容指纹（只算有重复的 mod，算过就留档、不再重算）——同一 guid 各份 <b>md5 不同</b>、或<b>创建 / 修改时间不同</b>、且这组还没挑过版本时，对应格标<b>红块</b>提醒你先看清再选；已挑过的组不标红。</div>
       <table class="list"><thead><tr><th style="width:118px">级别</th><th>文件名 / 路径</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:70px">大小</th><th style="width:136px">创建 / 修改</th><th style="width:112px">md5</th><th style="width:224px">操作</th></tr></thead>
         <tbody id="dupBody"></tbody></table>
     </div>
@@ -1730,7 +1739,7 @@ const DUP_ACT_TIP = {
 };
 function dupBtns(g, f){
   const gid = esc(g.guid), path = esc(f.filePath||'');
-  const ref = `<button data-act="ref" data-guid="${gid}" title="跳到 mod 清单并打开这个 mod——看哪些卡片引用了它">查看引用关系</button>`;
+  const ref = `<button data-act="ref" data-guid="${gid}" title="在本窗口之上叠一层打开这个 mod——看哪些卡片引用了它（关掉即回到这里）">查看引用关系</button>`;
   const act = dupRowAct(g, f);
   if(!act) return (f.isOld ? '' : '<span class="dim">当前版本</span>') + ref;
   const a = DUP_ACT_TIP[act];
@@ -1793,6 +1802,22 @@ function dupFileRow(g, f){
     <td>${md5Cell}</td>
     <td>${dupBtns(g, f)}</td></tr>`;
 }
+/* 组标题行最右侧的缩略图区——引用这个 guid 的卡片（前三张直观看；点它或「查看更多」叠层打开引用卡片窗口） */
+function dupThumbs(g){
+  const total = g.cardTotal || 0;
+  const cards = g.cards || [];
+  const name = (g.files && g.files[0] && g.files[0].name) ? g.files[0].name : '';
+  if(g.cardTotal === undefined && !cards.length){
+    return '';
+  }
+  if(!total && !cards.length){
+    return '<span class="dupthumbs" style="cursor:default" title="没有卡片引用这个 mod"><span class="dim" style="font-size:11px;white-space:nowrap">无卡片引用</span></span>';
+  }
+  const imgs = cards.map(c => c.hasThumb
+    ? `<img class="dupth" loading="lazy" draggable="false" alt="" title="${esc(c.fileName||'')}" src="/api/thumb/${c.id}?lib=${c.lib||0}">`
+    : `<span class="dupth" title="${esc(c.fileName||'')}（无缩略图）"></span>`).join('');
+  return `<span class="dupthumbs" data-act="more" data-guid="${esc(g.guid)}" data-name="${esc(name)}" title="引用这个 mod 的卡片——点开看全部">${imgs}<span class="dupmore">查看更多 (${total})</span></span>`;
+}
 function renderDup(reset){
   const list = dupFiltered();
   if(reset){ dupState.shown = 0; $('dupBody').innerHTML = ''; }
@@ -1811,7 +1836,7 @@ function renderDup(reset){
       html += `<tr class="grp"><td colspan="8" style="background:#1b1f24" class="dim">— 已确认（无需处理，共 ${list.length - firstDone} 组）—</td></tr>`;
     }
     const mark = dupPending(g) ? '' : ' <span class="dim">· 已确认</span>';
-    html += `<tr class="grp"><td colspan="8" style="background:#22262d"><b class="mono">${esc(g.guid)}</b> <span class="dim">${esc(name)}</span> · ${g.files.length} 份（主库 ${g.mainCount}）${mark}</td></tr>`;
+    html += `<tr class="grp"><td colspan="8" style="background:#22262d"><div class="dupgrp"><div class="grow"><b class="mono">${esc(g.guid)}</b> <span class="dim">${esc(name)}</span> · ${g.files.length} 份（主库 ${g.mainCount}）${mark}</div>${dupThumbs(g)}</div></td></tr>`;
     html += g.files.map(f => dupFileRow(g, f)).join('');
   }
   if(dupState.shown === 0) $('dupBody').innerHTML = html;
@@ -1857,42 +1882,9 @@ async function doDupOp(act, guid, path, tier, btn){
   if(btn){ btn.disabled = false; btn.textContent = label; }
   $('dupFoot').textContent = msg;
 }
-/* 「查看引用关系」——关掉重复副本弹窗 → 切到 mod 清单 → 定位该行（目标被过滤掉先清过滤）→ 打开这个 mod */
+/* 「查看引用关系」——不离开本页：在重复副本弹窗之上叠一层 mod 窗口（关掉即回到原处，页面与滚动位置都不动） */
 async function gotoModFromDup(guid){
-  $('ovDup').classList.add('hidden');
-  await switchTab('mods');
-  await locateModRow(guid);
-  openModCards(guid, guid);
-}
-/* 在 mod 清单里定位一行：搜索框挡在数据源外 → 清空重取；作者筛选挡住 → 清筛选；分块渲染推进到该行 → 滚动到可见 + 短暂高亮 */
-async function locateModRow(guid){
-  if(!(state.modRows || []).some(m => m.guid === guid)){
-    if($('q').value) $('q').value = '';
-    await loadMods();
-  }
-  if((state.modAuthors || []).length){
-    state.modAuthors = [];
-    updateAuthorMark();
-    renderMods(true);
-  }
-  let idx = (state.modView || []).findIndex(m => m.guid === guid);
-  if(idx < 0){ renderMods(true); idx = (state.modView || []).findIndex(m => m.guid === guid); }
-  if(idx < 0) return false;
-  let guard = 0;
-  while(state.modShown <= idx && state.modShown < (state.modView || []).length && guard < 400){
-    renderMods(false);
-    guard = guard + 1;
-  }
-  const rows = $('modsBody').rows;
-  for(let i = 0; i < rows.length; i++){
-    if(rows[i].dataset.guid === guid){
-      rows[i].scrollIntoView({block:'center'});
-      rows[i].classList.add('flash');
-      setTimeout(() => rows[i].classList.remove('flash'), 2200);
-      return true;
-    }
-  }
-  return false;
+  await openModCards(guid, guid);
 }
 
 /* ---------- 某 mod 的引用卡片（mod 列表 / 缺失清单 / 引用明细行 点入） ---------- */
@@ -1912,6 +1904,15 @@ async function loadU3dMap(guid){
   }
 }
 
+/* mod 行数据（名称 / 版本 / 作者 / 被引用数）——从重复副本叠层打开时 mod 页签可能还没取过数据，按 guid 单独补一次（不动页签的搜索框与筛选） */
+async function fetchModRow(guid){
+  try{
+    const rows = await api(`/api/mods?page=1&size=0&filter=all&q=${encodeURIComponent(guid)}`);
+    return (rows || []).find(m => m.guid === guid) || null;
+  }catch(e){
+    return null;
+  }
+}
 /* 信息区：mod 概况（本地行数据）+ 本地副本清单（每条可在资源管理器定位）+「查看 mod 组成」按钮 */
 async function loadModInfo(guid){
   compState = { guid:guid, files:[], row:null, dirs:[], entries:[], view:[], shown:0, batch:200, filter:'', dirFilter:'', loaded:false, textMap:{}, u3dMap:{} };
@@ -1922,7 +1923,7 @@ async function loadModInfo(guid){
   $('mcComp').innerHTML = '';
   $('tip').classList.add('hidden');
   $('mcModInfo').innerHTML = '<span class="dim">读取 mod 信息…</span>';
-  compState.row = (state.modRows || []).find(m => m.guid === guid) || null;
+  compState.row = (state.modRows || []).find(m => m.guid === guid) || await fetchModRow(guid);
   try{
     compState.files = await api(`/api/mod/${encodeURIComponent(guid)}/files`) || [];
   }catch(e){
@@ -2624,9 +2625,10 @@ $('btnDupReload').onclick = () => loadDup();
 $('dupQ').addEventListener('input', () => renderDup(true));
 /* 按钮优先——命中按钮即 return（含「查看引用关系」），不会与整行点击重复触发同一动作 */
 $('dupBody').addEventListener('click', e => {
-  const b = e.target.closest ? e.target.closest('button[data-act]') : null;
+  const b = e.target.closest ? e.target.closest('button[data-act], [data-act="more"]') : null;
   if(b){
     if(b.dataset.act === 'ref'){ gotoModFromDup(b.dataset.guid); return; }
+    if(b.dataset.act === 'more'){ openModCards(b.dataset.guid, b.dataset.name || b.dataset.guid); return; }
     doDupOp(b.dataset.act, b.dataset.guid, b.dataset.path, parseInt(b.dataset.tier||'0',10), b);
     return;
   }
