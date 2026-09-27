@@ -84,6 +84,8 @@ namespace KKManager
                     return OldOpCommand(db, rest, "swap");
                 case "promote":
                     return OldOpCommand(db, rest, "promote");
+                case "sort":
+                    return SortCommand(db, rest);
                 case "roots-list":
                     return RootsListCommand(db);
                 case "roots-add":
@@ -129,6 +131,9 @@ namespace KKManager
             Console.WriteLine("  mark-old <guid> <文件路径>            把该副本判为旧版：加 .old 段 + 移到缓存库 + 留新旧版本记录");
             Console.WriteLine("  swap     <guid> <文件路径>            把这份旧版与主库当前版本完全互换（位置 + 名字）");
             Console.WriteLine("  promote  <guid> <文件路径>            把这份旧版搬入主库并正名（去掉 .old 段）");
+            Console.WriteLine("  sort plan [目录...]                   生成「按作者整理」计划（无目录 = 全部可整理的 mod 库根；平铺 + 作者文件夹 + 冲突检测）");
+            Console.WriteLine("  sort show                             读整理计划表（做一次快照核对——已在快照位置的行标 √）");
+            Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  roots-list                            列出已配置的库根");
             Console.WriteLine("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]");
             Console.WriteLine("  roots-clear <mods|cards|all>          清空库根配置");
@@ -819,6 +824,163 @@ namespace KKManager
                 }
             }
             return 0;
+        }
+
+        /// <summary>「按作者整理」命令行通道——plan 生成计划 / show 读计划表并核对 / exec 执行（与面板端点同一实现）。</summary>
+        private static int SortCommand(string db, List<string> rest)
+        {
+            string sub = rest.Count > 0 ? rest[0] : "show";
+            if (rest.Count > 0)
+            {
+                rest.RemoveAt(0);
+            }
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+
+                if (sub == "plan")
+                {
+                    List<string> roots = new List<string>(rest);
+                    if (roots.Count == 0)
+                    {
+                        foreach (RootEntry e in cfg.ModRootsOrdered())
+                        {
+                            if (e.readOnly || e.offline)
+                            {
+                                continue;
+                            }
+                            roots.Add(e.path);
+                        }
+                    }
+                    if (roots.Count == 0)
+                    {
+                        Console.Error.WriteLine("没有可整理的库根（只读 / 离线库不参与）");
+                        return 2;
+                    }
+                    hub.Core.ClearSortPlans();
+                    SortJobState job = new SortJobState();
+                    SortOrganizer.BuildPlan(hub, cfg, roots, job);
+                    Console.WriteLine("计划 #" + job.PlanId.ToString() + "：" + job.Message);
+                    Console.WriteLine("  条目 " + job.Total.ToString() + " · 冲突 " + job.Conflicts.ToString());
+                    return job.Conflicts > 0 ? 1 : 0;
+                }
+
+                SortPlanRow plan = hub.Core.LatestSortPlan();
+                if (plan == null)
+                {
+                    Console.WriteLine("还没有整理计划——先跑 sort plan");
+                    return 0;
+                }
+
+                if (sub == "show")
+                {
+                    long conflicts = SortOrganizer.RecheckPlan(hub, plan.Id);
+                    hub.Core.FinishSortPlan(plan.Id, plan.State, plan.ItemCount, conflicts, plan.Note);
+                    Console.WriteLine("计划 #" + plan.Id.ToString() + " · " + plan.CreatedAt + " · 状态 " + plan.State + " · 条目 " + plan.ItemCount.ToString());
+                    foreach (string line in plan.Scope.Split('\n'))
+                    {
+                        if (line.Trim().Length > 0)
+                        {
+                            Console.WriteLine("  范围: " + line);
+                        }
+                    }
+                    long pending = 0;
+                    long conflict = 0;
+                    long moved = 0;
+                    long failed = 0;
+                    long skipped = 0;
+                    List<SortPlanItemRow> all = hub.Core.QuerySortPlanItems(plan.Id);
+                    foreach (SortPlanItemRow r in all)
+                    {
+                        if (r.State == SortOrganizer.StateMoved)
+                        {
+                            moved = moved + 1;
+                        }
+                        else if (r.State == SortOrganizer.StateConflict)
+                        {
+                            conflict = conflict + 1;
+                        }
+                        else if (r.State == SortOrganizer.StateFailed)
+                        {
+                            failed = failed + 1;
+                        }
+                        else if (r.State == SortOrganizer.StateSkipped)
+                        {
+                            skipped = skipped + 1;
+                        }
+                        else
+                        {
+                            pending = pending + 1;
+                        }
+                    }
+                    long shownConflict = 0;
+                    foreach (SortPlanItemRow r in all)
+                    {
+                        if (r.State != SortOrganizer.StateConflict || shownConflict >= 40)
+                        {
+                            continue;
+                        }
+                        Console.WriteLine("  [冲突] " + r.SrcPath + " ⇒ " + r.DestPath + "（" + r.Note + "）");
+                        shownConflict = shownConflict + 1;
+                    }
+                    long shown = 0;
+                    foreach (SortPlanItemRow r in all)
+                    {
+                        if (r.State != SortOrganizer.StatePending || shown >= 20)
+                        {
+                            continue;
+                        }
+                        Console.WriteLine("  [待搬] " + r.Folder + " ← " + r.SrcPath);
+                        shown = shown + 1;
+                    }
+                    Console.WriteLine("统计：待搬 " + pending.ToString() + " · 就位 " + moved.ToString()
+                        + " · 冲突 " + conflict.ToString() + " · 失败 " + failed.ToString() + " · 跳过 " + skipped.ToString());
+                    if (conflict > 0)
+                    {
+                        Console.Error.WriteLine("冲突未清零——处理完（或改名 / 删掉目标同名文件）再跑一次 sort show 核对");
+                        return 1;
+                    }
+                    return 0;
+                }
+
+                if (sub == "exec")
+                {
+                    bool yes = false;
+                    foreach (string a in rest)
+                    {
+                        if (a == "--yes")
+                        {
+                            yes = true;
+                        }
+                    }
+                    if (!yes)
+                    {
+                        Console.Error.WriteLine("执行会移动磁盘文件——请加 --yes 确认（并确保 koikatsu 已关闭）");
+                        return 2;
+                    }
+                    long conflicts = hub.Core.CountSortPlanItems(plan.Id, SortOrganizer.StateConflict);
+                    if (conflicts > 0)
+                    {
+                        Console.Error.WriteLine("还有 " + conflicts.ToString() + " 条冲突未解决——先处理再执行");
+                        return 2;
+                    }
+                    SortJobState job = new SortJobState();
+                    SortOrganizer.ExecutePlan(hub, cfg, plan.Id, job);
+                    Console.WriteLine("执行：就位 " + job.Moved.ToString() + " · 跳过 " + job.Skipped.ToString()
+                        + " · 失败 " + job.Failed.ToString() + " · 冲突 " + job.Conflicts.ToString()
+                        + " · 清空目录 " + job.PrunedDirs.ToString());
+                    foreach (string err in job.Errors)
+                    {
+                        Console.Error.WriteLine("  失败：" + err);
+                    }
+                    return job.Failed > 0 ? 1 : 0;
+                }
+
+                Console.Error.WriteLine("未知子命令: " + sub + "（可用：plan / show / exec）");
+                return 2;
+            }
         }
 
         private static int RootsListCommand(string db)

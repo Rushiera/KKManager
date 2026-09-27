@@ -252,6 +252,77 @@ namespace KKManager.Data
         public string ScanTime { get; set; }
     }
 
+    /// <summary>按作者整理计划的头——一条计划对应一次「范围 → 平铺预览」的快照。</summary>
+    public class SortPlanRow
+    {
+        /// <summary>计划 id。</summary>
+        public long Id { get; set; }
+
+        /// <summary>范围——参与整理的库根路径（换行分隔）。</summary>
+        public string Scope { get; set; }
+
+        /// <summary>生成时刻。</summary>
+        public string CreatedAt { get; set; }
+
+        /// <summary>条目总数。</summary>
+        public long ItemCount { get; set; }
+
+        /// <summary>冲突条目数（目标路径已存在 / 计划内撞车）——必须清零才能执行。</summary>
+        public long ConflictCount { get; set; }
+
+        /// <summary>计划状态：building 生成中 / ready 可用 / outdated 范围变更后过期。</summary>
+        public string State { get; set; }
+
+        /// <summary>备注（生成失败原因 / 提示）。</summary>
+        public string Note { get; set; }
+    }
+
+    /// <summary>按作者整理计划的一条条目——一个 mod 文件（现路径 → 目标路径）的快照。</summary>
+    public class SortPlanItemRow
+    {
+        /// <summary>展示顺序（计划内唯一）。</summary>
+        public long Seq { get; set; }
+
+        /// <summary>所属计划 id。</summary>
+        public long PlanId { get; set; }
+
+        /// <summary>库序号（0 = 主库）。</summary>
+        public int Lib { get; set; }
+
+        /// <summary>级别（1 主库 / 2 缓存库 / 3 冷冻库）。</summary>
+        public int Tier { get; set; }
+
+        /// <summary>所在库根。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>mod guid。</summary>
+        public string Guid { get; set; }
+
+        /// <summary>作者（manifest author；空 = 未标注）。</summary>
+        public string Author { get; set; }
+
+        /// <summary>目标文件夹名（库根下的一级目录）。</summary>
+        public string Folder { get; set; }
+
+        /// <summary>现路径（快照）。</summary>
+        public string SrcPath { get; set; }
+
+        /// <summary>目标路径（快照）。</summary>
+        public string DestPath { get; set; }
+
+        /// <summary>字节数（快照）。</summary>
+        public long Size { get; set; }
+
+        /// <summary>修改时间戳（快照）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>状态：pending 待搬 / conflict 冲突 / moved 已就位 / failed 失败 / skipped 跳过。</summary>
+        public string State { get; set; }
+
+        /// <summary>备注（冲突或失败原因）。</summary>
+        public string Note { get; set; }
+    }
+
     /// <summary>旧版登记——人工判定某份副本为旧版后留下的新旧版本关系（本系统可理解的结构化记录，不靠文件名猜）。</summary>
     public class ModOldRecord
     {
@@ -653,6 +724,17 @@ namespace KKManager.Data
                                  archived_file TEXT, archived_size INTEGER, archived_mtime TEXT,
                                  changes TEXT, edited_at TEXT)");
                 Exec("CREATE INDEX IF NOT EXISTS ix_card_edit_path ON card_edit(card_path)");
+                Exec(@"CREATE TABLE IF NOT EXISTS mod_sort_plan(
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 scope TEXT, created_at TEXT, item_count INTEGER, conflict_count INTEGER,
+                                 state TEXT, note TEXT)");
+                Exec(@"CREATE TABLE IF NOT EXISTS mod_sort_plan_item(
+                                 seq INTEGER, plan_id INTEGER, lib INTEGER, tier INTEGER, root_path TEXT,
+                                 guid TEXT, author TEXT, folder TEXT,
+                                 src_path TEXT, dest_path TEXT, size INTEGER, mtime TEXT,
+                                 state TEXT, note TEXT)");
+                Exec("CREATE INDEX IF NOT EXISTS ix_sort_item_plan ON mod_sort_plan_item(plan_id)");
+                Exec("CREATE INDEX IF NOT EXISTS ix_sort_item_src ON mod_sort_plan_item(plan_id, src_path)");
             }
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mtime ON card(mtime)");
             Exec("PRAGMA user_version=" + SchemaVersion);
@@ -1733,6 +1815,33 @@ namespace KKManager.Data
             return Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM mod_file"), CultureInfo.InvariantCulture);
         }
 
+        /// <summary>某库根下全部 mod 副本行（按路径升序）——按作者整理的计划来源。</summary>
+        public List<ModFileRecord> QueryModFilesByRoot(string rootPath)
+        {
+            List<ModFileRecord> list = new List<ModFileRecord>();
+            using (SqliteCommand cmd = NewCommand("SELECT file_path,guid,tier,root_path,file_name,size,mtime,scan_time FROM mod_file WHERE root_path=$r ORDER BY file_path"))
+            {
+                cmd.Parameters.AddWithValue("$r", rootPath ?? "");
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        ModFileRecord rec = new ModFileRecord();
+                        rec.FilePath = r.IsDBNull(0) ? "" : r.GetString(0);
+                        rec.Guid = r.IsDBNull(1) ? "" : r.GetString(1);
+                        rec.Tier = r.IsDBNull(2) ? 0 : (int)r.GetInt64(2);
+                        rec.RootPath = r.IsDBNull(3) ? "" : r.GetString(3);
+                        rec.FileName = r.IsDBNull(4) ? "" : r.GetString(4);
+                        rec.Size = r.IsDBNull(5) ? 0 : r.GetInt64(5);
+                        rec.Mtime = r.IsDBNull(6) ? "" : r.GetString(6);
+                        rec.ScanTime = r.IsDBNull(7) ? "" : r.GetString(7);
+                        list.Add(rec);
+                    }
+                }
+            }
+            return list;
+        }
+
         /// <summary>某 guid 的全部文件副本。</summary>
         public List<RefRow> QueryModFiles(string guid)
         {
@@ -2354,6 +2463,21 @@ namespace KKManager.Data
             return list;
         }
 
+        /// <summary>guid → 作者（主库 mod 主表；空作者为 ""）——按作者整理的来源。</summary>
+        public Dictionary<string, string> ModAuthorMap()
+        {
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.Ordinal);
+            using (SqliteCommand cmd = NewCommand("SELECT guid, COALESCE(author,'') FROM " + ModTable))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    map[r.GetString(0)] = r.IsDBNull(1) ? "" : r.GetString(1);
+                }
+            }
+            return map;
+        }
+
         /// <summary>重建作者聚合表（整表重建——mod 主表是唯一真相源，聚合表只作读侧缓存；扫描末尾调用一次即可）。</summary>
         public void RefreshModAuthors()
         {
@@ -2379,6 +2503,204 @@ namespace KKManager.Data
                 }
             }
             return list;
+        }
+
+        /// <summary>建一条按作者整理计划的头（主库表），返回计划 id；非主库连接返回 0。</summary>
+        public long AddSortPlan(string scope)
+        {
+            if (!_isCore)
+            {
+                return 0;
+            }
+            using (SqliteCommand cmd = NewCommand("INSERT INTO mod_sort_plan(scope,created_at,item_count,conflict_count,state,note) VALUES($s,$t,0,0,'building','')"))
+            {
+                cmd.Parameters.AddWithValue("$s", scope ?? "");
+                cmd.Parameters.AddWithValue("$t", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                cmd.ExecuteNonQuery();
+            }
+            return Convert.ToInt64(ExecScalar("SELECT last_insert_rowid()"), CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>清空全部整理计划与条目（生成新计划前调用）。</summary>
+        public void ClearSortPlans()
+        {
+            if (!_isCore)
+            {
+                return;
+            }
+            Exec("DELETE FROM mod_sort_plan_item");
+            Exec("DELETE FROM mod_sort_plan");
+        }
+
+        /// <summary>写一条整理计划条目（快照）。</summary>
+        public void AddSortPlanItem(SortPlanItemRow row)
+        {
+            if (!_isCore || row == null)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO mod_sort_plan_item(seq,plan_id,lib,tier,root_path,guid,author,folder,src_path,dest_path,size,mtime,state,note)
+                     VALUES($seq,$pid,$lib,$tier,$root,$guid,$author,$folder,$src,$dest,$size,$mtime,$state,$note)"))
+            {
+                cmd.Parameters.AddWithValue("$seq", row.Seq);
+                cmd.Parameters.AddWithValue("$pid", row.PlanId);
+                cmd.Parameters.AddWithValue("$lib", row.Lib);
+                cmd.Parameters.AddWithValue("$tier", row.Tier);
+                cmd.Parameters.AddWithValue("$root", row.RootPath ?? "");
+                cmd.Parameters.AddWithValue("$guid", row.Guid ?? "");
+                cmd.Parameters.AddWithValue("$author", row.Author ?? "");
+                cmd.Parameters.AddWithValue("$folder", row.Folder ?? "");
+                cmd.Parameters.AddWithValue("$src", row.SrcPath ?? "");
+                cmd.Parameters.AddWithValue("$dest", row.DestPath ?? "");
+                cmd.Parameters.AddWithValue("$size", row.Size);
+                cmd.Parameters.AddWithValue("$mtime", row.Mtime ?? "");
+                cmd.Parameters.AddWithValue("$state", row.State ?? "");
+                cmd.Parameters.AddWithValue("$note", row.Note ?? "");
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>计划收尾——写状态 / 条目数 / 冲突数 / 备注。</summary>
+        public void FinishSortPlan(long planId, string state, long itemCount, long conflictCount, string note)
+        {
+            if (!_isCore)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("UPDATE mod_sort_plan SET state=$state,item_count=$n,conflict_count=$c,note=$note WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$state", state ?? "");
+                cmd.Parameters.AddWithValue("$n", itemCount);
+                cmd.Parameters.AddWithValue("$c", conflictCount);
+                cmd.Parameters.AddWithValue("$note", note ?? "");
+                cmd.Parameters.AddWithValue("$id", planId);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>改一条计划条目的状态与备注。</summary>
+        public void SetSortItemState(long planId, long seq, string state, string note)
+        {
+            if (!_isCore)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("UPDATE mod_sort_plan_item SET state=$state,note=$note WHERE plan_id=$pid AND seq=$seq"))
+            {
+                cmd.Parameters.AddWithValue("$state", state ?? "");
+                cmd.Parameters.AddWithValue("$note", note ?? "");
+                cmd.Parameters.AddWithValue("$pid", planId);
+                cmd.Parameters.AddWithValue("$seq", seq);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>最新一条整理计划（无则 null）。</summary>
+        public SortPlanRow LatestSortPlan()
+        {
+            if (!_isCore)
+            {
+                return null;
+            }
+            SortPlanRow row = null;
+            using (SqliteCommand cmd = NewCommand("SELECT id,scope,created_at,item_count,conflict_count,state,note FROM mod_sort_plan ORDER BY id DESC LIMIT 1"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                if (r.Read())
+                {
+                    row = ReadSortPlan(r);
+                }
+            }
+            return row;
+        }
+
+        /// <summary>按 id 取一条整理计划（无则 null）。</summary>
+        public SortPlanRow SortPlanById(long planId)
+        {
+            if (!_isCore)
+            {
+                return null;
+            }
+            SortPlanRow row = null;
+            using (SqliteCommand cmd = NewCommand("SELECT id,scope,created_at,item_count,conflict_count,state,note FROM mod_sort_plan WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", planId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (r.Read())
+                    {
+                        row = ReadSortPlan(r);
+                    }
+                }
+            }
+            return row;
+        }
+
+        /// <summary>读一行计划头。</summary>
+        private static SortPlanRow ReadSortPlan(SqliteDataReader r)
+        {
+            SortPlanRow row = new SortPlanRow();
+            row.Id = r.GetInt64(0);
+            row.Scope = r.IsDBNull(1) ? "" : r.GetString(1);
+            row.CreatedAt = r.IsDBNull(2) ? "" : r.GetString(2);
+            row.ItemCount = r.IsDBNull(3) ? 0 : r.GetInt64(3);
+            row.ConflictCount = r.IsDBNull(4) ? 0 : r.GetInt64(4);
+            row.State = r.IsDBNull(5) ? "" : r.GetString(5);
+            row.Note = r.IsDBNull(6) ? "" : r.GetString(6);
+            return row;
+        }
+
+        /// <summary>某计划的条目（按展示顺序）。</summary>
+        public List<SortPlanItemRow> QuerySortPlanItems(long planId)
+        {
+            List<SortPlanItemRow> list = new List<SortPlanItemRow>();
+            if (!_isCore)
+            {
+                return list;
+            }
+            using (SqliteCommand cmd = NewCommand(@"SELECT seq,plan_id,lib,tier,root_path,guid,author,folder,src_path,dest_path,size,mtime,state,note
+                     FROM mod_sort_plan_item WHERE plan_id=$pid ORDER BY seq"))
+            {
+                cmd.Parameters.AddWithValue("$pid", planId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        SortPlanItemRow row = new SortPlanItemRow();
+                        row.Seq = r.IsDBNull(0) ? 0 : r.GetInt64(0);
+                        row.PlanId = r.IsDBNull(1) ? 0 : r.GetInt64(1);
+                        row.Lib = r.IsDBNull(2) ? 0 : (int)r.GetInt64(2);
+                        row.Tier = r.IsDBNull(3) ? 0 : (int)r.GetInt64(3);
+                        row.RootPath = r.IsDBNull(4) ? "" : r.GetString(4);
+                        row.Guid = r.IsDBNull(5) ? "" : r.GetString(5);
+                        row.Author = r.IsDBNull(6) ? "" : r.GetString(6);
+                        row.Folder = r.IsDBNull(7) ? "" : r.GetString(7);
+                        row.SrcPath = r.IsDBNull(8) ? "" : r.GetString(8);
+                        row.DestPath = r.IsDBNull(9) ? "" : r.GetString(9);
+                        row.Size = r.IsDBNull(10) ? 0 : r.GetInt64(10);
+                        row.Mtime = r.IsDBNull(11) ? "" : r.GetString(11);
+                        row.State = r.IsDBNull(12) ? "" : r.GetString(12);
+                        row.Note = r.IsDBNull(13) ? "" : r.GetString(13);
+                        list.Add(row);
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>某计划里指定状态的条目数。</summary>
+        public long CountSortPlanItems(long planId, string state)
+        {
+            if (!_isCore)
+            {
+                return 0;
+            }
+            using (SqliteCommand cmd = NewCommand("SELECT COUNT(*) FROM mod_sort_plan_item WHERE plan_id=$pid AND state=$state"))
+            {
+                cmd.Parameters.AddWithValue("$pid", planId);
+                cmd.Parameters.AddWithValue("$state", state ?? "");
+                return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
         }
 
         /// <summary>回收空间（迁移搬行后调用）。</summary>

@@ -1172,6 +1172,20 @@ namespace KKManager.Data
             return guid;
         }
 
+        /// <summary>把一条 mod 副本在同一库根内改路径（按作者整理用——级别与库根不变），并重算 mod 主表；找不到源行返回 null。</summary>
+        public string RenameModFilePath(RootsConfig cfg, string guid, string srcPath, string srcRootPath, string destPath)
+        {
+            Store store = StoreByLib(LibOfRootPath(cfg, srcRootPath));
+            ModFileRecord rec = store.RemoveModFileRow(srcPath);
+            if (rec == null)
+            {
+                return null;
+            }
+            store.InsertModFileRow(rec, rec.Tier, srcRootPath, destPath);
+            RecomputeMod(cfg, guid);
+            return destPath;
+        }
+
         /// <summary>按路径找一条副本记录（跨库）。</summary>
         public ModFileRecord FindModFileRecord(RootsConfig cfg, string guid, string filePath)
         {

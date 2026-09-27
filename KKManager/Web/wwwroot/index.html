@@ -271,6 +271,10 @@
     <button id="btnFoldFolders">折叠文件夹</button>
     <span class="dim" id="foldHint">折叠后每个库只占一排（点根名下方的 chip 切换文件范围）</span>
   </div>
+  <div class="row hidden" id="modToolRow" style="margin-bottom:6px;align-items:center">
+    <button id="btnSortByAuthor">按作者整理…</button>
+    <span class="dim" id="sortHint">把 mod 库摊平后按 manifest 作者归入 <b>&lt;作者&gt;</b> 文件夹（未标注作者 → <b>Unknown</b>）——先出预览计划，冲突清零 + 你确认结构后才可执行</span>
+  </div>
   <div id="folderBar"></div>
 
   <div class="row" id="sortBar" style="margin:0 0 8px;align-items:center">
@@ -324,6 +328,62 @@
 
 <div class="tip hidden" id="tip"></div>
 <div id="u3dTip" class="hidden"></div>
+
+<div class="overlay hidden" id="ovSortScope">
+  <div class="modal">
+    <header><b>按作者整理 —— 选择范围</b> <span class="dim" id="ssInfo"></span></header>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:8px">勾选要整理的 mod 库根——<b>只读库 / 离线库不参与</b>（勾选框不可点）。生成预览计划只读文件系统，<b>不会动任何文件</b>；真正搬运前还有「结构确认」与「koikatsu 已关闭」两道闸门。</div>
+      <table class="list"><thead><tr><th style="width:34px"></th><th style="width:120px">级别</th><th>库根路径</th><th style="width:76px">状态</th></tr></thead>
+        <tbody id="ssBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="ssSel">已选 0</span>
+      <span class="grow"></span>
+      <button id="btnSsGen" class="primary">生成预览计划</button>
+      <button id="btnSsClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovSortPlan">
+  <div class="modal wide">
+    <header><b>按作者整理 —— 预览计划</b> <span class="dim" id="spInfo"></span></header>
+    <div class="body">
+      <div class="dim" id="spHint" style="font-size:12px;margin-bottom:8px">计划已落本地表——下次打开直接读表，不重算。<b>冲突必须清零</b>、并勾选下方「我已核对文件结构」后，「执行整理」才可点。</div>
+      <div id="spConflict" class="hidden" style="margin-bottom:8px"></div>
+      <table class="list"><thead><tr><th style="width:58px">状态</th><th style="width:120px">作者</th><th style="width:132px">目标文件夹</th><th>文件名</th><th style="width:30%">现路径</th><th style="width:46px"></th></tr></thead>
+        <tbody id="spBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="spFoot"></span>
+      <span class="grow"></span>
+      <label class="dim" style="font-size:12px;white-space:nowrap"><input type="checkbox" id="spConfirm"> 我已核对文件结构，无误</label>
+      <button id="btnSpRefresh">重新核对</button>
+      <button id="btnSpRegen">重新生成</button>
+      <button id="btnSpStop" class="hidden">停止</button>
+      <button id="btnSpExec" class="primary" disabled>执行整理</button>
+      <button id="btnSpClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovSortExec">
+  <div class="modal">
+    <header><b>执行前最后确认</b></header>
+    <div class="body">
+      <div style="font-size:15px;margin:8px 0 6px">你的 <b>koikatsu.exe</b> 关闭了吗？</div>
+      <div class="dim" style="font-size:12px;margin-bottom:12px">游戏开着时 zipmod 被占用，搬运会逐条失败（失败会列出来，不会静默）。</div>
+      <label style="display:block;margin:10px 0;font-size:13px"><input type="checkbox" id="seClosed"> 我已关闭 koikatsu.exe</label>
+      <div class="dim" id="seInfo" style="font-size:12px"></div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnSeGo" class="primary" disabled>确认执行</button>
+      <button id="btnSeCancel">取消</button>
+    </footer>
+  </div>
+</div>
 
 <div class="overlay hidden" id="overlay">
   <div class="modal">
@@ -1866,6 +1926,52 @@ function renderDup(reset){
   const he = (dupState.hashErrors && dupState.hashErrors.length) ? ` · MD5 算不出 ${dupState.hashErrors.length} 份` : '';
   $('dupInfo').textContent = `共 ${list.length} 组 · ${pending} 待确认（已显示 ${dupState.shown}）· 已登记旧版 ${Object.keys(dupState.olds).length} 条${he}`;
 }
+/* 操作后保持阅读位置：记住「视口顶部那一份副本行」（文件路径为主键、guid 兜底）与它相对视口的偏移。
+   只恢复像素不够——重载会把已渲染组数退回首批 60 组（滚过的批次丢掉，像素被夹到新的最大滚动位置），
+   且上方内容会因确认标记 / 分隔行 / 行数变化而位移——同一像素对应的行已经换了。 */
+function dupCaptureView(){
+  const body = $('ovDup').querySelector('.body');
+  const rows = body.querySelectorAll('tr.dupfile');
+  const bodyTop = body.getBoundingClientRect().top;
+  let hit = null;
+  for(let i = 0; i < rows.length; i++){
+    const r = rows[i].getBoundingClientRect();
+    if(r.bottom > bodyTop + 1){ hit = rows[i]; break; }
+  }
+  return {
+    shown: dupState.shown,
+    scrollTop: body.scrollTop,
+    top: hit ? (hit.getBoundingClientRect().top - bodyTop) : 0,
+    path: hit ? (hit.dataset.path || '') : '',
+    guid: hit ? (hit.dataset.guid || '') : ''
+  };
+}
+function dupRestoreView(view){
+  if(!view) return;
+  const body = $('ovDup').querySelector('.body');
+  /* [段1] 先把已渲染范围补回操作前——否则锚点行（用户正在读的那一份）可能还没渲染出来 */
+  let guard = 0;
+  while(dupState.shown < view.shown && guard < 500){
+    const before = dupState.shown;
+    renderDup(false);
+    if(dupState.shown === before) break;
+    guard = guard + 1;
+  }
+  /* [段2] 按同一行重新定位；那一份找不到了（改名 / 换位）就退到同 guid 首行，再退到原像素 */
+  const rows = body.querySelectorAll('tr.dupfile');
+  const bodyTop = body.getBoundingClientRect().top;
+  let hit = null;
+  for(let i = 0; i < rows.length; i++){
+    if(view.path && rows[i].dataset.path === view.path){ hit = rows[i]; break; }
+  }
+  if(!hit){
+    for(let i = 0; i < rows.length; i++){
+      if(view.guid && rows[i].dataset.guid === view.guid){ hit = rows[i]; break; }
+    }
+  }
+  if(hit) body.scrollTop = body.scrollTop + ((hit.getBoundingClientRect().top - bodyTop) - view.top);
+  else body.scrollTop = view.scrollTop;
+}
 /* 动作：指定这个版本 / 换用此版本 / 正名搬入主库（指定版本不弹确认框——声明写在弹窗上方） */
 async function doDupOp(act, guid, path, tier, btn){
   let url = '/api/mod/keep-version', body = {guid:guid, path:path}, ask = '';
@@ -1896,9 +2002,9 @@ async function doDupOp(act, guid, path, tier, btn){
     else if(r && r.moved && r.moved.length){ msg = '完成：' + r.moved[0]; }
   }catch(e){ msg = '失败：' + e.message; }
   await loadStats();
-  const sc = $('ovDup').querySelector('.body').scrollTop;
+  const view = dupCaptureView();
   await loadDup();
-  $('ovDup').querySelector('.body').scrollTop = sc;
+  dupRestoreView(view);
   if(btn){ btn.disabled = false; btn.textContent = label; }
   $('dupFoot').textContent = msg;
 }
@@ -2357,6 +2463,7 @@ async function switchTab(tab){
   $('viewMissing').classList.toggle('hidden', tab!=='missing');
   $('folderBar').classList.toggle('hidden', tab!=='cards');
   $('foldRow').classList.toggle('hidden', tab!=='cards');
+  $('modToolRow').classList.toggle('hidden', tab!=='mods');
   $('sortBar').classList.toggle('hidden', tab!=='cards');
   const f = $('filter');
   f.classList.toggle('hidden', tab==='missing');
@@ -2672,6 +2779,237 @@ $('dupBody').addEventListener('click', e => {
 $('ovDup').querySelector('.body').addEventListener('scroll', e => {
   const el = e.target;
   if(el.scrollTop + el.clientHeight >= el.scrollHeight - 200) renderDup(false);
+});
+
+/* ---------- 按作者整理（范围 → 预览计划 → 二次确认 → 后台搬运） ---------- */
+let ssRoots = [];
+let spPlan = null;
+let spRows = [];
+let spShown = 0;
+let spBusy = false;
+let spTimer = null;
+
+/* 范围勾选框 */
+async function openSortScope(){
+  $('ovSortScope').classList.remove('hidden');
+  $('ssBody').innerHTML = '<tr><td colspan="4" class="dim" style="padding:8px">读取中…</td></tr>';
+  const r = await api('/api/sort/roots');
+  ssRoots = (r && r.roots) ? r.roots : [];
+  renderSortScope();
+}
+function renderSortScope(){
+  let html = '';
+  ssRoots.forEach((x, i) => {
+    const can = !!x.canSort;
+    const tag = x.readOnly ? '只读' : (x.offline ? '离线' : (can ? '可整理' : '—'));
+    html += `<tr>
+      <td><input type="checkbox" class="sschk" data-i="${i}" ${can ? 'checked' : 'disabled'}></td>
+      <td class="dim">${esc(x.tierName)}</td>
+      <td class="mono" style="font-size:12px">${esc(x.path)}</td>
+      <td class="dim">${esc(tag)}</td>
+    </tr>`;
+  });
+  $('ssBody').innerHTML = html || '<tr><td colspan="4" class="dim" style="padding:8px">没有 mod 库根</td></tr>';
+  updateSsSel();
+}
+function updateSsSel(){
+  let n = 0;
+  ssRoots.forEach((x, i) => {
+    const c = document.querySelector(`.sschk[data-i="${i}"]`);
+    if(c && c.checked) n = n + 1;
+  });
+  $('ssSel').textContent = '已选 ' + n + ' 个库根';
+}
+async function startSortPlan(){
+  const roots = [];
+  ssRoots.forEach((x, i) => {
+    const c = document.querySelector(`.sschk[data-i="${i}"]`);
+    if(c && c.checked) roots.push(x.path);
+  });
+  if(!roots.length){ alert('至少勾选一个库根'); return; }
+  const r = await api('/api/sort/plan/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({roots})});
+  if(!r || !r.ok){ alert((r && r.error) || '启动失败'); return; }
+  $('ovSortScope').classList.add('hidden');
+  $('ovSortPlan').classList.remove('hidden');
+  spPlan = null;
+  spRows = [];
+  $('spConflict').classList.add('hidden');
+  $('spBody').innerHTML = '<tr><td colspan="6" class="dim" style="padding:8px">生成中…</td></tr>';
+  $('spConfirm').checked = false;
+  spBusy = true;
+  updateSpExec();
+  pollSort();
+}
+
+/* 进度轮询（生成 / 搬运共用） */
+function pollSort(){
+  if(spTimer){ clearInterval(spTimer); spTimer = null; }
+  const tick = async () => {
+    const s = await api('/api/sort/status');
+    const running = !!(s && s.running);
+    spBusy = running;
+    if(running){
+      $('spInfo').textContent = (s.phase || '') + (s.message ? ' · ' + s.message : '');
+      $('spFoot').textContent = '进度 ' + (s.done||0) + ' / ' + (s.total||0)
+        + ' · 就位 ' + (s.moved||0) + ' · 跳过 ' + (s.skipped||0)
+        + ' · 失败 ' + (s.failed||0) + ' · 冲突 ' + (s.conflicts||0);
+      $('btnSpStop').classList.remove('hidden');
+    }else{
+      $('btnSpStop').classList.add('hidden');
+      if(spTimer){ clearInterval(spTimer); spTimer = null; }
+      await loadSortPlan();
+      if(s && s.finishedAt) $('spInfo').textContent = s.message || '';
+    }
+    updateSpExec();
+  };
+  tick();
+  spTimer = setInterval(tick, 1000);
+}
+
+/* 计划读表 + 渲染（就位行 √ 并置底） */
+async function loadSortPlan(){
+  $('spBody').innerHTML = '<tr><td colspan="6" class="dim" style="padding:8px">读取中…</td></tr>';
+  const r = await api('/api/sort/plan');
+  if(!r || r.ok !== true){
+    spPlan = null;
+    spRows = [];
+    $('spBody').innerHTML = '<tr><td colspan="6" class="dim" style="padding:8px">' + esc((r && r.error) || '还没有计划') + '</td></tr>';
+    $('spConflict').classList.add('hidden');
+    $('spConfirm').checked = false;
+    updateSpExec();
+    return;
+  }
+  spPlan = r;
+  spRows = (r.items || []).slice();
+  const order = { conflict: 0, failed: 1, pending: 2, skipped: 3, moved: 4 };
+  spRows.sort((a, b) => {
+    const oa = (order[a.state] === undefined) ? 9 : order[a.state];
+    const ob = (order[b.state] === undefined) ? 9 : order[b.state];
+    if(oa !== ob) return oa - ob;
+    return a.seq - b.seq;
+  });
+  $('spInfo').textContent = '计划 #' + r.planId + ' · ' + (r.createdAt||'') + ' · 状态 ' + (r.state||'');
+  $('spFoot').textContent = '条目 ' + (r.itemCount||0) + ' · 待搬 ' + (r.pendingCount||0) + ' · 就位 ' + (r.movedCount||0)
+    + ' · 冲突 ' + (r.conflictCount||0) + ' · 失败 ' + (r.failedCount||0) + ' · 跳过 ' + (r.skippedCount||0);
+  renderSpConflicts();
+  $('spConfirm').checked = !!r.confirmed;
+  spShown = 0;
+  $('spBody').innerHTML = '';
+  renderSpRows();
+  updateSpExec();
+}
+function renderSpConflicts(){
+  const list = spRows.filter(x => x.state === 'conflict');
+  if(!list.length){
+    $('spConflict').classList.add('hidden');
+    $('spConflict').innerHTML = '';
+    return;
+  }
+  let html = '<div style="border:1px solid var(--red);border-radius:6px;padding:8px;font-size:12px">'
+    + '<b style="color:var(--red)">冲突 ' + list.length + ' 条——必须解决才能执行</b>'
+    + '<div class="dim" style="margin:4px 0 6px">同名文件已在目标位置、或两条计划撞到同一目标路径。请改名 / 删掉多余的那份，然后点「重新核对」。</div>';
+  list.slice(0, 20).forEach(x => {
+    html += '<div style="margin:3px 0"><span class="mono">' + esc(x.srcPath) + '</span> ⇒ <span class="mono">' + esc(x.destPath) + '</span>'
+      + ' <span class="dim">（' + esc(x.note||'') + '）</span> <button class="spshow" data-path="' + esc(x.srcPath) + '">定位</button></div>';
+  });
+  if(list.length > 20) html += '<div class="dim">…还有 ' + (list.length - 20) + ' 条</div>';
+  html += '</div>';
+  $('spConflict').innerHTML = html;
+  $('spConflict').classList.remove('hidden');
+}
+function sortStateLabel(s){
+  if(s === 'conflict') return { text: '冲突', style: 'color:var(--red)' };
+  if(s === 'moved') return { text: '√', style: 'color:var(--green)' };
+  if(s === 'failed') return { text: '失败', style: 'color:var(--red)' };
+  if(s === 'skipped') return { text: '跳过', style: 'color:var(--gray)' };
+  return { text: '待搬', style: 'color:var(--yellow)' };
+}
+function renderSpRows(){
+  const chunk = 300;
+  const end = Math.min(spShown + chunk, spRows.length);
+  let html = '';
+  for(let i = spShown; i < end; i++){
+    const x = spRows[i];
+    const st = sortStateLabel(x.state);
+    html += `<tr>
+      <td class="mono" style="${st.style}">${st.text}</td>
+      <td class="dim" style="font-size:12px">${esc(x.author || '')}</td>
+      <td class="mono" style="font-size:12px">${esc(x.folder || '')}</td>
+      <td style="font-size:12px">${esc(x.fileName || '')}</td>
+      <td class="dim mono" style="font-size:11px">${esc(x.srcPath || '')}${x.note ? ' <span style="color:var(--yellow)">（' + esc(x.note) + '）</span>' : ''}</td>
+      <td><button class="spshow" data-path="${esc(x.srcPath||'')}">定位</button></td>
+    </tr>`;
+  }
+  $('spBody').insertAdjacentHTML('beforeend', html);
+  spShown = end;
+}
+function updateSpExec(){
+  const ok = !!spPlan && spPlan.state === 'ready' && (spPlan.conflictCount|0) === 0 && $('spConfirm').checked && !spBusy;
+  $('btnSpExec').disabled = !ok;
+}
+
+/* 按作者整理：按钮 / 范围框 / 计划窗 / 执行确认 */
+$('btnSortByAuthor').onclick = async () => {
+  const r = await api('/api/sort/plan');
+  if(r && r.ok === true){
+    $('ovSortPlan').classList.remove('hidden');
+    await loadSortPlan();
+    return;
+  }
+  await openSortScope();
+};
+$('btnSsClose').onclick = () => $('ovSortScope').classList.add('hidden');
+$('btnSsGen').onclick = () => startSortPlan();
+$('ssBody').addEventListener('change', e => { if(e.target.classList.contains('sschk')) updateSsSel(); });
+$('btnSpClose').onclick = () => {
+  if(spBusy){ alert('任务还在跑——先点「停止」或等它跑完'); return; }
+  $('ovSortPlan').classList.add('hidden');
+};
+$('btnSpRefresh').onclick = () => loadSortPlan();
+$('btnSpRegen').onclick = () => { $('ovSortPlan').classList.add('hidden'); openSortScope(); };
+$('btnSpStop').onclick = () => api('/api/sort/stop', {method:'POST'}).catch(e => alert('停止失败：' + e.message));
+$('spConfirm').onchange = async () => {
+  if(!spPlan) return;
+  const want = $('spConfirm').checked;
+  const r = await api('/api/sort/plan/confirm', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({planId: spPlan.planId, confirmed: want})});
+  if(!r || !r.ok){
+    alert((r && r.error) || '确认失败');
+    $('spConfirm').checked = !want;
+    return;
+  }
+  spPlan.confirmed = want;
+  updateSpExec();
+};
+$('btnSpExec').onclick = () => {
+  if(!spPlan) return;
+  $('seClosed').checked = false;
+  $('btnSeGo').disabled = true;
+  $('seInfo').textContent = '计划 #' + spPlan.planId + ' · 待搬 ' + (spPlan.pendingCount||0) + ' 条 · 目标：各库根下的 <作者> 文件夹（未标注作者 → Unknown）';
+  $('ovSortExec').classList.remove('hidden');
+};
+$('btnSeCancel').onclick = () => $('ovSortExec').classList.add('hidden');
+$('seClosed').onchange = () => { $('btnSeGo').disabled = !$('seClosed').checked; };
+$('btnSeGo').onclick = async () => {
+  if(!spPlan) return;
+  const r = await api('/api/sort/exec/start', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({planId: spPlan.planId, koikatsuClosed: true})});
+  if(!r || !r.ok){ alert((r && r.error) || '启动失败'); return; }
+  $('ovSortExec').classList.add('hidden');
+  $('ovSortPlan').classList.remove('hidden');
+  pollSort();
+};
+$('spBody').addEventListener('click', e => {
+  const b = e.target.closest ? e.target.closest('.spshow') : null;
+  if(b) revealPath(b.dataset.path);
+});
+$('spConflict').addEventListener('click', e => {
+  const b = e.target.closest ? e.target.closest('.spshow') : null;
+  if(b) revealPath(b.dataset.path);
+});
+$('ovSortPlan').querySelector('.body').addEventListener('scroll', e => {
+  const el = e.target;
+  if(el.scrollTop + el.clientHeight >= el.scrollHeight - 200) renderSpRows();
 });
 
 (async function(){

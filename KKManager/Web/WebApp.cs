@@ -151,6 +151,10 @@ namespace KKManager.Web
         private static MoveJobState _moveJob = new MoveJobState();
         /// <summary>搬运任务状态的读写锁。</summary>
         private static readonly object MoveJobLock = new object();
+        /// <summary>「按作者整理」任务状态（生成计划 / 执行共用）。</summary>
+        private static SortJobState _sortJob = new SortJobState();
+        /// <summary>按作者整理任务状态的读写锁。</summary>
+        private static readonly object SortJobLock = new object();
         /// <summary>缺失清单缓存（首次请求构建，扫描结束后失效——页签每次打开不必重算）。</summary>
         private static List<object> _missingCache;
         /// <summary>缺失清单缓存对应的 per 值（请求参数变了就重建）。</summary>
@@ -1838,6 +1842,109 @@ namespace KKManager.Web
 
             app.MapGet("/api/move-unused/status", () => Results.Json(_moveJob));
 
+            // 按作者整理——范围库根清单 / 计划生成 / 计划读取与确认 / 执行（后台任务，生成与执行共用一条状态）
+            app.MapGet("/api/sort/roots", () =>
+            {
+                RootsConfig cfg = LoadConfig();
+                List<SortRootView> list = new List<SortRootView>();
+                foreach (RootEntry r in cfg.ModRootsOrdered())
+                {
+                    SortRootView v = new SortRootView();
+                    v.path = r.path;
+                    v.tier = r.tier;
+                    v.tierName = Tier.Name(r.tier);
+                    v.readOnly = r.readOnly;
+                    v.offline = r.offline;
+                    v.locked = r.locked;
+                    v.canSort = !r.readOnly && !r.offline;
+                    list.Add(v);
+                }
+                return Results.Json(new { ok = true, roots = list });
+            });
+
+            app.MapPost("/api/sort/plan/start", async context =>
+            {
+                SortPlanStartDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<SortPlanStartDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                string error = StartSortPlan(dto == null ? null : dto.roots);
+                if (error != null)
+                {
+                    context.Response.StatusCode = 409;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+                    return;
+                }
+                await context.Response.WriteAsync("{\"ok\":true}");
+            });
+
+            app.MapPost("/api/sort/stop", () =>
+            {
+                lock (SortJobLock)
+                {
+                    _sortJob.StopRequested = true;
+                }
+                return Results.Json(new { ok = true });
+            });
+
+            app.MapGet("/api/sort/status", () => Results.Json(_sortJob));
+
+            // 计划读取——读表 + 一次快照核对（文件如预期就在快照位置的行标 √ 并置底）
+            app.MapGet("/api/sort/plan", () => Results.Json(LoadSortPlanView(true)));
+
+            app.MapPost("/api/sort/plan/confirm", async context =>
+            {
+                SortConfirmDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<SortConfirmDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                string error = ConfirmSortPlan(dto);
+                if (error != null)
+                {
+                    context.Response.StatusCode = 409;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+                    return;
+                }
+                await context.Response.WriteAsync("{\"ok\":true}");
+            });
+
+            app.MapPost("/api/sort/exec/start", async context =>
+            {
+                SortExecStartDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<SortExecStartDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                string error = StartSortExec(dto);
+                if (error != null)
+                {
+                    context.Response.StatusCode = 409;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+                    return;
+                }
+                await context.Response.WriteAsync("{\"ok\":true}");
+            });
+
             app.MapGet("/api/thumb/{id}", (long id, int lib) =>
             {
                 byte[] data = _hub.LoadThumb(lib, id);
@@ -2125,6 +2232,299 @@ namespace KKManager.Web
             });
 
             return null;
+        }
+
+        /// <summary>单条 mod 库根（按路径）——找不到返回 null。</summary>
+        private static RootEntry FindModRoot(RootsConfig cfg, string path)
+        {
+            if (cfg == null || cfg.modRoots == null || string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+            string norm = path.Trim();
+            foreach (RootEntry r in cfg.modRoots)
+            {
+                if (string.Equals((r.path ?? "").Trim(), norm, StringComparison.OrdinalIgnoreCase))
+                {
+                    return r;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>启动「按作者整理」计划生成——清旧计划，后台枚举所选库根下全部 mod 文件并算目标路径与冲突；返回 null 表示已启动，否则返回拒绝原因。</summary>
+        private static string StartSortPlan(List<string> roots)
+        {
+            RootsConfig cfg = LoadConfig();
+            List<string> want = new List<string>();
+            if (roots != null)
+            {
+                foreach (string p in roots)
+                {
+                    if (!string.IsNullOrWhiteSpace(p))
+                    {
+                        want.Add(p.Trim());
+                    }
+                }
+            }
+            if (want.Count == 0)
+            {
+                foreach (RootEntry r in cfg.ModRootsOrdered())
+                {
+                    if (r.readOnly || r.offline)
+                    {
+                        continue;
+                    }
+                    want.Add(r.path);
+                }
+            }
+            if (want.Count == 0)
+            {
+                return "没有可整理的库根（只读 / 离线库不参与）";
+            }
+            foreach (string p in want)
+            {
+                RootEntry e = FindModRoot(cfg, p);
+                if (e == null)
+                {
+                    return "库根不在已保存的配置里：" + p + "（先在设置里保存库根）";
+                }
+                if (e.readOnly)
+                {
+                    return "库根只读，不参与整理：" + p;
+                }
+                if (e.offline)
+                {
+                    return "库根离线，不参与整理：" + p;
+                }
+            }
+
+            lock (SortJobLock)
+            {
+                if (_sortJob.Running)
+                {
+                    return "已有整理任务在运行";
+                }
+                _sortJob = new SortJobState
+                {
+                    Running = true,
+                    Phase = "生成计划",
+                    Message = "准备生成计划",
+                    StartedAt = DateTime.Now.ToString("HH:mm:ss")
+                };
+            }
+
+            List<string> scope = new List<string>(want);
+            Task.Run(() =>
+            {
+                try
+                {
+                    using (StoreHub hub = new StoreHub(_dbPath))
+                    {
+                        RootsConfig c = hub.Core.LoadRoots();
+                        RootsRules.Normalize(c);
+                        hub.EnsureMigrated(c);
+                        hub.Core.ClearSortPlans();
+                        SortOrganizer.BuildPlan(hub, c, scope, _sortJob);
+                    }
+                    FinishSortJob("计划完成", false);
+                }
+                catch (Exception ex)
+                {
+                    FinishSortJob(ex.GetType().Name + "：" + ex.Message, true);
+                }
+            });
+            return null;
+        }
+
+        /// <summary>记录 / 撤销「计划已核对」确认（落 setting；执行前必须已确认且零冲突）——返回 null 表示成功。</summary>
+        private static string ConfirmSortPlan(SortConfirmDto dto)
+        {
+            if (dto == null || dto.planId <= 0)
+            {
+                return "未指定计划";
+            }
+            SortPlanRow plan = _hub.Core.SortPlanById(dto.planId);
+            if (plan == null)
+            {
+                return "计划不存在（可能已被重新生成）";
+            }
+            if (dto.confirmed)
+            {
+                _hub.Core.SetSetting("sort_confirm_plan", plan.Id.ToString());
+                Console.WriteLine("[整理] 计划 #" + plan.Id.ToString() + " 已核对确认");
+            }
+            else
+            {
+                _hub.Core.DeleteSetting("sort_confirm_plan");
+                Console.WriteLine("[整理] 计划 #" + plan.Id.ToString() + " 确认已撤销");
+            }
+            return null;
+        }
+
+        /// <summary>启动执行——前置三重闸门（koikatsu 已关确认 · 计划已确认 · 零冲突），后台按快照逐条搬运；返回 null 表示已启动。</summary>
+        private static string StartSortExec(SortExecStartDto dto)
+        {
+            if (dto == null || dto.planId <= 0)
+            {
+                return "未指定计划";
+            }
+            if (!dto.koikatsuClosed)
+            {
+                return "请先确认已关闭 koikatsu.exe";
+            }
+            SortPlanRow plan = _hub.Core.SortPlanById(dto.planId);
+            if (plan == null)
+            {
+                return "计划不存在（可能已被重新生成）";
+            }
+            if (plan.State != "ready")
+            {
+                return "计划不可执行（状态：" + plan.State + "）";
+            }
+            if (_hub.Core.CountSortPlanItems(plan.Id, SortOrganizer.StateConflict) > 0)
+            {
+                return "还有冲突未解决——先处理冲突并重新核对";
+            }
+            string confirmed = _hub.Core.GetSetting("sort_confirm_plan");
+            if (confirmed != plan.Id.ToString())
+            {
+                return "计划尚未确认——先在预览里确认文件结构";
+            }
+
+            lock (SortJobLock)
+            {
+                if (_sortJob.Running)
+                {
+                    return "已有整理任务在运行";
+                }
+                _sortJob = new SortJobState
+                {
+                    Running = true,
+                    Phase = "搬运",
+                    Message = "准备搬运",
+                    PlanId = plan.Id,
+                    StartedAt = DateTime.Now.ToString("HH:mm:ss")
+                };
+            }
+
+            long planId = plan.Id;
+            Task.Run(() =>
+            {
+                try
+                {
+                    using (StoreHub hub = new StoreHub(_dbPath))
+                    {
+                        RootsConfig c = hub.Core.LoadRoots();
+                        RootsRules.Normalize(c);
+                        hub.EnsureMigrated(c);
+                        SortOrganizer.ExecutePlan(hub, c, planId, _sortJob);
+                    }
+                    bool stopped;
+                    lock (SortJobLock)
+                    {
+                        stopped = _sortJob.StopRequested;
+                    }
+                    FinishSortJob(stopped ? "已停止" : "整理完成", false);
+                }
+                catch (Exception ex)
+                {
+                    FinishSortJob(ex.GetType().Name + "：" + ex.Message, true);
+                }
+            });
+            return null;
+        }
+
+        /// <summary>读整理计划视图——计划头 + 条目 + 统计；recheck 为真时先做一次快照核对（已就位的行标 √ 并置底）。</summary>
+        private static SortPlanView LoadSortPlanView(bool recheck)
+        {
+            SortPlanView view = new SortPlanView();
+            SortPlanRow plan = _hub.Core.LatestSortPlan();
+            if (plan == null)
+            {
+                view.ok = false;
+                view.error = "还没有生成计划";
+                return view;
+            }
+            if (recheck && plan.State == "ready")
+            {
+                long conflicts = SortOrganizer.RecheckPlan(_hub, plan.Id);
+                _hub.Core.FinishSortPlan(plan.Id, plan.State, plan.ItemCount, conflicts, plan.Note);
+                plan = _hub.Core.SortPlanById(plan.Id);
+                view.rechecked = true;
+            }
+            view.ok = true;
+            view.planId = plan.Id;
+            view.scope = plan.Scope;
+            view.createdAt = plan.CreatedAt;
+            view.state = plan.State;
+            view.note = plan.Note;
+            view.itemCount = plan.ItemCount;
+            string confirmed = _hub.Core.GetSetting("sort_confirm_plan");
+            view.confirmed = confirmed == plan.Id.ToString();
+            List<SortPlanItemRow> rows = _hub.Core.QuerySortPlanItems(plan.Id);
+            foreach (SortPlanItemRow r in rows)
+            {
+                SortPlanItemView v = new SortPlanItemView();
+                v.seq = r.Seq;
+                v.lib = r.Lib;
+                v.tier = r.Tier;
+                v.rootPath = r.RootPath;
+                v.guid = r.Guid;
+                v.author = r.Author;
+                v.folder = r.Folder;
+                v.fileName = Path.GetFileName(r.SrcPath);
+                v.srcPath = r.SrcPath;
+                v.destPath = r.DestPath;
+                v.size = r.Size;
+                v.state = r.State;
+                v.note = r.Note;
+                view.items.Add(v);
+                if (r.State == SortOrganizer.StateMoved)
+                {
+                    view.movedCount = view.movedCount + 1;
+                }
+                else if (r.State == SortOrganizer.StateConflict)
+                {
+                    view.conflictCount = view.conflictCount + 1;
+                }
+                else if (r.State == SortOrganizer.StateFailed)
+                {
+                    view.failedCount = view.failedCount + 1;
+                }
+                else if (r.State == SortOrganizer.StateSkipped)
+                {
+                    view.skippedCount = view.skippedCount + 1;
+                }
+                else
+                {
+                    view.pendingCount = view.pendingCount + 1;
+                }
+            }
+            return view;
+        }
+
+        /// <summary>收尾「按作者整理」任务（running 置否 + 结束时刻 + 消息；error 为真时同时记入失败明细并落控制台）。</summary>
+        private static void FinishSortJob(string message, bool error)
+        {
+            string line;
+            lock (SortJobLock)
+            {
+                _sortJob.Running = false;
+                _sortJob.Current = "";
+                _sortJob.FinishedAt = DateTime.Now.ToString("HH:mm:ss");
+                _sortJob.Message = message;
+                if (error && _sortJob.Errors.Count < 50)
+                {
+                    _sortJob.Errors.Add(message);
+                }
+                line = "[整理] " + message + " · 阶段 " + _sortJob.Phase
+                    + " · 就位 " + _sortJob.Moved.ToString()
+                    + " · 跳过 " + _sortJob.Skipped.ToString()
+                    + " · 失败 " + _sortJob.Failed.ToString()
+                    + " · 冲突 " + _sortJob.Conflicts.ToString();
+            }
+            Console.WriteLine(line);
         }
 
         /// <summary>收尾搬运任务（running 置否 + 结束时刻 + 消息；error 为真时同时记入失败明细并落控制台）。</summary>
@@ -2523,4 +2923,152 @@ namespace KKManager.Web
         /// <summary>错误明细。</summary>
         public List<string> Errors { get; } = new List<string>();
     }
+
+    /// <summary>按作者整理——可勾选的库根一行。</summary>
+    public class SortRootView
+    {
+        /// <summary>库根路径。</summary>
+        public string path { get; set; }
+
+        /// <summary>级别（1 主库 / 2 缓存库 / 3 冷冻库）。</summary>
+        public int tier { get; set; }
+
+        /// <summary>级别名。</summary>
+        public string tierName { get; set; }
+
+        /// <summary>是否只读（只读库不参与整理）。</summary>
+        public bool readOnly { get; set; }
+
+        /// <summary>是否离线（离线库不参与整理）。</summary>
+        public bool offline { get; set; }
+
+        /// <summary>是否预置锁定条目。</summary>
+        public bool locked { get; set; }
+
+        /// <summary>是否可参与整理（非只读且非离线）。</summary>
+        public bool canSort { get; set; }
+    }
+
+    /// <summary>按作者整理计划的一条条目视图（面板用——不携带 mtime / 库序号等内部字段）。</summary>
+    public class SortPlanItemView
+    {
+        /// <summary>展示顺序（也是执行时的定位键）。</summary>
+        public long seq { get; set; }
+
+        /// <summary>库序号（0 = 主库）。</summary>
+        public int lib { get; set; }
+
+        /// <summary>级别。</summary>
+        public int tier { get; set; }
+
+        /// <summary>所在库根。</summary>
+        public string rootPath { get; set; }
+
+        /// <summary>mod guid。</summary>
+        public string guid { get; set; }
+
+        /// <summary>作者（空 = 未标注）。</summary>
+        public string author { get; set; }
+
+        /// <summary>目标文件夹名。</summary>
+        public string folder { get; set; }
+
+        /// <summary>文件名。</summary>
+        public string fileName { get; set; }
+
+        /// <summary>现路径。</summary>
+        public string srcPath { get; set; }
+
+        /// <summary>目标路径。</summary>
+        public string destPath { get; set; }
+
+        /// <summary>字节数。</summary>
+        public long size { get; set; }
+
+        /// <summary>状态（pending / conflict / moved / failed / skipped）。</summary>
+        public string state { get; set; }
+
+        /// <summary>备注（冲突或失败原因）。</summary>
+        public string note { get; set; }
+    }
+
+    /// <summary>按作者整理计划——整份视图（计划头 + 条目 + 统计）。</summary>
+    public class SortPlanView
+    {
+        /// <summary>是否有计划可读。</summary>
+        public bool ok { get; set; }
+
+        /// <summary>不可读时的原因。</summary>
+        public string error { get; set; }
+
+        /// <summary>本次读取是否做过快照核对。</summary>
+        public bool rechecked { get; set; }
+
+        /// <summary>计划 id。</summary>
+        public long planId { get; set; }
+
+        /// <summary>范围（库根路径，换行分隔）。</summary>
+        public string scope { get; set; }
+
+        /// <summary>生成时刻。</summary>
+        public string createdAt { get; set; }
+
+        /// <summary>计划状态（building / ready / outdated）。</summary>
+        public string state { get; set; }
+
+        /// <summary>计划备注。</summary>
+        public string note { get; set; }
+
+        /// <summary>条目总数。</summary>
+        public long itemCount { get; set; }
+
+        /// <summary>冲突数（快照核对后的现状——必须为零才能执行）。</summary>
+        public long conflictCount { get; set; }
+
+        /// <summary>已就位数（√）。</summary>
+        public long movedCount { get; set; }
+
+        /// <summary>待搬数。</summary>
+        public long pendingCount { get; set; }
+
+        /// <summary>失败数。</summary>
+        public long failedCount { get; set; }
+
+        /// <summary>跳过数。</summary>
+        public long skippedCount { get; set; }
+
+        /// <summary>使用者是否已确认结构。</summary>
+        public bool confirmed { get; set; }
+
+        /// <summary>条目（展示顺序）。</summary>
+        public List<SortPlanItemView> items { get; } = new List<SortPlanItemView>();
+    }
+
+    /// <summary>按作者整理——生成计划请求体。</summary>
+    public class SortPlanStartDto
+    {
+        /// <summary>参与整理的库根路径（空 / 缺省 = 全部可整理的 mod 库根）。</summary>
+        public List<string> roots { get; set; }
+    }
+
+    /// <summary>按作者整理——计划确认请求体。</summary>
+    public class SortConfirmDto
+    {
+        /// <summary>计划 id。</summary>
+        public long planId { get; set; }
+
+        /// <summary>true = 已核对结构无误；false = 撤销确认。</summary>
+        public bool confirmed { get; set; }
+    }
+
+    /// <summary>按作者整理——执行请求体。</summary>
+    public class SortExecStartDto
+    {
+        /// <summary>计划 id。</summary>
+        public long planId { get; set; }
+
+        /// <summary>使用者已确认关闭 koikatsu.exe（服务端据此放行）。</summary>
+        public bool koikatsuClosed { get; set; }
+    }
+
 }
