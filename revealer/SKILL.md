@@ -35,7 +35,7 @@
 ### 步 1 — 现场核对（只读）
 
 - `info`（受控根）· `file-tree workspace:KKManager/revealer`（上版目录 + 台账）
-- `text-read_lines ccbp:Project/KKManager/RELEASE.md`（取台账末行 + 复核规范未变）
+- `text-read_lines WorkSpace:KKManager/revealer/RELEASE.md`（取台账末行 + 复核规范未变——**实例规范档在发布区**，知识网络侧无副本）
 - `git -C D:\Mau\WorkSpace\KKManager status --short`（工作区基线）+ `git log --oneline -3`（HEAD）——本项目**有 git 仓库**，发布收尾必推送（步 8b）
 
 ### 步 2 — 编译版自检（不过不发布）
