@@ -120,7 +120,7 @@ namespace KKManager
             Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
-            Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者）");
+            Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者 / 创建时间 / MD5——MD5 只算冲突文件，算过就忽略）");
             Console.WriteLine("  composition <guid>                    查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容；--force 强制重读容器）");
             Console.WriteLine("  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图（--tex 导出缩小版 PNG · --max N 限张数）");
             Console.WriteLine("  u3d-db    <guid> <条目路径>           按库副本解析 unity3d 条目并落档（与面板端点共用同一实现；--force 强制重读）");
@@ -584,9 +584,22 @@ namespace KKManager
                 RootsRules.Normalize(cfg);
                 hub.EnsureMigrated(cfg);
                 List<DupGroup> groups = hub.ListDuplicateGroups(cfg);
+                List<ModFileRecord> allFiles = new List<ModFileRecord>();
+                foreach (DupGroup g in groups)
+                {
+                    allFiles.AddRange(g.Files);
+                }
+                // 与面板端点同一实现：MD5 只算冲突文件、算过就忽略（档案落主库 mod_hash）
+                int computed = 0;
+                List<string> hashErrors = new List<string>();
+                Dictionary<string, string> hashes = hub.FillHashes(allFiles, out computed, out hashErrors);
                 int oldCount = hub.Core.ListModOld().Count;
                 Console.WriteLine("库: " + hub.CorePath);
-                Console.WriteLine("重复副本组: " + groups.Count + "（已登记旧版 " + oldCount + " 条）");
+                Console.WriteLine("重复副本组: " + groups.Count + "（已登记旧版 " + oldCount + " 条）· MD5 本次新增 " + computed + " 条档案");
+                foreach (string e in hashErrors)
+                {
+                    Console.WriteLine("[哈希] 算不出：" + e);
+                }
                 foreach (DupGroup g in groups)
                 {
                     Console.WriteLine();
@@ -607,6 +620,16 @@ namespace KKManager
                             + "  版本 " + (info.Version ?? "<无>")
                             + "  作者 " + (info.Author ?? "<无>")
                             + "  " + (f.Size / 1024 / 1024) + " MB" + tail);
+                        string md5 = null;
+                        hashes.TryGetValue(f.FilePath, out md5);
+                        string ctime = "";
+                        FileInfo fi = new FileInfo(f.FilePath);
+                        if (fi.Exists)
+                        {
+                            ctime = Store.CreatedStampOf(fi);
+                        }
+                        Console.WriteLine("        路径 " + f.FilePath);
+                        Console.WriteLine("        建 " + ctime + " · 改 " + f.Mtime + " · md5 " + (md5 ?? "<算不出>"));
                     }
                 }
                 return 0;

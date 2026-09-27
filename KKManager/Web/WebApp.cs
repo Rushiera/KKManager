@@ -1142,6 +1142,23 @@ namespace KKManager.Web
             {
                 RootsConfig cfg = LoadConfig();
                 List<DupGroup> groups = _hub.ListDuplicateGroups(cfg);
+                List<ModFileRecord> allFiles = new List<ModFileRecord>();
+                foreach (DupGroup g in groups)
+                {
+                    allFiles.AddRange(g.Files);
+                }
+                // MD5 只算冲突文件（重复副本组内），且只在打开本面板时补齐一次——算过就忽略（档案落主库 mod_hash）
+                int computed = 0;
+                List<string> hashErrors = new List<string>();
+                Dictionary<string, string> hashes = _hub.FillHashes(allFiles, out computed, out hashErrors);
+                if (computed > 0)
+                {
+                    Console.WriteLine("[哈希] 新增 " + computed + " 条 MD5 档案——重复副本 " + groups.Count + " 组 / " + allFiles.Count + " 份");
+                }
+                foreach (string e in hashErrors)
+                {
+                    Console.WriteLine("[哈希] 算不出：" + e);
+                }
                 List<object> items = new List<object>();
                 foreach (DupGroup g in groups)
                 {
@@ -1149,6 +1166,21 @@ namespace KKManager.Web
                     foreach (ModFileRecord f in g.Files)
                     {
                         ModInfo info = ZipModReader.Parse(f.FilePath);
+                        string ctime = "";
+                        try
+                        {
+                            FileInfo fi = new FileInfo(f.FilePath);
+                            if (fi.Exists)
+                            {
+                                ctime = Store.CreatedStampOf(fi);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("[哈希] 创建时间读不到：" + f.FilePath + " → " + ex.Message);
+                        }
+                        string md5 = null;
+                        hashes.TryGetValue(f.FilePath, out md5);
                         files.Add(new
                         {
                             tier = f.Tier,
@@ -1158,6 +1190,8 @@ namespace KKManager.Web
                             fileName = f.FileName,
                             size = f.Size,
                             mtime = f.Mtime,
+                            ctime = ctime,
+                            md5 = md5,
                             version = info.Version,
                             author = info.Author,
                             name = info.Name,
@@ -1172,7 +1206,7 @@ namespace KKManager.Web
                 {
                     olds.Add(o);
                 }
-                return Results.Json(new { total = items.Count, items = items, olds = olds });
+                return Results.Json(new { total = items.Count, items = items, olds = olds, hashErrors = hashErrors });
             });
 
             // 判为旧版——该副本改名加 .old 段并移到缓存库，落一条新旧版本记录

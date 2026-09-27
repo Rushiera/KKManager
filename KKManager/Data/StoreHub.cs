@@ -1193,6 +1193,66 @@ namespace KKManager.Data
             list.Sort(CompareGroupByGuid);
             return list;
         }
+        /// <summary>
+        /// 补齐一组 mod 文件的 MD5 档案（重复副本面板打开时一次）——按 size + mtime 命中已有档案直接复用，
+        /// 未命中或已失效的现算并落档；算过就忽略，重启后仍复用。返回「路径 → MD5」映射。
+        /// </summary>
+        public Dictionary<string, string> FillHashes(List<ModFileRecord> files, out int computed, out List<string> errors)
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            errors = new List<string>();
+            computed = 0;
+            if (files == null || files.Count == 0)
+            {
+                return result;
+            }
+
+            // [段1] 读已有档案——命中判据 = 文件大小与修改时间都与建档时一致
+            Dictionary<string, ModHashRecord> known = Core.LoadModHashes();
+
+            // [段2] 逐份补齐——只算传入的重复副本文件，不扫全库
+            foreach (ModFileRecord f in files)
+            {
+                if (string.IsNullOrEmpty(f.FilePath))
+                {
+                    continue;
+                }
+                FileInfo fi = new FileInfo(f.FilePath);
+                long size = f.Size;
+                string mtime = f.Mtime;
+                if (fi.Exists)
+                {
+                    size = fi.Length;
+                    mtime = Store.StampOf(fi);
+                }
+
+                ModHashRecord hit = null;
+                if (known.TryGetValue(f.FilePath, out hit) && hit.Size == size && hit.Mtime == mtime && !string.IsNullOrEmpty(hit.Md5))
+                {
+                    result[f.FilePath] = hit.Md5;
+                    continue;
+                }
+
+                string error = null;
+                string md5 = FileHash.Md5(f.FilePath, out error);
+                if (string.IsNullOrEmpty(md5))
+                {
+                    errors.Add(f.FileName + " → " + (error == null ? "算不出" : error));
+                    continue;
+                }
+                result[f.FilePath] = md5;
+                ModHashRecord rec = new ModHashRecord();
+                rec.FilePath = f.FilePath;
+                rec.Size = size;
+                rec.Mtime = mtime;
+                rec.Md5 = md5;
+                rec.HashedAt = Store.Now();
+                Core.PutModHash(rec);
+                computed = computed + 1;
+            }
+            return result;
+        }
+
         /// <summary>重复副本组数与「待确认」组数（跨库合并）——待确认 = 组内非旧版副本 ≥ 2（需要人工指定保留版本）。</summary>
         public void DupCounts(RootsConfig cfg, out long groups, out long pending)
         {

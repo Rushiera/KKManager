@@ -380,8 +380,8 @@
       <div style="display:flex;gap:10px;align-items:center;margin:6px 0 10px">
         <input id="dupQ" class="grow" placeholder="过滤 guid / 名称 / 文件名 / 版本 / 作者…">
       </div>
-      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝跳到 mod 清单并打开这个 mod（看哪些卡片在用它）。</div>
-      <table class="list"><thead><tr><th style="width:118px">级别</th><th>文件名</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:78px">大小</th><th style="width:132px">改于</th><th style="width:224px">操作</th></tr></thead>
+      <div class="dim" id="dupHint" style="font-size:12px;margin-bottom:8px">同一 guid 的多份文件——版本号 / 作者 / 文件名 / 时间全列出，判断权在你。<b>指定这个版本</b>＝这一份成为主库当前版本（不在主库则搬入并正名），<b>同 guid 其余非旧版副本自动判为旧版</b>（改名加 <span class="mono">.old</span> 段并移入缓存库，游戏不再读它们）——点了就生效，用<b>换用此版本</b>可再换回来；旧版行还可用<b>正名搬入主库</b>去掉 .old 段（主库已无该 mod 时）。打开时待确认的组排在上、已确认的沉底（本页内不再重排——处理完的那组停在原处，底部状态栏给结果）。<b>整行点击</b>＝该行的操作（非旧版即指定这个版本，旧版即换用 / 正名）——操作可逆，点错再点另一份即可；<b>查看引用关系</b>＝跳到 mod 清单并打开这个 mod（看哪些卡片在用它）。<b>文件名下方小字</b>＝这一份的完整文件系统路径；<b>md5</b>＝内容指纹（只算有重复的 mod，算过就留档、不再重算）——同一 guid 各份 <b>md5 不同</b>、或<b>创建 / 修改时间不同</b>、且这组还没挑过版本时，对应格标<b>红块</b>提醒你先看清再选；已挑过的组不标红。</div>
+      <table class="list"><thead><tr><th style="width:118px">级别</th><th>文件名 / 路径</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:70px">大小</th><th style="width:136px">创建 / 修改</th><th style="width:112px">md5</th><th style="width:224px">操作</th></tr></thead>
         <tbody id="dupBody"></tbody></table>
     </div>
     <footer>
@@ -1659,14 +1659,14 @@ async function restoreMove(){
 }
 
 /* ---------- 重复副本（统计卡点入 · 人工筛旧版 → 移到缓存库 + .old + 新旧版本记录） ---------- */
-let dupState = { all:[], shown:0, batch:60, olds:{}, order:null };
+let dupState = { all:[], shown:0, batch:60, olds:{}, order:null, hashErrors:[] };
 
 async function openDup(){
-  dupState = { all:[], shown:0, batch:60, olds:{}, order:null };
+  dupState = { all:[], shown:0, batch:60, olds:{}, order:null, hashErrors:[] };
   $('dupQ').value = '';
-  $('dupInfo').textContent = '加载中…（逐份读 manifest）';
+  $('dupInfo').textContent = '加载中…（逐份读 manifest + 补 MD5 档案——只算冲突文件）';
   $('dupFoot').textContent = '';
-  $('dupBody').innerHTML = '<tr><td colspan="7" class="dim">加载中…</td></tr>';
+  $('dupBody').innerHTML = '<tr><td colspan="8" class="dim">加载中…</td></tr>';
   $('ovDup').classList.remove('hidden');
   await loadDup();
 }
@@ -1676,10 +1676,11 @@ async function loadDup(){
     dupState.all = r.items || [];
     dupState.olds = {};
     (r.olds || []).forEach(o => { dupState.olds[(o.oldPath||'').toLowerCase()] = o; });
+    dupState.hashErrors = r.hashErrors || [];
     renderDup(true);
   }catch(e){
     $('dupInfo').textContent = '';
-    $('dupBody').innerHTML = `<tr><td colspan="7" class="dim">加载失败：${esc(e.message)}</td></tr>`;
+    $('dupBody').innerHTML = `<tr><td colspan="8" class="dim">加载失败：${esc(e.message)}</td></tr>`;
   }
 }
 function dupFiltered(){
@@ -1735,6 +1736,22 @@ function dupBtns(g, f){
   const a = DUP_ACT_TIP[act];
   return `<button data-act="${act}" data-guid="${gid}" data-path="${path}" title="${a.title}">${a.label}</button>` + ref;
 }
+/* 组内某字段（md5 / ctime / mtime）是否不一致——只对有值的份判断；不一致的组需要人工挑版本（红块提示） */
+function dupFieldMixed(g, key){
+  const seen = {};
+  let kinds = 0;
+  (g.files||[]).forEach(f => {
+    const v = f[key];
+    if(!v) return;
+    if(!seen[v]){ seen[v] = 1; kinds = kinds + 1; }
+  });
+  return kinds > 1;
+}
+/* 时间戳显示：去掉 T 与毫秒（完整值走悬停 title——省横向空间） */
+function dupStamp(v){
+  if(!v) return '—';
+  return v.replace('T',' ').replace(/\.\d+$/, '');
+}
 function dupFileRow(g, f){
   const size = f.size ? (f.size/1048576).toFixed(1) + ' MB' : '';
   const ver = f.version ? esc(f.version) : '<span class="dim">—</span>';
@@ -1748,17 +1765,39 @@ function dupFileRow(g, f){
   const root = (f.rootPath||'').split('\\').pop() || '';
   const act = dupRowAct(g, f);
   const note = act ? '' : (f.isOld ? '旧版文件位于主库——请重扫核对' : '已是主库当前版本（其余副本已判旧版）');
+  /* 完整文件系统路径——文件名下方小字（副本实际在哪一目了然）；超长省略号截断，悬停看全量 */
+  const fullPath = f.filePath || '';
+  const pathLine = fullPath ? `<div class="dim mono" style="font-size:11px;max-width:460px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fullPath)}">${esc(fullPath)}</div>` : '';
+  /* 标红判据统一：组内该项不一致 + 该组尚未做出主要选择（待确认）——已挑过版本的组不标 */
+  const dupWarn = dupPending(g);
+  /* md5——组内内容不一致时标红（提示人工挑） */
+  const md5 = f.md5 || '';
+  const md5Warn = md5 && dupFieldMixed(g,'md5') && dupWarn;
+  let md5Cell = '<span class="dim">—</span>';
+  if(md5){
+    const short = md5.slice(0,12);
+    const tip = 'MD5 ' + md5 + '（完整值）';
+    if(md5Warn) md5Cell = `<span class="mk r" title="${tip}">${esc(short)}</span>`;
+    else md5Cell = `<span class="mono" style="font-size:11px" title="${tip}">${esc(short)}</span>`;
+  }
+  /* 建 / 改——组内该项不一致时同样标红（各份的创建 / 修改时间不同 = 很可能不是同一份） */
+  const ct = esc(dupStamp(f.ctime));
+  const mt = esc(dupStamp(f.mtime));
+  const ctCell = (dupWarn && dupFieldMixed(g,'ctime')) ? `<span class="mk r" title="各副本创建时间不同——看清再挑">${ct}</span>` : ct;
+  const mtCell = (dupWarn && dupFieldMixed(g,'mtime')) ? `<span class="mk r" title="各副本修改时间不同——看清再挑">${mt}</span>` : mt;
   return `<tr class="dupfile${act ? '' : ' noact'}" data-guid="${esc(g.guid)}" data-act="${act}" data-note="${note}" data-path="${esc(f.filePath||'')}" data-tier="${f.tier || 0}">
     <td>${tierCell} <span class="dim" style="font-size:11px">${esc(root)}</span></td>
-    <td class="mono">${esc(f.fileName||'')}${tags}</td>
-    <td>${ver}</td><td>${author}</td><td class="dim">${size}</td><td class="dim">${esc(f.mtime||'')}</td>
+    <td class="mono">${esc(f.fileName||'')}${tags}${pathLine}</td>
+    <td>${ver}</td><td>${author}</td><td class="dim">${size}</td>
+    <td class="dim" style="font-size:11px">建 ${ctCell}<br>改 ${mtCell}</td>
+    <td>${md5Cell}</td>
     <td>${dupBtns(g, f)}</td></tr>`;
 }
 function renderDup(reset){
   const list = dupFiltered();
   if(reset){ dupState.shown = 0; $('dupBody').innerHTML = ''; }
   if(!list.length){
-    $('dupBody').innerHTML = '<tr><td colspan="7" class="dim">没有重复副本</td></tr>';
+    $('dupBody').innerHTML = '<tr><td colspan="8" class="dim">没有重复副本</td></tr>';
     $('dupInfo').textContent = '共 0 组';
     return;
   }
@@ -1769,17 +1808,18 @@ function renderDup(reset){
     const g = list[i];
     const name = (g.files && g.files[0] && g.files[0].name) ? g.files[0].name : '';
     if(i === firstDone){
-      html += `<tr class="grp"><td colspan="7" style="background:#1b1f24" class="dim">— 已确认（无需处理，共 ${list.length - firstDone} 组）—</td></tr>`;
+      html += `<tr class="grp"><td colspan="8" style="background:#1b1f24" class="dim">— 已确认（无需处理，共 ${list.length - firstDone} 组）—</td></tr>`;
     }
     const mark = dupPending(g) ? '' : ' <span class="dim">· 已确认</span>';
-    html += `<tr class="grp"><td colspan="7" style="background:#22262d"><b class="mono">${esc(g.guid)}</b> <span class="dim">${esc(name)}</span> · ${g.files.length} 份（主库 ${g.mainCount}）${mark}</td></tr>`;
+    html += `<tr class="grp"><td colspan="8" style="background:#22262d"><b class="mono">${esc(g.guid)}</b> <span class="dim">${esc(name)}</span> · ${g.files.length} 份（主库 ${g.mainCount}）${mark}</td></tr>`;
     html += g.files.map(f => dupFileRow(g, f)).join('');
   }
   if(dupState.shown === 0) $('dupBody').innerHTML = html;
   else $('dupBody').insertAdjacentHTML('beforeend', html);
   dupState.shown = end;
   const pending = list.filter(dupPending).length;
-  $('dupInfo').textContent = `共 ${list.length} 组 · ${pending} 待确认（已显示 ${dupState.shown}）· 已登记旧版 ${Object.keys(dupState.olds).length} 条`;
+  const he = (dupState.hashErrors && dupState.hashErrors.length) ? ` · MD5 算不出 ${dupState.hashErrors.length} 份` : '';
+  $('dupInfo').textContent = `共 ${list.length} 组 · ${pending} 待确认（已显示 ${dupState.shown}）· 已登记旧版 ${Object.keys(dupState.olds).length} 条${he}`;
 }
 /* 动作：指定这个版本 / 换用此版本 / 正名搬入主库（指定版本不弹确认框——声明写在弹窗上方） */
 async function doDupOp(act, guid, path, tier, btn){

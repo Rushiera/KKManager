@@ -255,6 +255,25 @@ namespace KKManager.Data
         public string MarkedAt { get; set; }
     }
 
+    /// <summary>一条文件哈希档案——重复副本面板的 MD5 缓存（按 size + mtime 判失效，变了重算）。</summary>
+    public class ModHashRecord
+    {
+        /// <summary>文件绝对路径（主键）。</summary>
+        public string FilePath { get; set; }
+
+        /// <summary>建档时的文件字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>建档时的修改时间戳文本（UTC）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>MD5（小写十六进制）。</summary>
+        public string Md5 { get; set; }
+
+        /// <summary>建档时刻（UTC）。</summary>
+        public string HashedAt { get; set; }
+    }
+
     /// <summary>卡片编辑留档——原版留在软件内部，与卡片的对应关系落库（「寻找旧版」读它）。</summary>
     public class CardEditRecord
     {
@@ -489,6 +508,12 @@ namespace KKManager.Data
             return fi.LastWriteTimeUtc.ToString(StampFormat, CultureInfo.InvariantCulture);
         }
 
+        /// <summary>取文件的创建时间戳文本（UTC）——重复副本面板展示用。</summary>
+        public static string CreatedStampOf(FileInfo fi)
+        {
+            return fi.CreationTimeUtc.ToString(StampFormat, CultureInfo.InvariantCulture);
+        }
+
         /// <summary>可读文本类条目的扩展名（组成档案顺带捞内容做悬停预览——二进制大件不碰）。</summary>
         private static readonly string[] TextEntryExts = { ".csv", ".xml", ".txt", ".json", ".ini", ".yml", ".yaml", ".md", ".list" };
 
@@ -587,6 +612,9 @@ namespace KKManager.Data
                                  texture_count INTEGER, textures TEXT, class_summary TEXT,
                                  parsed_at TEXT,
                                  PRIMARY KEY(guid, entry_path))");
+                Exec(@"CREATE TABLE IF NOT EXISTS mod_hash(
+                                 file_path TEXT PRIMARY KEY, size INTEGER, mtime TEXT,
+                                 md5 TEXT, hashed_at TEXT)");
                 Exec(@"CREATE TABLE IF NOT EXISTS card_edit(
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                                  card_path TEXT, card_name TEXT, lib INTEGER,
@@ -608,6 +636,7 @@ namespace KKManager.Data
                 Exec("DROP TABLE IF EXISTS mod_old");
                 Exec("DROP TABLE IF EXISTS mod_composition");
                 Exec("DROP TABLE IF EXISTS mod_u3d");
+                Exec("DROP TABLE IF EXISTS mod_hash");
                 Exec("DROP TABLE IF EXISTS todo");
                 Exec("DROP TABLE IF EXISTS mod");
                 Exec("DROP TABLE IF EXISTS setting");
@@ -1847,6 +1876,48 @@ namespace KKManager.Data
             }
             return list;
         }
+        /// <summary>哈希档案全表（主库表）——键 = 文件路径（大小写不敏感，跨库副本路径比对用）。</summary>
+        public Dictionary<string, ModHashRecord> LoadModHashes()
+        {
+            Dictionary<string, ModHashRecord> map = new Dictionary<string, ModHashRecord>(StringComparer.OrdinalIgnoreCase);
+            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime, md5, hashed_at FROM mod_hash"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    ModHashRecord rec = new ModHashRecord();
+                    rec.FilePath = r.GetString(0);
+                    rec.Size = r.GetInt64(1);
+                    rec.Mtime = r.IsDBNull(2) ? "" : r.GetString(2);
+                    rec.Md5 = r.IsDBNull(3) ? null : r.GetString(3);
+                    rec.HashedAt = r.IsDBNull(4) ? "" : r.GetString(4);
+                    map[rec.FilePath] = rec;
+                }
+            }
+            return map;
+        }
+
+        /// <summary>写入 / 更新一条哈希档案（主库表）。</summary>
+        public void PutModHash(ModHashRecord rec)
+        {
+            if (rec == null || string.IsNullOrEmpty(rec.FilePath))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO mod_hash(file_path,size,mtime,md5,hashed_at)
+                             VALUES($path,$size,$mtime,$md5,$at)
+                             ON CONFLICT(file_path) DO UPDATE SET
+                               size=excluded.size, mtime=excluded.mtime, md5=excluded.md5, hashed_at=excluded.hashed_at"))
+            {
+                cmd.Parameters.AddWithValue("$path", rec.FilePath);
+                cmd.Parameters.AddWithValue("$size", rec.Size);
+                cmd.Parameters.AddWithValue("$mtime", rec.Mtime ?? "");
+                cmd.Parameters.AddWithValue("$md5", (object)rec.Md5 ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$at", string.IsNullOrEmpty(rec.HashedAt) ? Now() : rec.HashedAt);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
         /// <summary>本库按 guid 的副本计数（总数 / 非旧版数）——重复副本组数与「待确认」组数用（跨库由 hub 合并）。</summary>
         public List<ModFileCount> ListModFileCounts()
         {
