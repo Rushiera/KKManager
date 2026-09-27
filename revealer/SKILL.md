@@ -37,6 +37,7 @@
 - `info`（受控根）· `file-tree workspace:KKManager/revealer`（上版目录 + 台账）
 - `text-read_lines WorkSpace:KKManager/revealer/RELEASE.md`（取台账末行 + 复核规范未变——**实例规范档在发布区**，知识网络侧无副本）
 - `git -C D:\Mau\WorkSpace\KKManager status --short`（工作区基线）+ `git log --oneline -3`（HEAD）——本项目**有 git 仓库**，发布收尾必推送（步 8b）
+- 🔴 **工作区非空即触发快照路径**——他猫在制改动在场时，发布基线取 HEAD 快照（`git archive HEAD` → 解包到 CatTemp），自检与发布编译都在快照上做（见 `RELEASE.md` §二 铁律 4）；在制改动不入包、不进本次提交
 
 ### 步 2 — 编译版自检（不过不发布）
 
@@ -112,7 +113,7 @@ revealer/kkmanager<发布版号>/
 
 ### 步 8b — 提交与推送 GitHub
 
-- `git -C <仓库> add -A` → `git -C <仓库> commit -m "v<编译版号>: <一句话>"` → `git -C <仓库> push origin main`
+- `git -C <仓库> add <本次改动文件>` → `git -C <仓库> commit -m "v<编译版号>: <一句话>"` → `git -C <仓库> push origin main`（🔴 **不 `add -A`**——发布窗口内可能有他猫在制改动，`add -A` 会把在制品卷进本次提交）
 - 入仓面：源码 · `README.md` · `revealer/*.md` · 发布版文本件（`readme.txt` / `tools/*.txt` / `清空所有数据.bat`）；**exe 与 zip 不入仓**（`.gitignore` 已排除）
 - 本机**无 `gh`** → Release 附件（zip / exe）由 Rushiera 在网页上传——报告列为待办
 
