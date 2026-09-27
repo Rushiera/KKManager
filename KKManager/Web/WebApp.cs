@@ -123,6 +123,8 @@ namespace KKManager.Web
         private static readonly System.Threading.SemaphoreSlim RequestGate = new System.Threading.SemaphoreSlim(1, 1);
         /// <summary>文件夹选择框是否已弹出（0=空闲 1=占用）——防止一次点出多个看不见的模态框。</summary>
         private static int BrowseActive;
+        /// <summary>浏览框调试日志开关——默认关闭（日志代码全部保留，命令行 `serve --browse-debug` 打开）。</summary>
+        private static bool BrowseDebug;
         /// <summary>浏览框宿主窗句柄（枚举本线程顶层窗口时排除它）。</summary>
         private static IntPtr BrowseHostHandle;
         /// <summary>选择框句柄（找到后记录——超时主动关闭用；IntPtr.Zero = 未找到）。</summary>
@@ -163,10 +165,11 @@ namespace KKManager.Web
         /// <summary>单页返回上限——前端传 size ≤ 0 表示不限条数。</summary>
         private const int NoLimit = 100000;
 
-        /// <summary>启动本地服务（阻塞）。</summary>
-        public static int Run(string dbPath, int port, bool openBrowser)
+        /// <summary>启动本地服务（阻塞）——browseDebug 打开浏览框调试日志（默认关）。</summary>
+        public static int Run(string dbPath, int port, bool openBrowser, bool browseDebug)
         {
             _dbPath = dbPath;
+            BrowseDebug = browseDebug;
             _hub = new StoreHub(dbPath);
             RootsConfig bootConfig = LoadConfig();
             _hub.EnsureMigrated(bootConfig);
@@ -329,6 +332,15 @@ namespace KKManager.Web
         /// <summary>Win32 对话框窗口类名——FolderBrowserDialog 的宿主类。</summary>
         private const string DialogClassName = "#32770";
 
+        /// <summary>浏览框调试日志——只在 --browse-debug 打开时输出；日志代码保留，便于以后排查弹框问题。</summary>
+        private static void BrowseLog(string message)
+        {
+            if (BrowseDebug)
+            {
+                Console.WriteLine(message);
+            }
+        }
+
         /// <summary>启动置顶定时器——Tick 由 ShowDialog 的模态消息循环泵动，把选择框提到最上层。</summary>
         private static void StartBrowseTopTimer()
         {
@@ -341,7 +353,7 @@ namespace KKManager.Web
             timer.Tick += BrowseTopOnTick;
             BrowseTopTimer = timer;
             timer.Start();
-            Console.WriteLine("[浏览] 置顶定时器已启动——线程 " + BrowseThreadId.ToString() + " · 每 200 ms 扫一次");
+            BrowseLog("[浏览] 置顶定时器已启动——线程 " + BrowseThreadId.ToString() + " · 每 200 ms 扫一次");
         }
 
         /// <summary>停止并释放置顶定时器（幂等）。</summary>
@@ -373,7 +385,7 @@ namespace KKManager.Web
             {
                 if (BrowseTopTicks <= 3)
                 {
-                    Console.WriteLine("[浏览] 置顶扫描 #" + BrowseTopTicks + "：本线程还没有可置顶的顶层窗口");
+                    BrowseLog("[浏览] 置顶扫描 #" + BrowseTopTicks + "：本线程还没有可置顶的顶层窗口");
                 }
                 return;
             }
@@ -396,7 +408,7 @@ namespace KKManager.Web
             }
             if (first || changed || !ok)
             {
-                Console.WriteLine("[浏览] 置顶扫描 #" + BrowseTopTicks + "：句柄 " + dlg.ToString()
+                BrowseLog("[浏览] 置顶扫描 #" + BrowseTopTicks + "：句柄 " + dlg.ToString()
                     + " · 可见=" + (visible ? "是" : "否（已强制显示）")
                     + " · SetWindowPos " + (ok ? "成功" : "失败（Win32 错误 " + err.ToString() + "）"));
             }
@@ -414,7 +426,7 @@ namespace KKManager.Web
             bool visible = IsWindowVisible(hWnd);
             if (BrowseTopTicks <= 3)
             {
-                Console.WriteLine("[浏览]   顶层窗 " + hWnd.ToString() + " 类=" + clsName
+                BrowseLog("[浏览]   顶层窗 " + hWnd.ToString() + " 类=" + clsName
                     + " 标题=" + title.ToString() + " 可见=" + (visible ? "是" : "否"));
             }
             if (hWnd == BrowseHostHandle)
@@ -1226,11 +1238,11 @@ namespace KKManager.Web
                 string picked = null;
                 string error = null;
                 context.Response.ContentType = "application/json; charset=utf-8";
-                Console.WriteLine("[浏览] 请求到达——开一个文件夹选择框");
+                BrowseLog("[浏览] 请求到达——开一个文件夹选择框");
                 // 防叠：上一个选择框未关闭时不再弹新的（满屏看不见的模态框是最坏情况）
                 if (System.Threading.Interlocked.CompareExchange(ref BrowseActive, 1, 0) != 0)
                 {
-                    Console.WriteLine("[浏览] 拒绝——上一个选择框仍未关闭");
+                    BrowseLog("[浏览] 拒绝——上一个选择框仍未关闭");
                     await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"busy\",\"error\":\"上一个文件夹选择框仍未关闭——先关掉它（按 Esc），再点一次「浏览…」\"}");
                     return;
                 }
@@ -1244,7 +1256,7 @@ namespace KKManager.Web
                         System.Drawing.Rectangle work = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
                         int hostWidth = 420;
                         int hostHeight = 96;
-                        Console.WriteLine("[浏览] 弹框线程启动——目标屏 " + work.Width + "x" + work.Height + " @" + work.X + "," + work.Y);
+                        BrowseLog("[浏览] 弹框线程启动——目标屏 " + work.Width + "x" + work.Height + " @" + work.X + "," + work.Y);
                         using (System.Windows.Forms.Form host = new System.Windows.Forms.Form())
                         {
                             host.Text = "选择文件夹";
@@ -1262,7 +1274,7 @@ namespace KKManager.Web
                             host.Activate();
                             bool fg = SetForegroundWindow(host.Handle);
                             BrowseHostHandle = host.Handle;
-                            Console.WriteLine("[浏览] 宿主窗已显示 @" + host.Location.X + "," + host.Location.Y
+                            BrowseLog("[浏览] 宿主窗已显示 @" + host.Location.X + "," + host.Location.Y
                                 + " · 句柄 " + host.Handle.ToString()
                                 + " · SetForegroundWindow " + (fg ? "成功" : "失败（前台锁定——不阻塞，靠置顶兜底）"));
                             StartBrowseTopTimer();
@@ -1276,7 +1288,7 @@ namespace KKManager.Web
                                 {
                                     picked = dlg.SelectedPath;
                                 }
-                                Console.WriteLine("[浏览] 对话框已关闭——" + (picked == null ? "取消 / 未选" : "已选 " + picked)
+                                BrowseLog("[浏览] 对话框已关闭——" + (picked == null ? "取消 / 未选" : "已选 " + picked)
                                     + " · 置顶 " + (BrowseTopDone ? "已生效" : "未生效") + " · Tick " + BrowseTopTicks.ToString());
                             }
                         }
@@ -1284,7 +1296,7 @@ namespace KKManager.Web
                     catch (Exception ex)
                     {
                         error = ex.GetType().Name + ": " + ex.Message;
-                        Console.WriteLine("[浏览] 异常——" + error);
+                        BrowseLog("[浏览] 异常——" + error);
                     }
                     finally
                     {
@@ -1301,16 +1313,16 @@ namespace KKManager.Web
                 if (!finished)
                 {
                     IntPtr stuck = BrowseDlgHandle;
-                    Console.WriteLine("[浏览] 等待超时（300 秒）——选择框句柄 " + stuck.ToString()
+                    BrowseLog("[浏览] 等待超时（300 秒）——选择框句柄 " + stuck.ToString()
                         + " · 置顶 " + (BrowseTopDone ? "已生效" : "未生效") + " · Tick " + BrowseTopTicks.ToString());
                     if (stuck != IntPtr.Zero)
                     {
                         bool sent = PostMessage(stuck, WmClose, IntPtr.Zero, IntPtr.Zero);
-                        Console.WriteLine("[浏览] 超时主动关闭——WM_CLOSE " + (sent ? "已投递" : "投递失败"));
+                        BrowseLog("[浏览] 超时主动关闭——WM_CLOSE " + (sent ? "已投递" : "投递失败"));
                     }
                     else
                     {
-                        Console.WriteLine("[浏览] 超时主动关闭——没记录到选择框句柄（框若仍开着请按 Esc）");
+                        BrowseLog("[浏览] 超时主动关闭——没记录到选择框句柄（框若仍开着请按 Esc）");
                     }
                     await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"timeout\",\"error\":\"300 秒内未操作——已尝试自动关闭选择框；若框仍可见请按 Esc，之后可再点一次\"}");
                     return;
@@ -1320,7 +1332,7 @@ namespace KKManager.Web
                     await context.Response.WriteAsync("{\"ok\":false,\"stage\":\"exception\",\"error\":\"" + EscapeJson(error) + "\"}");
                     return;
                 }
-                Console.WriteLine("[浏览] 请求完成——" + (picked == null ? "未选（取消）" : "已选 " + picked));
+                BrowseLog("[浏览] 请求完成——" + (picked == null ? "未选（取消）" : "已选 " + picked));
                 await context.Response.WriteAsync("{\"ok\":" + (picked != null ? "true" : "false") + ",\"stage\":\"done\",\"path\":\"" + EscapeJson(picked == null ? "" : picked) + "\"}");
             });
 

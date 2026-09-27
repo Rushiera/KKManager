@@ -35,6 +35,7 @@ namespace KKManager
             int quality = int.Parse(Take(rest, "--quality") ?? "82");
             int port = int.Parse(Take(rest, "--port") ?? "8539");
             bool open = rest.Remove("--open");
+            bool browseDebug = rest.Remove("--browse-debug");
             bool force = rest.Remove("--force");
 
             switch (cmd)
@@ -92,7 +93,7 @@ namespace KKManager
                 case "set-game-root":
                     return SetGameRootCommand(db, rest);
                 case "serve":
-                    return KKManager.Web.WebApp.Run(db, port, open);
+                    return KKManager.Web.WebApp.Run(db, port, open, browseDebug);
                 case "help":
 #if RELEASEPACK
                     Console.WriteLine("发布版（ReleasePack 编译）——双击本 exe 即起面板。");
@@ -132,7 +133,7 @@ namespace KKManager
             Console.WriteLine("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]");
             Console.WriteLine("  roots-clear <mods|cards|all>          清空库根配置");
             Console.WriteLine("  set-game-root <路径>                  设置游戏根（预置主库条目路径随它重派生）");
-            Console.WriteLine("  serve [--port 8539] [--open]          启动本地面板");
+            Console.WriteLine("  serve [--port 8539] [--open] [--browse-debug]  启动本地面板（--browse-debug 打印浏览框调试日志）");
             Console.WriteLine();
             Console.WriteLine("  通用: --db <路径>（默认 exe 目录下 data/kkmanager.db）· --force 全量重扫");
             Console.WriteLine("  级别: 1=主库（游戏读取）· 2=缓存库（可一键搬入主库）· 3=冷冻库（只读）");
