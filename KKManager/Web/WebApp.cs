@@ -946,6 +946,9 @@ namespace KKManager.Web
             // 性格字母表（数值 ↔ 名称）——编辑下拉与展示共用；来源见 Core/Personality.cs
             app.MapGet("/api/personalities", () => Results.Json(new { ok = true, list = Personality.All() }));
 
+            // 敏感带字母表（数值 ↔ 名称）——编辑下拉与展示共用；来源见 Core/WeakPoint.cs
+            app.MapGet("/api/weak-points", () => Results.Json(new { ok = true, list = WeakPoint.All() }));
+
             // 卡片可编辑字段（只读）——人物卡 Parameter 块里的姓 / 名 / 爱称 / 性格
             app.MapGet("/api/card/{id}/params", (long id, int lib) =>
             {
@@ -970,6 +973,11 @@ namespace KKManager.Web
                     nickName = info.NickName,
                     personality = info.Personality,
                     personalityName = Personality.NameOf(info.Personality),
+                    weakPoint = info.WeakPoint,
+                    weakPointName = WeakPoint.NameOf(info.WeakPoint),
+                    denial = info.Denial,
+                    denialKeys = CardEdit.DenialKeys,
+                    denialNames = CardEdit.DenialNames,
                     archived = _hub.Core.ListCardEdits(path).Count
                 });
             });
@@ -1008,6 +1016,8 @@ namespace KKManager.Web
                 edit.FirstName = dto.firstName;
                 edit.NickName = dto.nickName;
                 edit.Personality = dto.personality;
+                edit.WeakPoint = dto.weakPoint;
+                edit.Denial = dto.denial;
                 FileInfo before = new FileInfo(path);
                 CardEditResult r = CardEdit.Apply(path, layout, cur, edit, CardArchiveDir());
                 if (!r.Ok)
@@ -2192,6 +2202,12 @@ namespace KKManager.Web
 
         /// <summary>新性格 ID。</summary>
         public int? personality { get; set; }
+
+        /// <summary>新敏感带 ID。</summary>
+        public int? weakPoint { get; set; }
+
+        /// <summary>五项「是否接受」的新值（null 元素 = 不改该项；顺序 kiss / aibu / anal / massage / notCondom）。</summary>
+        public bool?[] denial { get; set; }
     }
 
     /// <summary>查看 mod 组成的请求体。</summary>

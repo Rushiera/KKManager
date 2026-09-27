@@ -322,6 +322,29 @@ namespace KKManager.Core
             }
             return false;
         }
+        /// <summary>读布尔（MessagePack true / false）；失败返回 false。</summary>
+        public bool TryReadBool(out bool value)
+        {
+            value = false;
+            if (_pos >= _buf.Length)
+            {
+                return false;
+            }
+            byte b = _buf[_pos];
+            if (b == 0xC2)
+            {
+                value = false;
+                _pos = _pos + 1;
+                return true;
+            }
+            if (b == 0xC3)
+            {
+                value = true;
+                _pos = _pos + 1;
+                return true;
+            }
+            return false;
+        }
 
         /// <summary>按类型跳过一个值（含嵌套容器）；失败返回 false。</summary>
         public bool TrySkipValue()

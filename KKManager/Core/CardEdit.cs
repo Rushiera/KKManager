@@ -131,6 +131,24 @@ namespace KKManager.Core
         /// <summary>性格的值区间字节数。</summary>
         public int PersonalityLen { get; set; }
 
+        /// <summary>敏感带 / 弱点部位（weakPoint）——数值，名称见 <see cref="WeakPoint"/>。</summary>
+        public int WeakPoint { get; set; }
+
+        /// <summary>敏感带的值区间起点。</summary>
+        public long WeakPointAt { get; set; }
+
+        /// <summary>敏感带的值区间字节数。</summary>
+        public int WeakPointLen { get; set; }
+
+        /// <summary>五项「是否接受」的当前值——顺序见 <see cref="CardEdit.DenialKeys"/>。</summary>
+        public bool[] Denial { get; set; } = new bool[5];
+
+        /// <summary>五项「是否接受」各自的值区间起点。</summary>
+        public long[] DenialAt { get; set; } = new long[5];
+
+        /// <summary>五项「是否接受」各自的值区间字节数。</summary>
+        public int[] DenialLen { get; set; } = new int[5];
+
         /// <summary>读取错误（null 表示读到了字段）。</summary>
         public string Error { get; set; }
     }
@@ -149,6 +167,12 @@ namespace KKManager.Core
 
         /// <summary>新性格 ID（null = 不改）。</summary>
         public int? Personality { get; set; }
+
+        /// <summary>新敏感带 ID（null = 不改）。</summary>
+        public int? WeakPoint { get; set; }
+
+        /// <summary>五项「是否接受」的新值（null = 不改该项；顺序同 <see cref="CardEdit.DenialKeys"/>）。</summary>
+        public bool?[] Denial { get; set; }
     }
 
     /// <summary>编辑结果——改动摘要 / 留档位置 / 字节增量 / 失败原因。</summary>
@@ -189,6 +213,12 @@ namespace KKManager.Core
 
         /// <summary>参数块的名字（可编辑字段所在块）。</summary>
         private const string ParamBlockName = "Parameter";
+
+        /// <summary>五项「是否接受」的键名（数组顺序即界面顺序）。</summary>
+        public static readonly string[] DenialKeys = { "kiss", "aibu", "anal", "massage", "notCondom" };
+
+        /// <summary>五项「是否接受」的显示名（与 DenialKeys 同序）。</summary>
+        public static readonly string[] DenialNames = { "接吻", "爱抚", "肛门", "按摩", "不戴套" };
 
         /// <summary>解析数据区布局——人物卡：头段 + 脸图 + 块表 + 8 字节尾 + 载荷。失败时 Error 说明原因。</summary>
         public static CardLayout Parse(string path)
@@ -460,6 +490,24 @@ namespace KKManager.Core
                     info.PersonalityAt = info.BlockStart + at;
                     info.PersonalityLen = cur.Position - at;
                 }
+                else if (key == "weakPoint")
+                {
+                    long v;
+                    if (!cur.TryReadLong(out v))
+                    {
+                        break;
+                    }
+                    info.WeakPoint = (int)v;
+                    info.WeakPointAt = info.BlockStart + at;
+                    info.WeakPointLen = cur.Position - at;
+                }
+                else if (key == "denial")
+                {
+                    if (!ReadDenial(cur, info))
+                    {
+                        break;
+                    }
+                }
                 else if (!cur.TrySkipValue())
                 {
                     break;
@@ -468,8 +516,89 @@ namespace KKManager.Core
             return info;
         }
 
+        /// <summary>读「是否接受」五项（denial 嵌套映射：kiss / aibu / anal / massage / notCondom）；失败返回 false。</summary>
+        private static bool ReadDenial(MsgPackCursor cur, CardParamInfo info)
+        {
+            int keys;
+            if (!cur.TryReadMapHeader(out keys))
+            {
+                return false;
+            }
+            for (int i = 0; i < keys; i = i + 1)
+            {
+                string key;
+                if (!cur.TryReadString(out key))
+                {
+                    return false;
+                }
+                int at = cur.Position;
+                bool v;
+                if (!cur.TryReadBool(out v))
+                {
+                    return false;
+                }
+                int slot = DenialSlot(key);
+                if (slot >= 0)
+                {
+                    info.Denial[slot] = v;
+                    info.DenialAt[slot] = info.BlockStart + at;
+                    info.DenialLen[slot] = cur.Position - at;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>「是否接受」某项在数组里的位置（未知键返回 -1）。</summary>
+        private static int DenialSlot(string key)
+        {
+            for (int i = 0; i < DenialKeys.Length; i = i + 1)
+            {
+                if (key == DenialKeys[i])
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        /// <summary>布尔字段的显示文本（是 / 否）。</summary>
+        private static string ShowBool(bool v)
+        {
+            if (v)
+            {
+                return "是";
+            }
+            return "否";
+        }
+
+        /// <summary>把布尔编成 MessagePack（true = 0xC3 / false = 0xC2）——与游戏写卡片时一致。</summary>
+        private static byte[] MsgPackBool(bool v)
+        {
+            byte[] one = new byte[1];
+            if (v)
+            {
+                one[0] = 0xC3;
+            }
+            else
+            {
+                one[0] = 0xC2;
+            }
+            return one;
+        }
+
+        /// <summary>敏感带的显示文本（名称 + ID；表外显示为未命名）。</summary>
+        private static string ShowWeakPoint(int id)
+        {
+            string name = WeakPoint.NameOf(id);
+            if (name == null)
+            {
+                return "未命名（值 " + id + "）";
+            }
+            return name;
+        }
+
         /// <summary>
-        /// 写入四个字段（null = 不改这一项）。原版先留档到 archiveDir（非空时），再最小改动写回，最后还原文件时间与属性。
+        /// 写入可编辑字段（null = 不改这一项）。原版先留档到 archiveDir（非空时），再最小改动写回，最后还原文件时间与属性。
         /// </summary>
         public static CardEditResult Apply(string path, CardLayout layout, CardParamInfo cur, CardParamEdit edit, string archiveDir)
         {
@@ -503,6 +632,41 @@ namespace KKManager.Core
                 r.Bytes = MsgPackInt(edit.Personality.Value);
                 reps.Add(r);
                 result.Changes.Add("性格 " + ShowPersonality(cur.Personality) + " → " + ShowPersonality(edit.Personality.Value));
+            }
+            if (edit.WeakPoint.HasValue && edit.WeakPoint.Value != cur.WeakPoint)
+            {
+                if (cur.WeakPointLen == 0)
+                {
+                    result.Error = "这张卡里没有敏感带字段——未写盘";
+                    return result;
+                }
+                CardValueReplace r = new CardValueReplace();
+                r.At = cur.WeakPointAt - cur.BlockStart;
+                r.Len = cur.WeakPointLen;
+                r.Bytes = MsgPackInt(edit.WeakPoint.Value);
+                reps.Add(r);
+                result.Changes.Add("敏感带 " + ShowWeakPoint(cur.WeakPoint) + " → " + ShowWeakPoint(edit.WeakPoint.Value));
+            }
+            if (edit.Denial != null)
+            {
+                for (int i = 0; i < DenialKeys.Length && i < edit.Denial.Length; i = i + 1)
+                {
+                    if (!edit.Denial[i].HasValue || edit.Denial[i].Value == cur.Denial[i])
+                    {
+                        continue;
+                    }
+                    if (cur.DenialLen[i] == 0)
+                    {
+                        result.Error = "这张卡里没有「接受" + DenialNames[i] + "」字段——未写盘";
+                        return result;
+                    }
+                    CardValueReplace r = new CardValueReplace();
+                    r.At = cur.DenialAt[i] - cur.BlockStart;
+                    r.Len = cur.DenialLen[i];
+                    r.Bytes = MsgPackBool(edit.Denial[i].Value);
+                    reps.Add(r);
+                    result.Changes.Add("是否接受「" + DenialNames[i] + "」 " + ShowBool(cur.Denial[i]) + " → " + ShowBool(edit.Denial[i].Value));
+                }
             }
             if (reps.Count == 0)
             {

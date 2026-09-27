@@ -696,13 +696,19 @@ function openEditor(cardId, lib){
   loadStructure();
 }
 
-/* ---------- 编辑字段（姓 / 名 / 爱称 / 性格）——性格字母表来自 /api/personalities ---------- */
+/* ---------- 编辑字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）——字母表来自 /api/personalities 与 /api/weak-points ---------- */
 let persList = null;
+let weakList = null;
 let editParams = null;
 async function loadPersonalities(){
   if(persList){ return persList; }
   try{ const r = await api('/api/personalities'); persList = r.list || []; }catch(e){ persList = []; }
   return persList;
+}
+async function loadWeakPoints(){
+  if(weakList){ return weakList; }
+  try{ const r = await api('/api/weak-points'); weakList = r.list || []; }catch(e){ weakList = []; }
+  return weakList;
 }
 async function loadParams(){
   const c = editCtx;
@@ -719,13 +725,21 @@ async function loadParams(){
     const known = list.some(p => p.id === r.personality);
     const extra = known ? '' : `<option value="${r.personality}">${r.personality} 未收录（表外 ID）</option>`;
     const opts = list.map(p => `<option value="${p.id}">${p.id} ${esc(p.name)}</option>`).join('');
-    $('edEdit').innerHTML = `<details class="edsec" open><summary><b>编辑</b> <span class="dim">姓 / 名 / 爱称 / 性格</span></summary><div class="secbody">
+    const wlist = await loadWeakPoints();
+    const wknown = wlist.some(p => p.id === r.weakPoint);
+    const wextra = wknown ? '' : `<option value="${r.weakPoint}">${r.weakPoint} 未收录（表外 ID）</option>`;
+    const wopts = wlist.map(p => `<option value="${p.id}">${p.id} ${esc(p.name)}</option>`).join('');
+    const dnames = r.denialNames || [];
+    const denyFields = dnames.map((n, i) => `<label>接受·${esc(n)}<select id="edDen${i}"><option value="1">是</option><option value="0">否</option></select></label>`).join('');
+    $('edEdit').innerHTML = `<details class="edsec" open><summary><b>编辑</b> <span class="dim">姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受</span></summary><div class="secbody">
       <div class="edgrid">
         <label>姓<input id="edLast" value="${esc(r.lastName||'')}"></label>
         <label>名<input id="edFirst" value="${esc(r.firstName||'')}"></label>
         <label>爱称<input id="edNick" value="${esc(r.nickName||'')}"></label>
         <label>性格<select id="edPers">${extra}${opts}</select></label>
+        <label>敏感带<select id="edWeak">${wextra}${wopts}</select></label>
       </div>
+      <div class="edgrid" style="margin-top:6px">${denyFields}</div>
       <div class="dim" style="font-size:12px;margin:8px 0;line-height:1.7">
         编辑只改被编辑的字节——卡面图 / 脸图 / 数据区其余内容原样搬运，文件的创建 / 修改时间与属性写完后还原（附加改动改回跟原来一样）。<br>
         原版先留档在软件内部（编辑卡片右侧「寻找旧版」可查）——留档 ${r.archived||0} 份。
@@ -738,6 +752,12 @@ async function loadParams(){
       <div id="edSaveMsg" class="dim" style="font-size:12px;margin-top:8px"></div>
     </div></details>`;
     $('edPers').value = String(r.personality);
+    $('edWeak').value = String(r.weakPoint);
+    const dvals = r.denial || [];
+    for(let i = 0; i < dnames.length; i = i + 1){
+      const el = $('edDen'+i);
+      if(el){ el.value = dvals[i] ? '1' : '0'; }
+    }
     $('btnEdSave').onclick = saveEdit;
     $('btnEdReset').onclick = () => loadParams();
   }catch(e){
@@ -750,18 +770,40 @@ function persName(id){
   const hit = list.find(p => p.id === id);
   return hit ? hit.name : '未收录';
 }
+function weakName(id){
+  const list = weakList || [];
+  const hit = list.find(p => p.id === id);
+  return hit ? hit.name : '未收录（值 '+id+'）';
+}
+function yesNo(v){
+  if(v){ return '是'; }
+  return '否';
+}
 function describeEdit(body){
   const parts = [];
   if(body.lastName !== (editParams.lastName||'')){ parts.push('姓 ' + (editParams.lastName||'<空>') + ' → ' + (body.lastName||'<空>')); }
   if(body.firstName !== (editParams.firstName||'')){ parts.push('名 ' + (editParams.firstName||'<空>') + ' → ' + (body.firstName||'<空>')); }
   if(body.nickName !== (editParams.nickName||'')){ parts.push('爱称 ' + (editParams.nickName||'<空>') + ' → ' + (body.nickName||'<空>')); }
   if(body.personality !== editParams.personality){ parts.push('性格 ' + persName(editParams.personality) + ' → ' + persName(body.personality)); }
+  if(body.weakPoint !== editParams.weakPoint){ parts.push('敏感带 ' + weakName(editParams.weakPoint) + ' → ' + weakName(body.weakPoint)); }
+  const was = editParams.denial || [];
+  const names = editParams.denialNames || [];
+  const now = body.denial || [];
+  for(let i = 0; i < now.length; i = i + 1){
+    if(now[i] !== was[i]){ parts.push('接受·' + (names[i]||i) + ' ' + yesNo(was[i]) + ' → ' + yesNo(now[i])); }
+  }
   return parts;
 }
 async function saveEdit(){
   if(!editParams){ $('edSaveMsg').textContent = '字段未读到——无法保存'; return; }
   const c = editCtx;
-  const body = { lib: c.lib||0, lastName: $('edLast').value, firstName: $('edFirst').value, nickName: $('edNick').value, personality: parseInt($('edPers').value, 10) };
+  const denial = [];
+  for(let i = 0; i < 8; i = i + 1){
+    const el = $('edDen'+i);
+    if(!el){ break; }
+    denial.push(el.value === '1');
+  }
+  const body = { lib: c.lib||0, lastName: $('edLast').value, firstName: $('edFirst').value, nickName: $('edNick').value, personality: parseInt($('edPers').value, 10), weakPoint: parseInt($('edWeak').value, 10), denial: denial };
   const changes = describeEdit(body);
   if(!changes.length){ $('edSaveMsg').textContent = '没有字段发生变化——未写盘'; return; }
   $('edSaveMsg').innerHTML = '写入中…（大卡需几秒）　改动：' + changes.map(esc).join(' · ');

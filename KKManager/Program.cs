@@ -150,6 +150,61 @@ namespace KKManager
             rest.RemoveRange(i, 2);
             return value;
         }
+        /// <summary>取出全部同名参数值（可重复出现的选项）并移出列表——如 --denial 可给多项。</summary>
+        private static List<string> TakeAll(List<string> rest, string name)
+        {
+            List<string> list = new List<string>();
+            while (true)
+            {
+                string v = Take(rest, name);
+                if (v == null)
+                {
+                    break;
+                }
+                list.Add(v);
+            }
+            return list;
+        }
+        /// <summary>「是否接受」键名在 DenialKeys 里的下标（未知返回 -1）。</summary>
+        private static int DenialIndexOf(string key)
+        {
+            for (int i = 0; i < CardEdit.DenialKeys.Length; i = i + 1)
+            {
+                if (key == CardEdit.DenialKeys[i])
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        /// <summary>可编辑字段的一行摘要（编辑前后打印用）。</summary>
+        private static string CardFieldSummary(CardParamInfo info)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("姓「" + info.LastName + "」 名「" + info.FirstName + "」 爱称「" + info.NickName + "」");
+            sb.Append(" 性格 " + info.Personality);
+            string wpn = WeakPoint.NameOf(info.WeakPoint);
+            sb.Append(" 敏感带 " + info.WeakPoint + " " + (wpn == null ? "(未收录)" : wpn));
+            sb.Append(" 接受[");
+            for (int i = 0; i < CardEdit.DenialKeys.Length; i = i + 1)
+            {
+                if (i > 0)
+                {
+                    sb.Append(" ");
+                }
+                sb.Append(CardEdit.DenialNames[i] + "=");
+                if (info.Denial[i])
+                {
+                    sb.Append("是");
+                }
+                else
+                {
+                    sb.Append("否");
+                }
+            }
+            sb.Append("]");
+            return sb.ToString();
+        }
 
         /// <summary>u3d 命令——列出 zipmod 容器内 unity3d 包中的贴图（可选导出缩小版 PNG）。</summary>
         private static int U3dCommand(List<string> rest)
@@ -982,6 +1037,8 @@ namespace KKManager
                 CollectCards(target, files, rest.Contains("--recurse"));
                 Console.WriteLine("目录       : " + target + " · 卡片 " + files.Count + " 张");
                 Dictionary<int, int> dist = new Dictionary<int, int>();
+                Dictionary<int, int> wpDist = new Dictionary<int, int>();
+                int[] denialYes = new int[CardEdit.DenialKeys.Length];
                 int noParam = 0;
                 foreach (string f in files)
                 {
@@ -994,8 +1051,26 @@ namespace KKManager
                         continue;
                     }
                     string pname = Personality.NameOf(info.Personality);
+                    string wpname = WeakPoint.NameOf(info.WeakPoint);
                     Console.WriteLine("  " + Path.GetFileName(f) + "  姓「" + info.LastName + "」 名「" + info.FirstName
-                        + "」 爱称「" + info.NickName + "」  性格 " + info.Personality + " " + (pname == null ? "(未收录)" : pname));
+                        + "」 爱称「" + info.NickName + "」  性格 " + info.Personality + " " + (pname == null ? "(未收录)" : pname)
+                        + "  敏感带 " + info.WeakPoint + " " + (wpname == null ? "(未收录)" : wpname));
+                    int wc;
+                    if (wpDist.TryGetValue(info.WeakPoint, out wc))
+                    {
+                        wpDist[info.WeakPoint] = wc + 1;
+                    }
+                    else
+                    {
+                        wpDist[info.WeakPoint] = 1;
+                    }
+                    for (int i = 0; i < CardEdit.DenialKeys.Length; i = i + 1)
+                    {
+                        if (info.Denial[i])
+                        {
+                            denialYes[i] = denialYes[i] + 1;
+                        }
+                    }
                     int n;
                     if (dist.TryGetValue(info.Personality, out n))
                     {
@@ -1014,6 +1089,20 @@ namespace KKManager
                 {
                     string name = Personality.NameOf(id);
                     Console.WriteLine("  ID " + id.ToString().PadLeft(3) + "  " + (name == null ? "未收录" : name).PadRight(18) + "  " + dist[id] + " 张");
+                }
+                Console.WriteLine();
+                Console.WriteLine("敏感带分布 : " + wpDist.Count + " 种");
+                List<int> wids = new List<int>(wpDist.Keys);
+                wids.Sort();
+                foreach (int id in wids)
+                {
+                    string name = WeakPoint.NameOf(id);
+                    Console.WriteLine("  ID " + id.ToString().PadLeft(3) + "  " + (name == null ? "未收录" : name).PadRight(18) + "  " + wpDist[id] + " 张");
+                }
+                Console.WriteLine("是否接受分布（是 / 卡片数）: ");
+                for (int i = 0; i < CardEdit.DenialKeys.Length; i = i + 1)
+                {
+                    Console.WriteLine("  " + CardEdit.DenialNames[i].PadRight(8) + " " + denialYes[i] + " / " + files.Count);
                 }
                 return 0;
             }
@@ -1044,12 +1133,34 @@ namespace KKManager
                 + " · 名 @" + cur.FirstNameAt.ToString("N0") + " +" + cur.FirstNameLen
                 + " · 爱称 @" + cur.NickNameAt.ToString("N0") + " +" + cur.NickNameLen
                 + " · 性格 @" + cur.PersonalityAt.ToString("N0") + " +" + cur.PersonalityLen);
+            string wpn = WeakPoint.NameOf(cur.WeakPoint);
+            Console.WriteLine("敏感带     : " + cur.WeakPoint + " " + (wpn == null ? "(未收录——表外 ID)" : wpn)
+                + " · 值区间 @" + cur.WeakPointAt.ToString("N0") + " +" + cur.WeakPointLen);
+            StringBuilder den = new StringBuilder();
+            for (int i = 0; i < CardEdit.DenialKeys.Length; i = i + 1)
+            {
+                if (i > 0)
+                {
+                    den.Append(" · ");
+                }
+                den.Append("接受「" + CardEdit.DenialNames[i] + "」");
+                if (cur.Denial[i])
+                {
+                    den.Append("是");
+                }
+                else
+                {
+                    den.Append("否");
+                }
+                den.Append(" @" + cur.DenialAt[i].ToString("N0") + " +" + cur.DenialLen[i]);
+            }
+            Console.WriteLine("是否接受   : " + den.ToString());
             return 0;
         }
         /// <summary>改卡片字段（姓 / 名 / 爱称 / 性格）——原版留档到 --archive 目录后最小改动写回。</summary>
         private static int CardEditCommand(List<string> rest)
         {
-            RequireArgs(rest, "card-edit <card.png> [--last X] [--first Y] [--nick Z] [--personality N] [--archive <dir>]", 1);
+            RequireArgs(rest, "card-edit <card.png> [--last X] [--first Y] [--nick Z] [--personality N] [--weak-point N] [--denial <键>=<yes|no>] [--archive <dir>]", 1);
             string path = rest[0];
             string archive = Take(rest, "--archive");
             CardParamEdit edit = new CardParamEdit();
@@ -1060,6 +1171,47 @@ namespace KKManager
             if (pers != null)
             {
                 edit.Personality = int.Parse(pers);
+            }
+            string weak = Take(rest, "--weak-point");
+            if (weak != null)
+            {
+                edit.WeakPoint = int.Parse(weak);
+            }
+            List<string> denials = TakeAll(rest, "--denial");
+            if (denials.Count > 0)
+            {
+                bool?[] deny = new bool?[CardEdit.DenialKeys.Length];
+                foreach (string d in denials)
+                {
+                    int eq = d.IndexOf('=');
+                    if (eq <= 0)
+                    {
+                        Console.WriteLine("--denial 参数格式应为 <键>=<yes|no>：" + d);
+                        return 2;
+                    }
+                    string key = d.Substring(0, eq);
+                    string val = d.Substring(eq + 1);
+                    int slot = DenialIndexOf(key);
+                    if (slot < 0)
+                    {
+                        Console.WriteLine("未知的「是否接受」键：" + key + "（可用：" + string.Join(" ", CardEdit.DenialKeys) + "）");
+                        return 2;
+                    }
+                    if (val == "yes" || val == "true")
+                    {
+                        deny[slot] = true;
+                    }
+                    else if (val == "no" || val == "false")
+                    {
+                        deny[slot] = false;
+                    }
+                    else
+                    {
+                        Console.WriteLine("--denial 的值应为 yes 或 no：" + d);
+                        return 2;
+                    }
+                }
+                edit.Denial = deny;
             }
             CardLayout layout = CardEdit.Parse(path);
             if (layout.Error != null)
@@ -1073,7 +1225,7 @@ namespace KKManager
                 Console.WriteLine("字段读取失败：" + cur.Error);
                 return 3;
             }
-            Console.WriteLine("编辑前     : 姓「" + cur.LastName + "」 名「" + cur.FirstName + "」 爱称「" + cur.NickName + "」 性格 " + cur.Personality);
+            Console.WriteLine("编辑前     : " + CardFieldSummary(cur));
             CardEditResult r = CardEdit.Apply(path, layout, cur, edit, archive);
             if (!r.Ok)
             {
@@ -1088,7 +1240,7 @@ namespace KKManager
             }
             CardLayout after = CardEdit.Parse(path);
             CardParamInfo now = CardEdit.ReadParams(path, after);
-            Console.WriteLine("编辑后     : 姓「" + now.LastName + "」 名「" + now.FirstName + "」 爱称「" + now.NickName + "」 性格 " + now.Personality);
+            Console.WriteLine("编辑后     : " + CardFieldSummary(now));
             Console.WriteLine("结构复验   : 块表 " + after.Blocks.Count + " 条 · 载荷 " + after.PayloadSize.ToString("N0") + " 字节 · 载荷起点 " + after.PayloadStart.ToString("N0"));
             foreach (CardEditBlock b in after.Blocks)
             {
