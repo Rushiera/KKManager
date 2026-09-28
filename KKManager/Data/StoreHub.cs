@@ -464,6 +464,31 @@ namespace KKManager.Data
                         c = a.Size.CompareTo(b.Size);
                     }
                 }
+                else if (_order == "file")
+                {
+                    c = string.Compare(a.FileName ?? "", b.FileName ?? "", StringComparison.OrdinalIgnoreCase);
+                    if (_desc)
+                    {
+                        c = -c;
+                    }
+                }
+                else if (_order == "chara")
+                {
+                    bool ea = string.IsNullOrEmpty(a.CharaName);
+                    bool eb = string.IsNullOrEmpty(b.CharaName);
+                    if (ea != eb)
+                    {
+                        c = ea ? 1 : -1;
+                    }
+                    else if (!ea)
+                    {
+                        c = string.Compare(a.CharaName, b.CharaName, StringComparison.OrdinalIgnoreCase);
+                        if (_desc)
+                        {
+                            c = -c;
+                        }
+                    }
+                }
                 else
                 {
                     c = string.CompareOrdinal(b.Mtime ?? "", a.Mtime ?? "");

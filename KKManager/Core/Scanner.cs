@@ -42,6 +42,13 @@ namespace KKManager.Core
 
         /// <summary>缩略图字节总量。</summary>
         public long ThumbBytes { get; set; }
+
+        /// <summary>本次扫描新读到角色名的卡片数。</summary>
+        public int NamesRead { get; set; }
+
+        /// <summary>本次扫描为存量卡片补读到角色名的数。</summary>
+        public int NamesFilled { get; set; }
+
         /// <summary>本次扫描因磁盘上已不存在而清理的记录数——卡片行 / mod 副本涉及的 guid 数 / 旧版登记条数之和。</summary>
         public int Removed { get; set; }
 
@@ -64,6 +71,8 @@ namespace KKManager.Core
             NonCard += other.NonCard;
             RefEntries += other.RefEntries;
             ThumbBytes += other.ThumbBytes;
+            NamesRead += other.NamesRead;
+            NamesFilled += other.NamesFilled;
             Removed += other.Removed;
             Elapsed += other.Elapsed;
             foreach (string e in other.Errors)
@@ -296,6 +305,12 @@ namespace KKManager.Core
                         if (stamps.TryGetValue(f, out old) && old[0] == fi.Length.ToString() && old[1] == mtime)
                         {
                             result.Skipped++;
+                            if (old.Length > 2 && old[2] == "1")
+                            {
+                                // 存量补名：人物卡的角色名列还空着（本版新列）——只读 Parameter 块补上，不重扫声明区
+                                store.UpdateCardName(f, CardName.ReadCharacter(f));
+                                result.NamesFilled++;
+                            }
                             continue;
                         }
 
@@ -315,6 +330,12 @@ namespace KKManager.Core
                         {
                             result.NonCard++;
                             continue;
+                        }
+                        if (c.CharaName == null && c.CardType.Contains("Chara"))
+                        {
+                            // 人物卡：角色名在数据区 Parameter 块（服装卡的名字已由 CardReader 从头段顺带读出）
+                            c.CharaName = CardName.ReadCharacter(f);
+                            result.NamesRead++;
                         }
 
                         byte[] thumb = null;

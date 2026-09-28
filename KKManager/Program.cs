@@ -66,6 +66,8 @@ namespace KKManager
                     return StatsCommand(db);
                 case "authors":
                     return AuthorsCommand(db);
+                case "cards":
+                    return CardsCommand(db, rest);
                 case "todos":
                     return TodosCommand(db);
                 case "dup":
@@ -123,6 +125,7 @@ namespace KKManager
             Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
+            Console.WriteLine("  cards [--order mtime|size|file|chara] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现）");
             Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者 / 创建时间 / MD5 + 引用卡片数与前三个卡片名——MD5 只算冲突文件，算过就忽略）");
             Console.WriteLine("  composition <guid>                    查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容；--force 强制重读容器）");
             Console.WriteLine("  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图（--tex 导出缩小版 PNG · --max N 限张数）");
@@ -522,6 +525,7 @@ namespace KKManager
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
+                Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -549,6 +553,7 @@ namespace KKManager
                 Console.WriteLine("扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
+                Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -821,6 +826,31 @@ namespace KKManager
                     string name = string.IsNullOrWhiteSpace(a.Author) ? "（无作者）" : a.Author;
                     Console.WriteLine("  " + a.Count.ToString().PadLeft(5) + " 个  " + name);
                     shown++;
+                }
+            }
+            return 0;
+        }
+        /// <summary>列出卡片（按指定排序键）——与面板「卡片排序」同一实现（StoreHub.QueryCards），供文本面核对排序结果。</summary>
+        private static int CardsCommand(string db, List<string> rest)
+        {
+            string order = Take(rest, "--order") ?? "mtime";
+            bool desc = rest.Remove("--desc");
+            string q = Take(rest, "--q") ?? "";
+            int limit = int.Parse(Take(rest, "--limit") ?? "40");
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                Console.WriteLine("库: " + hub.CorePath);
+                Console.WriteLine("排序: " + order + (order == "mtime" ? "（恒倒序）" : (desc ? " 降序" : " 升序")) + " · 关键词: " + (q.Length > 0 ? q : "（无）"));
+                Console.WriteLine();
+                List<CardRow> rows = hub.QueryCards(cfg, 1, limit, "all", q, null, null, order, desc);
+                Console.WriteLine("共列 " + rows.Count + " 张");
+                foreach (CardRow r in rows)
+                {
+                    string name = string.IsNullOrEmpty(r.CharaName) ? "（无名）" : r.CharaName;
+                    Console.WriteLine("  " + name + "  |  " + r.Folder + "  |  " + r.FileName);
                 }
             }
             return 0;

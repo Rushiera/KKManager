@@ -59,6 +59,13 @@ namespace KKManager.Web
 
         /// <summary>缩略图字节数。</summary>
         public long ThumbBytes { get; set; }
+
+        /// <summary>本次扫描新读到角色名的卡片数。</summary>
+        public int NamesRead { get; set; }
+
+        /// <summary>本次扫描为存量卡片补读到角色名的数。</summary>
+        public int NamesFilled { get; set; }
+
         /// <summary>本次扫描清理的已消失记录数。</summary>
         public int Removed { get; set; }
 
@@ -919,6 +926,8 @@ namespace KKManager.Web
                     failed = s.Failed,
                     refs = s.Refs,
                     thumbMB = Math.Round(s.ThumbBytes / 1024.0 / 1024.0, 1),
+                    namesRead = s.NamesRead,
+                    namesFilled = s.NamesFilled,
                     removed = s.Removed,
                     startedAt = s.StartedAt,
                     finishedAt = s.FinishedAt,
@@ -1045,9 +1054,9 @@ namespace KKManager.Web
 
             app.MapGet("/api/cards", (int page, int size, string filter, string q, string folder, string root, string order, bool? desc) =>
             {
-                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size")
+                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size" && order != "file" && order != "chara")
                 {
-                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size）" });
+                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size / file / chara）" });
                 }
                 bool descending = desc == null || desc.Value;
                 if (size <= 0)
@@ -2642,6 +2651,8 @@ namespace KKManager.Web
                             _scan.Failed = r.Failed;
                             _scan.Refs = r.RefEntries;
                             _scan.ThumbBytes = r.ThumbBytes;
+                            _scan.NamesRead = r.NamesRead;
+                            _scan.NamesFilled = r.NamesFilled;
                             _scan.Removed = r.Removed;
                             _scan.Errors.AddRange(r.Errors);
                             _scan.Message = "扫描完成，用时 " + r.Elapsed.TotalSeconds.ToString("F1") + " 秒";

@@ -281,6 +281,8 @@
     <span class="dim">卡片排序</span>
     <button class="sortbtn on" id="btnSortMtime" title="按文件夹分组 · 组内按游戏内顺序（= 卡片修改时间倒序）">按游戏内顺序</button>
     <button class="sortbtn" id="btnSortSize" title="按文件大小降序（再点切升序）">按大小 ▼</button>
+    <button class="sortbtn" id="btnSortFile" title="按文件夹分组 · 组内按文件名升序（再点切降序）">按文件名 ▲</button>
+    <button class="sortbtn" id="btnSortChara" title="按文件夹分组 · 组内按角色名升序（名字读自卡片数据区；没名字的卡排最后；再点切降序）">按角色名 ▲</button>
   </div>
 
   <div id="viewCards"><div class="grid" id="cardsGrid"></div></div>
@@ -1257,7 +1259,7 @@ function cardHtml(c){
   const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
   return `<div class="item ${cardStateClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
       <div class="meta"><div class="name">${esc(c.fileName)}</div>
-      <div class="sub">${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB</div></div></div>`;
+      <div class="sub">${c.charaName ? esc(c.charaName) + ' · ' : ''}${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB</div></div></div>`;
 }
 /* 分块渲染——卡片多时不再一次性铺满 DOM（滚动到底再补一批） */
 function renderCardsChunk(){
@@ -1273,19 +1275,26 @@ function updateCardsInfo(){
     ? `已显示 ${state.rendered} / 共 ${state.cards.length} 张（滚动继续加载）`
     : '无结果';
 }
-/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——两种排序都按文件夹分组，只换组内主键；「按大小」连点切升降序 */
+/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——四种排序都按文件夹分组，只换组内主键；
+   「按大小」首点降序，「按文件名」「按角色名」首点升序；可切向的键连点来回切 */
 function applyCardSort(){
   $('btnSortMtime').classList.toggle('on', state.cardSort === 'mtime');
   $('btnSortSize').classList.toggle('on', state.cardSort === 'size');
+  $('btnSortFile').classList.toggle('on', state.cardSort === 'file');
+  $('btnSortChara').classList.toggle('on', state.cardSort === 'chara');
   $('btnSortSize').textContent = '按大小 ' + (state.cardDesc ? '▼' : '▲');
   $('btnSortSize').title = state.cardDesc ? '按文件大小降序（再点切升序）' : '按文件大小升序（再点切降序）';
+  $('btnSortFile').textContent = '按文件名 ' + (state.cardDesc ? '▼' : '▲');
+  $('btnSortFile').title = state.cardDesc ? '按文件名降序（再点切升序）' : '按文件名升序（再点切降序）';
+  $('btnSortChara').textContent = '按角色名 ' + (state.cardDesc ? '▼' : '▲');
+  $('btnSortChara').title = state.cardDesc ? '按角色名降序（没名字的卡仍排最后；再点切升序）' : '按角色名升序（没名字的卡排最后；再点切降序）';
 }
 function setCardSort(key){
-  if(key === 'size' && state.cardSort === 'size'){
+  if((key === 'size' || key === 'file' || key === 'chara') && state.cardSort === key){
     state.cardDesc = !state.cardDesc;   /* 同一键连点：升降序来回切 */
   }else{
     state.cardSort = key;
-    if(key === 'size') state.cardDesc = true;
+    state.cardDesc = (key === 'size');  /* 大小首点降序；文件名 / 角色名首点升序 */
   }
   applyCardSort();
   state.page = 1;
@@ -2438,7 +2447,8 @@ async function pollScan(){
     const total = s.seen || 0;
     const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
     $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${SCAN_TARGET[s.target]||s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
-      + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '');
+      + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '')
+      + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '');
     $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
     $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';

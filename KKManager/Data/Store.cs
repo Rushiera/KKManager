@@ -114,6 +114,9 @@ namespace KKManager.Data
         /// <summary>库位序号（0 = 主库文件；≥1 = 各附加库文件）。</summary>
         public int Lib { get; set; }
 
+        /// <summary>游戏内角色名（读自卡片数据区；null / 空串 = 未读到或卡片没有名字——排序时排最后）。</summary>
+        public string CharaName { get; set; }
+
         /// <summary>是否有缩略图。</summary>
         public bool HasThumb { get; set; }
     }
@@ -679,7 +682,12 @@ namespace KKManager.Data
                              file_path TEXT UNIQUE, file_name TEXT, size INTEGER, mtime TEXT,
                              tier INTEGER, root_path TEXT, folder TEXT,
                              card_type TEXT, data_version TEXT, image_end INTEGER, uar_blocks INTEGER,
-                             mod_count INTEGER, thumb BLOB, scan_time TEXT, error TEXT)");
+                             mod_count INTEGER, thumb BLOB, scan_time TEXT, error TEXT, chara_name TEXT)");
+            // 增量补列：旧库（本版之前建的 card 表）没有 chara_name 列——按列存在性判定后补上，不重建整库
+            if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('card') WHERE name='chara_name'"), CultureInfo.InvariantCulture) == 0)
+            {
+                Exec("ALTER TABLE card ADD COLUMN chara_name TEXT");
+            }
             Exec(@"CREATE TABLE IF NOT EXISTS card_mod(
                              card_id INTEGER, mod_guid TEXT,
                              property TEXT, slot INTEGER, local_slot INTEGER, category_no INTEGER,
@@ -921,19 +929,29 @@ namespace KKManager.Data
             return map;
         }
 
-        /// <summary>载入卡片时间戳索引——file_path → [size, mtime]。</summary>
+        /// <summary>载入卡片时间戳索引——file_path → [size, mtime, 是否待补角色名]（第三项 "1" = 人物卡且名字尚未读过，扫描时补读）。</summary>
         public Dictionary<string, string[]> LoadCardStamps()
         {
             var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime FROM card"))
+            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime, (chara_name IS NULL AND card_type LIKE '%Chara%') FROM card"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
                 {
-                    map[r.GetString(0)] = new[] { r.GetInt64(1).ToString(CultureInfo.InvariantCulture), r.IsDBNull(2) ? "" : r.GetString(2) };
+                    map[r.GetString(0)] = new[] { r.GetInt64(1).ToString(CultureInfo.InvariantCulture), r.IsDBNull(2) ? "" : r.GetString(2), r.GetInt64(3) != 0 ? "1" : "0" };
                 }
             }
             return map;
+        }
+        /// <summary>写入一张卡片的角色名（存量补名用；name 为 null 表示没读到——落 NULL，下次扫描再试）。</summary>
+        public void UpdateCardName(string filePath, string name)
+        {
+            using (SqliteCommand cmd = NewCommand("UPDATE card SET chara_name=$name WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$name", name == null ? (object)DBNull.Value : name);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>删除某个库根下的全部 mod 副本记录，返回受影响的 guid（由调用方跨库重算 mod 主表）。</summary>
@@ -1275,14 +1293,14 @@ namespace KKManager.Data
         public long UpsertCard(CardInfo c, RootEntry root, string folder, byte[] thumb, string mtime)
         {
             using (SqliteCommand cmd = NewCommand(@"INSERT INTO card(file_path,file_name,size,mtime,tier,root_path,folder,
-                     card_type,data_version,image_end,uar_blocks,mod_count,thumb,scan_time,error)
-                     VALUES($path,$file,$size,$mtime,$tier,$root,$folder,$type,$ver,$img,$uar,$cnt,$thumb,$now,NULL)
+                     card_type,data_version,image_end,uar_blocks,mod_count,thumb,scan_time,error,chara_name)
+                     VALUES($path,$file,$size,$mtime,$tier,$root,$folder,$type,$ver,$img,$uar,$cnt,$thumb,$now,NULL,$chara)
                      ON CONFLICT(file_path) DO UPDATE SET
                        file_name=excluded.file_name, size=excluded.size, mtime=excluded.mtime,
                        tier=excluded.tier, root_path=excluded.root_path, folder=excluded.folder,
                        card_type=excluded.card_type, data_version=excluded.data_version, image_end=excluded.image_end,
                        uar_blocks=excluded.uar_blocks, mod_count=excluded.mod_count, scan_time=excluded.scan_time,
-                       thumb=COALESCE(excluded.thumb, card.thumb)"))
+                       thumb=COALESCE(excluded.thumb, card.thumb), chara_name=excluded.chara_name"))
             {
                 cmd.Parameters.AddWithValue("$path", c.FilePath);
                 cmd.Parameters.AddWithValue("$file", c.FileName);
@@ -1297,6 +1315,7 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$uar", c.UarBlocks);
                 cmd.Parameters.AddWithValue("$cnt", c.DistinctModIds().Count);
                 cmd.Parameters.AddWithValue("$thumb", thumb == null ? (object)DBNull.Value : thumb);
+                cmd.Parameters.AddWithValue("$chara", c.CharaName == null ? (object)DBNull.Value : c.CharaName);
                 cmd.Parameters.AddWithValue("$now", Now());
                 cmd.ExecuteNonQuery();
             }
@@ -1424,10 +1443,26 @@ namespace KKManager.Data
             {
                 orderBy = "ORDER BY c.folder, c.size ASC, c.id";
             }
+            else if (order == "file" && desc)
+            {
+                orderBy = "ORDER BY c.folder, c.file_name DESC, c.id";
+            }
+            else if (order == "file")
+            {
+                orderBy = "ORDER BY c.folder, c.file_name ASC, c.id";
+            }
+            else if (order == "chara" && desc)
+            {
+                orderBy = "ORDER BY c.folder, CASE WHEN c.chara_name IS NULL OR c.chara_name = '' THEN 1 ELSE 0 END, c.chara_name DESC, c.id";
+            }
+            else if (order == "chara")
+            {
+                orderBy = "ORDER BY c.folder, CASE WHEN c.chara_name IS NULL OR c.chara_name = '' THEN 1 ELSE 0 END, c.chara_name ASC, c.id";
+            }
             string sql = ColorCte + @" SELECT c.id, c.file_name, c.card_type, c.size, c.mtime,
                      c.root_path, c.tier, c.folder, c.mod_count,
                      COALESCE(a.green,0), COALESCE(a.yellow,0), COALESCE(a.red,0), COALESCE(a.black,0),
-                     (c.thumb IS NOT NULL)
+                     (c.thumb IS NOT NULL), c.chara_name
                      FROM card c LEFT JOIN agg a ON a.card_id = c.id " + where + @" " + orderBy + @"
                      LIMIT $size OFFSET $off";
 
@@ -1467,7 +1502,8 @@ namespace KKManager.Data
                             Yellow = r.GetInt64(10),
                             Red = r.GetInt64(11),
                             Black = r.GetInt64(12),
-                            HasThumb = r.GetInt64(13) != 0
+                            HasThumb = r.GetInt64(13) != 0,
+                            CharaName = r.IsDBNull(14) ? null : r.GetString(14)
                         });
                     }
                 }

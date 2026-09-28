@@ -57,6 +57,9 @@ namespace KKManager.Core
         /// <summary>Sideloader UAR 声明区出现次数。</summary>
         public int UarBlocks { get; set; }
 
+        /// <summary>游戏内角色名（服装卡读数据区头段的角色名段；人物卡为 null——名字在 Parameter 块，由 CardName 补读；null = 未读到）。</summary>
+        public string CharaName { get; set; }
+
         /// <summary>卡片声明的 mod 引用（部件粒度，未去重）。</summary>
         public List<ModRef> ModRefs { get; } = new List<ModRef>();
 
@@ -108,6 +111,11 @@ namespace KKManager.Core
                     if (fs.Length - fs.Position >= 1)
                     {
                         info.DataVersion = Read7BitString(br);
+                    }
+                    // 服装卡：数据区头段第三段是角色名（人物卡此处是脸图长度，不能按字符串读）
+                    if (info.CardType != null && info.CardType.Contains("Clothes") && fs.Length - fs.Position >= 1)
+                    {
+                        info.CharaName = Read7BitString(br);
                     }
                 }
                 CollectDeclaration(fs, info);
