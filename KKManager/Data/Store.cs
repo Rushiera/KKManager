@@ -121,6 +121,46 @@ namespace KKManager.Data
         public bool HasThumb { get; set; }
     }
 
+    /// <summary>卡片 timeline 缓存行（卡片库表 card_timeline）——按卡片 id 存，size + mtime 变化即失效。</summary>
+    public class CardTimelineRow
+    {
+        /// <summary>卡片 id。</summary>
+        public long CardId { get; set; }
+
+        /// <summary>卡片文件路径。</summary>
+        public string FilePath { get; set; }
+
+        /// <summary>建档时的文件字节数（失效判据）。</summary>
+        public long Size { get; set; }
+
+        /// <summary>建档时的修改时间（失效判据）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>是否存在 timeline 条目。</summary>
+        public bool HasEntry { get; set; }
+
+        /// <summary>是否空时间轴。</summary>
+        public bool IsEmpty { get; set; }
+
+        /// <summary>timeline 长度（秒，原值）。</summary>
+        public double Duration { get; set; }
+
+        /// <summary>时间缩放（Unity Time.timeScale；1 = 原速）。</summary>
+        public double TimeScale { get; set; }
+
+        /// <summary>关键帧数。</summary>
+        public int Keyframes { get; set; }
+
+        /// <summary>sceneInfo XML 字节数。</summary>
+        public long XmlLength { get; set; }
+
+        /// <summary>读取时刻。</summary>
+        public string ReadAt { get; set; }
+
+        /// <summary>读取失败原因。</summary>
+        public string Error { get; set; }
+    }
+
     /// <summary>引用卡片轻量行——重复副本组标题行的缩略图区用（按 guid 批量取，不走四色聚合）。</summary>
     public class CardRefRow
     {
@@ -324,6 +364,25 @@ namespace KKManager.Data
 
         /// <summary>备注（冲突或失败原因）。</summary>
         public string Note { get; set; }
+    }
+
+    /// <summary>判旧搬移结果——一份副本被判为旧版后的新位置（供整理计划条目跟着改指，不靠推断）。</summary>
+    public class ModDemoteMove
+    {
+        /// <summary>判旧前的文件路径。</summary>
+        public string OldPath { get; set; }
+
+        /// <summary>判旧后的文件路径（名字含 .old 段）。</summary>
+        public string NewPath { get; set; }
+
+        /// <summary>判旧后的文件名（含 .old 段）。</summary>
+        public string NewName { get; set; }
+
+        /// <summary>判旧后所在的库根。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>判旧后所在的级别（一律缓存库）。</summary>
+        public int Tier { get; set; }
     }
 
     /// <summary>旧版登记——人工判定某份副本为旧版后留下的新旧版本关系（本系统可理解的结构化记录，不靠文件名猜）。</summary>
@@ -695,6 +754,10 @@ namespace KKManager.Data
                              PRIMARY KEY(card_id, property, slot, local_slot, mod_guid))");
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_guid ON card_mod(mod_guid)");
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_card ON card_mod(card_id)");
+            Exec(@"CREATE TABLE IF NOT EXISTS card_timeline(
+                             card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
+                             has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
+                             keyframes INTEGER, xml_length INTEGER, hit_stage TEXT, read_at TEXT, error TEXT)");
             if (_isCore)
             {
                 Exec("CREATE INDEX IF NOT EXISTS ix_mod_tier ON mod(tier)");
@@ -929,16 +992,22 @@ namespace KKManager.Data
             return map;
         }
 
-        /// <summary>载入卡片时间戳索引——file_path → [size, mtime, 是否待补角色名]（第三项 "1" = 人物卡且名字尚未读过，扫描时补读）。</summary>
+        /// <summary>载入卡片时间戳索引——file_path → [size, mtime, 是否待补角色名, 卡类型]（第三项 "1" = 人物卡且名字尚未读过，扫描时补读；第四项 = 库里记的卡类型，供存量类型补正）。</summary>
         public Dictionary<string, string[]> LoadCardStamps()
         {
             var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime, (chara_name IS NULL AND card_type LIKE '%Chara%') FROM card"))
+            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime, (chara_name IS NULL AND card_type LIKE '%Chara%'), card_type FROM card"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
                 {
-                    map[r.GetString(0)] = new[] { r.GetInt64(1).ToString(CultureInfo.InvariantCulture), r.IsDBNull(2) ? "" : r.GetString(2), r.GetInt64(3) != 0 ? "1" : "0" };
+                    map[r.GetString(0)] = new[]
+                    {
+                        r.GetInt64(1).ToString(CultureInfo.InvariantCulture),
+                        r.IsDBNull(2) ? "" : r.GetString(2),
+                        r.GetInt64(3) != 0 ? "1" : "0",
+                        r.IsDBNull(4) ? "" : r.GetString(4)
+                    };
                 }
             }
             return map;
@@ -950,6 +1019,79 @@ namespace KKManager.Data
             {
                 cmd.Parameters.AddWithValue("$name", name == null ? (object)DBNull.Value : name);
                 cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>改正一张卡片的类型与数据版本（存量补正用——本版之前场景卡的 card_type 记成了数据区头段的乱码）。</summary>
+        public void UpdateCardType(string filePath, string cardType, string dataVersion)
+        {
+            using (SqliteCommand cmd = NewCommand("UPDATE card SET card_type=$type, data_version=$ver WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$type", cardType == null ? (object)DBNull.Value : cardType);
+                cmd.Parameters.AddWithValue("$ver", dataVersion == null ? (object)DBNull.Value : dataVersion);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>读一张卡片的 timeline 缓存（按 card_id；没有返回 null）。</summary>
+        public CardTimelineRow GetCardTimeline(long cardId)
+        {
+            using (SqliteCommand cmd = NewCommand(@"SELECT card_id, file_path, size, mtime, has_entry, is_empty,
+                     duration, time_scale, keyframes, xml_length, read_at, error FROM card_timeline WHERE card_id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (!r.Read())
+                    {
+                        return null;
+                    }
+                    return new CardTimelineRow
+                    {
+                        CardId = r.GetInt64(0),
+                        FilePath = r.IsDBNull(1) ? null : r.GetString(1),
+                        Size = r.GetInt64(2),
+                        Mtime = r.IsDBNull(3) ? null : r.GetString(3),
+                        HasEntry = !r.IsDBNull(4) && r.GetInt64(4) != 0,
+                        IsEmpty = !r.IsDBNull(5) && r.GetInt64(5) != 0,
+                        Duration = r.IsDBNull(6) ? 0 : r.GetDouble(6),
+                        TimeScale = r.IsDBNull(7) ? 1 : r.GetDouble(7),
+                        Keyframes = r.IsDBNull(8) ? 0 : (int)r.GetInt64(8),
+                        XmlLength = r.IsDBNull(9) ? 0 : r.GetInt64(9),
+                        ReadAt = r.IsDBNull(10) ? null : r.GetString(10),
+                        Error = r.IsDBNull(11) ? null : r.GetString(11)
+                    };
+                }
+            }
+        }
+
+        /// <summary>写一张卡片的 timeline 缓存（按 card_id 覆盖；size + mtime 是失效判据）。</summary>
+        public void SaveCardTimeline(long cardId, string filePath, long size, string mtime, TimelineInfo t)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO card_timeline(card_id,file_path,size,mtime,has_entry,is_empty,
+                     duration,time_scale,keyframes,xml_length,hit_stage,read_at,error)
+                     VALUES($id,$path,$size,$mtime,$has,$empty,$dur,$scale,$keys,$xml,$stage,$now,$err)
+                     ON CONFLICT(card_id) DO UPDATE SET
+                       file_path=excluded.file_path, size=excluded.size, mtime=excluded.mtime,
+                       has_entry=excluded.has_entry, is_empty=excluded.is_empty, duration=excluded.duration,
+                       time_scale=excluded.time_scale, keyframes=excluded.keyframes, xml_length=excluded.xml_length,
+                       hit_stage=excluded.hit_stage, read_at=excluded.read_at, error=excluded.error"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                cmd.Parameters.AddWithValue("$path", filePath == null ? (object)DBNull.Value : filePath);
+                cmd.Parameters.AddWithValue("$size", size);
+                cmd.Parameters.AddWithValue("$mtime", mtime == null ? (object)DBNull.Value : mtime);
+                cmd.Parameters.AddWithValue("$has", t != null && t.HasEntry ? 1 : 0);
+                cmd.Parameters.AddWithValue("$empty", t != null && t.IsEmpty ? 1 : 0);
+                cmd.Parameters.AddWithValue("$dur", t == null ? 0.0 : t.Duration);
+                cmd.Parameters.AddWithValue("$scale", t == null ? 1.0 : t.TimeScale);
+                cmd.Parameters.AddWithValue("$keys", t == null ? 0 : t.Keyframes);
+                cmd.Parameters.AddWithValue("$xml", t == null ? 0 : t.XmlLength);
+                cmd.Parameters.AddWithValue("$stage", t == null || t.HitStage == null ? (object)DBNull.Value : t.HitStage);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.Parameters.AddWithValue("$err", t == null || t.Error == null ? (object)DBNull.Value : t.Error);
                 cmd.ExecuteNonQuery();
             }
         }
@@ -2625,6 +2767,28 @@ namespace KKManager.Data
             {
                 cmd.Parameters.AddWithValue("$state", state ?? "");
                 cmd.Parameters.AddWithValue("$note", note ?? "");
+                cmd.Parameters.AddWithValue("$pid", planId);
+                cmd.Parameters.AddWithValue("$seq", seq);
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>改一条计划条目的所在位置（判旧后条目随文件改指新位置）——库 / 级别 / 库根 / 目标文件夹 / 现路径 / 目标路径 / 状态 / 备注一并写。</summary>
+        public void SetSortItemLocation(long planId, long seq, int lib, int tier, string rootPath, string folder, string srcPath, string destPath, string state, string note)
+        {
+            if (!_isCore)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("UPDATE mod_sort_plan_item SET lib=$lib,tier=$tier,root_path=$root,folder=$folder,src_path=$src,dest_path=$dest,state=$state,note=$note WHERE plan_id=$pid AND seq=$seq"))
+            {
+                cmd.Parameters.AddWithValue("$lib", lib);
+                cmd.Parameters.AddWithValue("$tier", tier);
+                cmd.Parameters.AddWithValue("$root", rootPath == null ? "" : rootPath);
+                cmd.Parameters.AddWithValue("$folder", folder == null ? "" : folder);
+                cmd.Parameters.AddWithValue("$src", srcPath == null ? "" : srcPath);
+                cmd.Parameters.AddWithValue("$dest", destPath == null ? "" : destPath);
+                cmd.Parameters.AddWithValue("$state", state == null ? "" : state);
+                cmd.Parameters.AddWithValue("$note", note == null ? "" : note);
                 cmd.Parameters.AddWithValue("$pid", planId);
                 cmd.Parameters.AddWithValue("$seq", seq);
                 cmd.ExecuteNonQuery();

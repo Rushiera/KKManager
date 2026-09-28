@@ -48,6 +48,8 @@ namespace KKManager
                     return CardStructureCommand(rest);
                 case "card-detail":
                     return CardDetailCommand(rest);
+                case "card-timeline":
+                    return CardTimelineCommand(rest);
                 case "card-params":
                     return CardParamsCommand(rest);
                 case "card-edit":
@@ -118,6 +120,7 @@ namespace KKManager
             Console.WriteLine("  modinfo   <zipmod>                    解析单个 zipmod 的 manifest");
             Console.WriteLine("  cardinfo  <card.png>                  解析单张卡片的声明区");
             Console.WriteLine("  card-structure <card.png>             卡片文件结构（PNG 块表 + 图片区 / 数据区划分）");
+            Console.WriteLine("  card-timeline <card.png>              场景卡（sd）的 timeline 长度（Timeline 插件条目 duration / timeScale——与面板同一实现）");
             Console.WriteLine("  thumb     <card.png> <out.jpg>        导出缩略图（离线核对）");
             Console.WriteLine("  scan-mods [目录...]                   扫描 mod 库（无目录则用已配置的库根）");
             Console.WriteLine("  scan-cards [目录...]                  扫描卡片库（无目录则用已配置的库根）");
@@ -137,6 +140,8 @@ namespace KKManager
             Console.WriteLine("  sort plan [目录...]                   生成「按作者整理」计划（无目录 = 全部可整理的 mod 库根；平铺 + 作者文件夹 + 冲突检测）");
             Console.WriteLine("  sort show                             读整理计划表（做一次快照核对——已在快照位置的行标 √）");
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
+            Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
+            Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
             Console.WriteLine("  roots-list                            列出已配置的库根");
             Console.WriteLine("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]");
             Console.WriteLine("  roots-clear <mods|cards|all>          清空库根配置");
@@ -413,6 +418,37 @@ namespace KKManager
             }
             return 0;
         }
+        /// <summary>场景卡 timeline 长度——Timeline 插件条目里的 duration / timeScale（只读；与面板同一实现）。</summary>
+        private static int CardTimelineCommand(List<string> rest)
+        {
+            RequireArgs(rest, "card-timeline <card.png>", 1);
+            CardStructure st = CardDocument.Parse(rest[0]);
+            if (st.Error != null)
+            {
+                Console.WriteLine("诊断       : " + st.Error);
+                return 3;
+            }
+            string path = st.FilePath == null ? rest[0] : st.FilePath;
+            Console.WriteLine("文件       : " + path);
+            Console.WriteLine("卡类型     : " + (st.CardType == null ? "<无>" : st.CardType)
+                + " · 数据标记 " + (st.DataVersion == null ? "<无>" : st.DataVersion));
+            if (st.CardType != CardReader.SceneCardType)
+            {
+                Console.WriteLine("timeline   : 不是场景卡——只有 Studio 场景卡带 timeline 数据");
+                return 0;
+            }
+            TimelineInfo t = TimelineReader.Read(path, st.ImageEnd);
+            Console.WriteLine("timeline   : " + TimelineReader.Describe(t));
+            if (t.Error == null && t.HasEntry)
+            {
+                Console.WriteLine("  原时长   : " + TimelineReader.SecondsText(t.Duration) + " 秒（" + TimelineReader.FormatSeconds(t.Duration) + "）");
+                Console.WriteLine("  timeScale: " + TimelineReader.SecondsText(t.TimeScale) + "（实际播放 " + TimelineReader.FormatSeconds(t.RealSeconds) + "）");
+                Console.WriteLine("  关键帧   : " + t.Keyframes.ToString("N0") + " 个 · sceneInfo XML " + t.XmlLength.ToString("N0")
+                    + " 字节 · 命中阶段 " + (t.HitStage == null ? "<无>" : t.HitStage));
+            }
+            return 0;
+        }
+
         /// <summary>卡片数据区内容——部件 / 声明区 / 数据块目录 / 内嵌贴图 / 插件块（只读）。</summary>
         private static int CardDetailCommand(List<string> rest)
         {
@@ -526,6 +562,7 @@ namespace KKManager
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
+                Console.WriteLine("  卡类型补正 " + r.TypesFixed);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -554,6 +591,7 @@ namespace KKManager
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
+                Console.WriteLine("  卡类型补正 " + r.TypesFixed);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -904,6 +942,88 @@ namespace KKManager
                     return 0;
                 }
 
+                if (sub == "conflict")
+                {
+                    if (rest.Count < 1)
+                    {
+                        Console.Error.WriteLine("用法: sort conflict <seq>");
+                        return 2;
+                    }
+                    long keepSeq = long.Parse(rest[0]);
+                    string groupError = null;
+                    SortConflictGroup group = SortOrganizer.ConflictGroup(hub, plan.Id, keepSeq, out groupError);
+                    if (groupError != null)
+                    {
+                        Console.Error.WriteLine(groupError);
+                        return 2;
+                    }
+                    Console.WriteLine("冲突组 guid " + group.Guid + " ⇒ " + group.DestPath);
+                    /* 展示数据与面板同源：manifest / 创建时间走 ModCopyReader，MD5 走同一档哈希档案 */
+                    List<ModFileRecord> recs = new List<ModFileRecord>();
+                    foreach (SortConflictCandidate c in group.Items)
+                    {
+                        ModFileRecord rec = new ModFileRecord();
+                        rec.Guid = group.Guid;
+                        rec.Tier = c.Tier;
+                        rec.RootPath = c.RootPath;
+                        rec.FilePath = c.FilePath;
+                        rec.FileName = c.FileName;
+                        rec.Size = c.Size;
+                        rec.Mtime = c.Mtime;
+                        recs.Add(rec);
+                    }
+                    int computed = 0;
+                    List<string> hashErrors = new List<string>();
+                    Dictionary<string, string> hashes = hub.FillHashes(recs, out computed, out hashErrors);
+                    foreach (SortConflictCandidate c in group.Items)
+                    {
+                        ModCopyInfo info = ModCopyReader.Read(c.FilePath);
+                        Console.WriteLine("  [seq " + c.Seq.ToString() + " · " + c.Tier.ToString() + " 级] " + c.FilePath);
+                        Console.WriteLine("      版本 " + (info.Version == null ? "<无>" : info.Version)
+                            + " · 作者 " + (info.Author == null ? "<无>" : info.Author)
+                            + " · " + c.Size.ToString() + " 字节 · 建 " + (info.Ctime == null || info.Ctime.Length == 0 ? "<读不到>" : info.Ctime) + " · 改 " + c.Mtime);
+                        string md5 = null;
+                        hashes.TryGetValue(c.FilePath, out md5);
+                        if (md5 != null)
+                        {
+                            Console.WriteLine("      MD5 " + md5);
+                        }
+                        else
+                        {
+                            Console.WriteLine("      MD5 未算出（档案缺失或读不到）");
+                        }
+                        if (info.Error != null)
+                        {
+                            Console.WriteLine("      manifest 读不到：" + info.Error);
+                        }
+                    }
+                    foreach (string e in hashErrors)
+                    {
+                        Console.WriteLine("  ! MD5 算不出：" + e);
+                    }
+                    Console.WriteLine("挑一份保留：sort keep <seq>");
+                    return 0;
+                }
+
+                if (sub == "keep")
+                {
+                    if (rest.Count < 1)
+                    {
+                        Console.Error.WriteLine("用法: sort keep <seq>");
+                        return 2;
+                    }
+                    long keepSeq = long.Parse(rest[0]);
+                    string keepDetail = null;
+                    string keepError = SortOrganizer.ResolveConflict(hub, cfg, plan.Id, keepSeq, out keepDetail);
+                    if (keepError != null)
+                    {
+                        Console.Error.WriteLine(keepError);
+                        return 2;
+                    }
+                    Console.WriteLine("已处理：" + keepDetail);
+                    return 0;
+                }
+
                 if (sub == "show")
                 {
                     long conflicts = SortOrganizer.RecheckPlan(hub, plan.Id);
@@ -952,7 +1072,7 @@ namespace KKManager
                         {
                             continue;
                         }
-                        Console.WriteLine("  [冲突] " + r.SrcPath + " ⇒ " + r.DestPath + "（" + r.Note + "）");
+                        Console.WriteLine("  [冲突] seq " + r.Seq.ToString() + "  " + r.SrcPath + " ⇒ " + r.DestPath + "（" + r.Note + "）");
                         shownConflict = shownConflict + 1;
                     }
                     long shown = 0;

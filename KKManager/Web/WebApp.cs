@@ -66,6 +66,9 @@ namespace KKManager.Web
         /// <summary>本次扫描为存量卡片补读到角色名的数。</summary>
         public int NamesFilled { get; set; }
 
+        /// <summary>本次扫描为存量卡片补正卡类型的数。</summary>
+        public int TypesFixed { get; set; }
+
         /// <summary>本次扫描清理的已消失记录数。</summary>
         public int Removed { get; set; }
 
@@ -497,6 +500,47 @@ namespace KKManager.Web
             }
             return path;
         }
+        /// <summary>
+        /// 取一张场景卡的 timeline 长度——缓存优先（卡片库表 card_timeline：size + mtime 一致即命中，命中出声），
+        /// 未命中读盘一次并落表；读取失败不落表（下次请求重试）。
+        /// </summary>
+        /// <param name="lib">卡片所在库位。</param>
+        /// <param name="id">卡片 id。</param>
+        /// <param name="path">卡片文件绝对路径（已过库根白名单）。</param>
+        /// <param name="imageEnd">图片区结束偏移。</param>
+        private static TimelineInfo ReadTimelineCached(int lib, long id, string path, long imageEnd)
+        {
+            var fi = new FileInfo(path);
+            string mtime = Store.StampOf(fi);
+            Store store = _hub.StoreByLib(lib);
+            CardTimelineRow row = store == null ? null : store.GetCardTimeline(id);
+            if (row != null && row.Size == fi.Length && row.Mtime == mtime)
+            {
+                double cached = row.TimeScale <= 0 ? 1 : row.TimeScale;
+                Console.WriteLine("[timeline] 命中已有缓存：" + fi.Name + (row.Error == null ? "" : "（上次读取失败：" + row.Error + "）"));
+                return new TimelineInfo
+                {
+                    Scanned = true,
+                    HasEntry = row.HasEntry,
+                    IsEmpty = row.IsEmpty,
+                    Duration = row.Duration,
+                    TimeScale = cached,
+                    Keyframes = row.Keyframes,
+                    XmlLength = row.XmlLength,
+                    RealSeconds = row.Duration / cached,
+                    Error = row.Error
+                };
+            }
+            TimelineInfo t = TimelineReader.Read(path, imageEnd);
+            if (t.Error == null && store != null)
+            {
+                store.SaveCardTimeline(id, path, fi.Length, mtime, t);
+            }
+            Console.WriteLine("[timeline] " + fi.Name + " → " + TimelineReader.Describe(t)
+                + "（命中阶段 " + (t.HitStage == null ? "无条目" : t.HitStage) + " · XML " + t.XmlLength + " 字节）");
+            return t;
+        }
+
         /// <summary>内嵌图片缩略图缓存（键 = 路径 + 偏移 + 长度 + 宽度）——同一张图重复请求直接命中。</summary>
         private static readonly Dictionary<string, byte[]> ThumbCache = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         /// <summary>
@@ -928,6 +972,7 @@ namespace KKManager.Web
                     thumbMB = Math.Round(s.ThumbBytes / 1024.0 / 1024.0, 1),
                     namesRead = s.NamesRead,
                     namesFilled = s.NamesFilled,
+                    typesFixed = s.TypesFixed,
                     removed = s.Removed,
                     startedAt = s.StartedAt,
                     finishedAt = s.FinishedAt,
@@ -1095,6 +1140,7 @@ namespace KKManager.Web
                 Results.Json(_hub.QueryCardRefs(lib, id, tier)));
 
             // 卡片文件结构（只读）——PNG 块表 + 图片区 / 数据区划分 + 数据区内容（部件 / 声明区 / 贴图 / 插件）
+            // 场景卡（sd）另带 timeline 长度（Timeline 插件条目——按卡片缓存，size + mtime 判失效）
             app.MapGet("/api/card/{id}/structure", (long id, int lib) =>
             {
                 RootsConfig cfg = LoadConfig();
@@ -1105,11 +1151,18 @@ namespace KKManager.Web
                 }
                 CardStructure st = CardDocument.Parse(path);
                 CardDetailResult detail = null;
+                TimelineInfo timeline = null;
+                string timelineText = null;
                 if (st.Error == null && st.ImageEnd > 0)
                 {
                     detail = CardDetail.Parse(path, st.ImageEnd);
+                    if (st.CardType == CardReader.SceneCardType)
+                    {
+                        timeline = ReadTimelineCached(lib, id, path, st.ImageEnd);
+                        timelineText = TimelineReader.Describe(timeline);
+                    }
                 }
-                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detail });
+                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detail, timeline = timeline, timelineText = timelineText });
             });
 
             // 卡片内嵌图片缩略图（只读）——按偏移 / 长度取数据区里的 PNG，缩放为 JPEG 返回
@@ -1381,39 +1434,9 @@ namespace KKManager.Web
                     List<object> files = new List<object>();
                     foreach (ModFileRecord f in g.Files)
                     {
-                        ModInfo info = ZipModReader.Parse(f.FilePath);
-                        string ctime = "";
-                        try
-                        {
-                            FileInfo fi = new FileInfo(f.FilePath);
-                            if (fi.Exists)
-                            {
-                                ctime = Store.CreatedStampOf(fi);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine("[哈希] 创建时间读不到：" + f.FilePath + " → " + ex.Message);
-                        }
-                        string md5 = null;
-                        hashes.TryGetValue(f.FilePath, out md5);
-                        files.Add(new
-                        {
-                            tier = f.Tier,
-                            tierName = Tier.Name(f.Tier),
-                            rootPath = f.RootPath,
-                            filePath = f.FilePath,
-                            fileName = f.FileName,
-                            size = f.Size,
-                            mtime = f.Mtime,
-                            ctime = ctime,
-                            md5 = md5,
-                            version = info.Version,
-                            author = info.Author,
-                            name = info.Name,
-                            isOld = RootsRules.IsOldFileName(f.FileName),
-                            error = info.Error
-                        });
+                        ModCopyView copy = new ModCopyView();
+                        FillModCopy(copy, f, hashes);
+                        files.Add(copy);
                     }
                     // 引用这个 guid 的卡片——从批量查询结果取（与组标题行缩略图区同一份数据；只取前三张，其余走「查看更多」叠层弹窗）
                     DupCardRefs refs = null;
@@ -1952,6 +1975,40 @@ namespace KKManager.Web
                     return;
                 }
                 await context.Response.WriteAsync("{\"ok\":true}");
+            });
+
+            // 按作者整理——冲突组候选（同目标路径的几份副本；版本 / 作者实时读 manifest，MD5 实时算）
+            app.MapGet("/api/sort/conflict", (long planId, long seq) => Results.Json(BuildSortConflictView(planId, seq)));
+
+            // 按作者整理——保留这一份：其余同 guid 非旧版副本判旧版入缓存库（与重复副本同一实现），计划条目改指新位置后重核
+            app.MapPost("/api/sort/conflict/keep", async context =>
+            {
+                SortKeepDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<SortKeepDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                if (dto == null)
+                {
+                    context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"缺少请求体\"}");
+                    return;
+                }
+                string detail = null;
+                string error = KeepSortConflict(dto.planId, dto.seq, out detail);
+                if (error != null)
+                {
+                    context.Response.StatusCode = 409;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+                    return;
+                }
+                await context.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, detail = detail, view = LoadSortPlanView(false) }));
             });
 
             app.MapGet("/api/thumb/{id}", (long id, int lib) =>
@@ -2513,6 +2570,133 @@ namespace KKManager.Web
             return view;
         }
 
+        /// <summary>一份 mod 副本的展示行——重复副本窗口与整理冲突小窗**共用同一装配**（manifest 实时读 · 创建时间实时读 · MD5 由调用方统一补齐后传入）。</summary>
+        private static void FillModCopy(ModCopyView v, ModFileRecord f, Dictionary<string, string> hashes)
+        {
+            v.tier = f.Tier;
+            v.tierName = Tier.Name(f.Tier);
+            v.rootPath = f.RootPath;
+            v.filePath = f.FilePath;
+            v.fileName = f.FileName;
+            v.size = f.Size;
+            v.mtime = f.Mtime;
+            ModCopyInfo info = ModCopyReader.Read(f.FilePath);
+            v.version = info.Version;
+            v.author = info.Author;
+            v.name = info.Name;
+            v.error = info.Error;
+            v.ctime = info.Ctime;
+            v.isOld = RootsRules.IsOldFileName(f.FileName);
+            if (hashes != null)
+            {
+                string md5 = null;
+                hashes.TryGetValue(f.FilePath, out md5);
+                v.md5 = md5;
+            }
+        }
+
+        /// <summary>整理冲突的一组候选视图——与重复副本窗口共用同一份副本装配与同一档 MD5 档案，另加引用卡片（前三张 + 总数）与旧版登记。</summary>
+        private static SortConflictView BuildSortConflictView(long planId, long seq)
+        {
+            SortConflictView view = new SortConflictView();
+            view.planId = planId;
+            view.seq = seq;
+            string error = null;
+            SortConflictGroup group = SortOrganizer.ConflictGroup(_hub, planId, seq, out error);
+            if (error != null)
+            {
+                view.ok = false;
+                view.error = error;
+                return view;
+            }
+            view.ok = true;
+            view.guid = group.Guid;
+            view.destPath = group.DestPath;
+
+            // [段1] 候选 → mod 副本记录（与重复副本同一装配面）
+            List<ModFileRecord> recs = new List<ModFileRecord>();
+            List<SortConflictCandidate> cands = new List<SortConflictCandidate>();
+            foreach (SortConflictCandidate c in group.Items)
+            {
+                ModFileRecord r = new ModFileRecord();
+                r.Guid = group.Guid;
+                r.Tier = c.Tier;
+                r.RootPath = c.RootPath;
+                r.FilePath = c.FilePath;
+                r.FileName = c.FileName;
+                r.Size = c.Size;
+                r.Mtime = c.Mtime;
+                recs.Add(r);
+                cands.Add(c);
+            }
+
+            // [段2] MD5 走与重复副本同一档档案（算过就忽略）——算不出的明细上抛，不静默
+            int computed = 0;
+            List<string> hashErrors = new List<string>();
+            Dictionary<string, string> hashes = _hub.FillHashes(recs, out computed, out hashErrors);
+            foreach (string e in hashErrors)
+            {
+                Console.WriteLine("[整理] MD5 算不出：" + e);
+                view.hashErrors.Add(e);
+            }
+
+            // [段3] 逐份成行（含计划条目键与状态）+ 组头信息
+            int mainCount = 0;
+            for (int i = 0; i < recs.Count; i++)
+            {
+                SortConflictItemView item = new SortConflictItemView();
+                FillModCopy(item, recs[i], hashes);
+                item.seq = cands[i].Seq;
+                item.state = cands[i].State;
+                item.note = cands[i].Note;
+                if (item.tier == Tier.Main)
+                {
+                    mainCount = mainCount + 1;
+                }
+                if (view.name == null && item.name != null)
+                {
+                    view.name = item.name;
+                }
+                view.items.Add(item);
+            }
+            view.mainCount = mainCount;
+
+            // [段4] 引用卡片（前三张 + 总数）与旧版登记——与重复副本窗口同一数据源
+            string guid = group.Guid == null ? "" : group.Guid;
+            List<string> guids = new List<string>();
+            guids.Add(guid);
+            Dictionary<string, DupCardRefs> refs = _hub.QueryDupCardRefs(LoadConfig(), guids, 3);
+            DupCardRefs mine = null;
+            refs.TryGetValue(guid, out mine);
+            if (mine != null)
+            {
+                foreach (CardRow c in mine.Top)
+                {
+                    view.cards.Add(new { id = c.Id, lib = c.Lib, hasThumb = c.HasThumb, fileName = c.FileName });
+                }
+                view.cardTotal = mine.Total;
+            }
+            foreach (ModOldRecord o in _hub.Core.ListModOld())
+            {
+                view.olds.Add(o);
+            }
+            return view;
+        }
+
+        /// <summary>解决一条整理冲突——面板侧只做「任务在跑就拒」与加载配置，判定与搬运全在 Core（与 CLI 同一实现）。</summary>
+        private static string KeepSortConflict(long planId, long seq, out string detail)
+        {
+            detail = null;
+            lock (SortJobLock)
+            {
+                if (_sortJob.Running)
+                {
+                    return "整理任务正在跑——先点「停止」或等它结束，再处理冲突";
+                }
+            }
+            return SortOrganizer.ResolveConflict(_hub, LoadConfig(), planId, seq, out detail);
+        }
+
         /// <summary>收尾「按作者整理」任务（running 置否 + 结束时刻 + 消息；error 为真时同时记入失败明细并落控制台）。</summary>
         private static void FinishSortJob(string message, bool error)
         {
@@ -2653,6 +2837,7 @@ namespace KKManager.Web
                             _scan.ThumbBytes = r.ThumbBytes;
                             _scan.NamesRead = r.NamesRead;
                             _scan.NamesFilled = r.NamesFilled;
+                            _scan.TypesFixed = r.TypesFixed;
                             _scan.Removed = r.Removed;
                             _scan.Errors.AddRange(r.Errors);
                             _scan.Message = "扫描完成，用时 " + r.Elapsed.TotalSeconds.ToString("F1") + " 秒";
@@ -3070,6 +3255,118 @@ namespace KKManager.Web
 
         /// <summary>true = 已核对结构无误；false = 撤销确认。</summary>
         public bool confirmed { get; set; }
+    }
+
+    /// <summary>一份 mod 副本的展示行——重复副本窗口与「按作者整理」冲突小窗**共用同一形状**（字段加一处，两窗一起变）。</summary>
+    public class ModCopyView
+    {
+        /// <summary>级别（1 主库 / 2 缓存库 / 3 冷冻库）。</summary>
+        public int tier { get; set; }
+
+        /// <summary>级别名。</summary>
+        public string tierName { get; set; }
+
+        /// <summary>所在库根。</summary>
+        public string rootPath { get; set; }
+
+        /// <summary>文件绝对路径。</summary>
+        public string filePath { get; set; }
+
+        /// <summary>文件名。</summary>
+        public string fileName { get; set; }
+
+        /// <summary>字节数。</summary>
+        public long size { get; set; }
+
+        /// <summary>修改时间。</summary>
+        public string mtime { get; set; }
+
+        /// <summary>创建时间（打开时实时读文件系统；读不到为空串）。</summary>
+        public string ctime { get; set; }
+
+        /// <summary>内容 MD5（档案命中即复用，算过就忽略；算不出为 null）。</summary>
+        public string md5 { get; set; }
+
+        /// <summary>manifest 版本（打开时实时读）。</summary>
+        public string version { get; set; }
+
+        /// <summary>manifest 作者（打开时实时读）。</summary>
+        public string author { get; set; }
+
+        /// <summary>manifest 名称。</summary>
+        public string name { get; set; }
+
+        /// <summary>文件名是否带 .old 段。</summary>
+        public bool isOld { get; set; }
+
+        /// <summary>manifest 读不到时的原因（空 = 读到了）。</summary>
+        public string error { get; set; }
+    }
+
+    /// <summary>「按作者整理」冲突小窗里的一份候选——共用副本形状（ModCopyView），另加计划条目键与状态。</summary>
+    public class SortConflictItemView : ModCopyView
+    {
+        /// <summary>计划条目的展示顺序（也是选定保留份的键）。</summary>
+        public long seq { get; set; }
+
+        /// <summary>条目状态。</summary>
+        public string state { get; set; }
+
+        /// <summary>条目备注。</summary>
+        public string note { get; set; }
+    }
+
+    /// <summary>按作者整理——一条冲突的候选视图（同目标路径的几份副本 + 引用卡片 + 旧版登记——与重复副本窗口同一份参考数据）。</summary>
+    public class SortConflictView
+    {
+        /// <summary>是否读到。</summary>
+        public bool ok { get; set; }
+
+        /// <summary>读不到的原因。</summary>
+        public string error { get; set; }
+
+        /// <summary>计划 id。</summary>
+        public long planId { get; set; }
+
+        /// <summary>发起定位的条目 seq。</summary>
+        public long seq { get; set; }
+
+        /// <summary>mod guid。</summary>
+        public string guid { get; set; }
+
+        /// <summary>manifest 名称（组标题行用）。</summary>
+        public string name { get; set; }
+
+        /// <summary>主库份数（组标题行用）。</summary>
+        public int mainCount { get; set; }
+
+        /// <summary>撞车点——目标路径。</summary>
+        public string destPath { get; set; }
+
+        /// <summary>候选副本。</summary>
+        public List<SortConflictItemView> items { get; } = new List<SortConflictItemView>();
+
+        /// <summary>引用这个 guid 的卡片（前三张——缩略图区，与重复副本同一数据源）。</summary>
+        public List<object> cards { get; } = new List<object>();
+
+        /// <summary>引用卡片总数。</summary>
+        public long cardTotal { get; set; }
+
+        /// <summary>旧版登记（行内「已登记」标记用）。</summary>
+        public List<ModOldRecord> olds { get; } = new List<ModOldRecord>();
+
+        /// <summary>MD5 算不出的明细（失败可见）。</summary>
+        public List<string> hashErrors { get; } = new List<string>();
+    }
+
+    /// <summary>按作者整理——保留某一份的请求体。</summary>
+    public class SortKeepDto
+    {
+        /// <summary>计划 id。</summary>
+        public long planId { get; set; }
+
+        /// <summary>保留这一条的 seq。</summary>
+        public long seq { get; set; }
     }
 
     /// <summary>按作者整理——执行请求体。</summary>

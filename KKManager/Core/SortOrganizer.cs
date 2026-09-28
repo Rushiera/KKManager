@@ -58,6 +58,50 @@ namespace KKManager.Core
         public long PrunedDirs { get; set; }
     }
 
+    /// <summary>整理冲突里的一份候选副本——只带计划侧事实（键 / 级别 / 路径 / 大小 / 时间 / 状态）；版本 / 作者 / MD5 等展示数据由消费面按 `ModCopyReader` + 同一档哈希档案统一补齐。</summary>
+    public class SortConflictCandidate
+    {
+        /// <summary>计划条目的展示顺序（也是选定保留份的键）。</summary>
+        public long Seq { get; set; }
+
+        /// <summary>级别（1 主库 / 2 缓存库 / 3 冷冻库）。</summary>
+        public int Tier { get; set; }
+
+        /// <summary>所在库根。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>文件绝对路径。</summary>
+        public string FilePath { get; set; }
+
+        /// <summary>文件名。</summary>
+        public string FileName { get; set; }
+
+        /// <summary>字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>修改时间（快照值）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>条目状态。</summary>
+        public string State { get; set; }
+
+        /// <summary>条目备注。</summary>
+        public string Note { get; set; }
+    }
+
+    /// <summary>整理冲突的一组候选——撞到同一目标路径的几份副本（guid 取自那条冲突）。</summary>
+    public class SortConflictGroup
+    {
+        /// <summary>mod guid。</summary>
+        public string Guid { get; set; }
+
+        /// <summary>撞车点——目标路径。</summary>
+        public string DestPath { get; set; }
+
+        /// <summary>候选副本（按计划条目顺序）。</summary>
+        public List<SortConflictCandidate> Items { get; } = new List<SortConflictCandidate>();
+    }
+
     /// <summary>按作者整理——计划生成（平铺 + 作者文件夹 + 冲突检测）与执行（同库改路径 + 清空目录）的唯一实现，面板与 CLI 共用。</summary>
     public static class SortOrganizer
     {
@@ -581,6 +625,137 @@ namespace KKManager.Core
                 }
             }
             return conflicts;
+        }
+        /// <summary>整理冲突的一组候选——按 seq 定位那条冲突，取同目标路径的几份（只给计划侧事实；展示数据由消费面统一补齐）。error 非空 = 定位失败。</summary>
+        public static SortConflictGroup ConflictGroup(StoreHub hub, long planId, long seq, out string error)
+        {
+            error = null;
+            SortConflictGroup group = new SortConflictGroup();
+            List<SortPlanItemRow> rows = hub.Core.QuerySortPlanItems(planId);
+            SortPlanItemRow hit = null;
+            foreach (SortPlanItemRow r in rows)
+            {
+                if (r.Seq == seq)
+                {
+                    hit = r;
+                    break;
+                }
+            }
+            if (hit == null)
+            {
+                error = "计划 #" + planId.ToString() + " 里没有 seq " + seq.ToString() + " 的条目";
+                return group;
+            }
+            group.Guid = hit.Guid;
+            group.DestPath = hit.DestPath;
+            foreach (SortPlanItemRow r in rows)
+            {
+                if (!string.Equals(r.DestPath, hit.DestPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                SortConflictCandidate c = new SortConflictCandidate();
+                c.Seq = r.Seq;
+                c.Tier = r.Tier;
+                c.RootPath = r.RootPath;
+                c.FilePath = r.SrcPath;
+                c.FileName = Path.GetFileName(r.SrcPath);
+                c.Size = r.Size;
+                c.Mtime = r.Mtime;
+                c.State = r.State;
+                c.Note = r.Note;
+                group.Items.Add(c);
+            }
+            return group;
+        }
+        /// <summary>解决一条整理冲突——保留这一份：其余同 guid 非旧版副本判旧版入缓存库（复用重复副本同一实现），保留份留在原位、判旧份的计划条目改指缓存库新位置，随后重核冲突数并写回计划头。成功返回 null，否则返回原因。</summary>
+        public static string ResolveConflict(StoreHub hub, RootsConfig cfg, long planId, long seq, out string detail)
+        {
+            detail = null;
+            SortPlanRow plan = hub.Core.SortPlanById(planId);
+            if (plan == null)
+            {
+                return "计划不存在——重新生成后再试";
+            }
+            if (plan.State != "ready")
+            {
+                return "计划状态是 " + plan.State + "（不是 ready）——无法处理冲突";
+            }
+            List<SortPlanItemRow> rows = hub.Core.QuerySortPlanItems(planId);
+            SortPlanItemRow keep = null;
+            foreach (SortPlanItemRow r in rows)
+            {
+                if (r.Seq == seq)
+                {
+                    keep = r;
+                    break;
+                }
+            }
+            if (keep == null)
+            {
+                return "计划 #" + planId.ToString() + " 里没有 seq " + seq.ToString() + " 的条目";
+            }
+            if (string.IsNullOrEmpty(keep.Guid))
+            {
+                return "这条条目没有 guid——判不掉其余副本，请手动处理";
+            }
+            if (!File.Exists(keep.SrcPath))
+            {
+                return "文件不在了：" + keep.SrcPath + "——换一份保留，或重新生成计划";
+            }
+
+            // [段1] 判旧其余副本（与重复副本同一条实现；保留份不进主库，留在原位等整理）
+            List<ModDemoteMove> moves = new List<ModDemoteMove>();
+            string demote = null;
+            string error = hub.MarkOldOthers(cfg, keep.Guid, keep.SrcPath, false, moves, out demote);
+            if (error != null)
+            {
+                return error;
+            }
+
+            // [段2] 判旧出的条目改指缓存库新位置（仍按作者归位，不留散文件）
+            Dictionary<string, string> authors = hub.Core.ModAuthorMap();
+            HashSet<string> demoted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ModDemoteMove mv in moves)
+            {
+                demoted.Add(mv.NewPath);
+                foreach (SortPlanItemRow r in rows)
+                {
+                    if (!string.Equals(r.SrcPath, mv.OldPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    string mvAuthor = "";
+                    if (r.Guid != null)
+                    {
+                        authors.TryGetValue(r.Guid, out mvAuthor);
+                    }
+                    string folder = FolderOfAuthor(mvAuthor);
+                    int mvLib = hub.LibOfRootPath(cfg, mv.RootPath);
+                    string mvDest = Path.Combine(mv.RootPath, folder, mv.NewName);
+                    hub.Core.SetSortItemLocation(planId, r.Seq, mvLib, mv.Tier, mv.RootPath, folder, mv.NewPath, mvDest, StatePending, "");
+                }
+            }
+            hub.Core.SetSortItemState(planId, keep.Seq, StatePending, "");
+
+            // [段3] 重核冲突现状——判旧备注在重核后再落一次（重核只写状态与冲突原因）
+            long conflicts = RecheckPlan(hub, planId);
+            foreach (SortPlanItemRow r in hub.Core.QuerySortPlanItems(planId))
+            {
+                if (r.State != StatePending || !demoted.Contains(r.SrcPath))
+                {
+                    continue;
+                }
+                hub.Core.SetSortItemState(planId, r.Seq, StatePending, "已判旧版 → 缓存库");
+            }
+            hub.Core.FinishSortPlan(planId, plan.State, plan.ItemCount, conflicts, plan.Note);
+            detail = demote;
+            if (moves.Count == 0)
+            {
+                detail = "已指定保留 " + Path.GetFileName(keep.SrcPath) + "——同 guid 没有其它待判旧副本（这一处冲突应已消失）";
+            }
+            Console.WriteLine("[整理] 冲突处理——保留 " + keep.SrcPath + " · " + detail + " · 冲突现状 " + conflicts.ToString());
+            return null;
         }
 
         /// <summary>计划表里某状态的条目数（冲突 / 待搬等的快速统计）。</summary>

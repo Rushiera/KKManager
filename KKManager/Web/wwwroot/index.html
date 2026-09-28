@@ -72,9 +72,9 @@
   .dim{color:var(--dim)}
   .hidden{display:none !important}
   .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
-  /* 弹窗层级：基础 50 · 叠加层（在重复副本之上打开 mod · 在整理计划之上开冲突小窗）55 / 56 · 引用明细 58 · 悬停浮层 60 / 70 */
+  /* 弹窗层级：基础 50 · 叠加层（整理冲突小窗 54 · 在重复副本 / 计划窗之上打开 mod）55 · 引用明细 58 · 悬停浮层 60 / 70 */
   #ovModCards{z-index:55}
-  #ovSortKeep{z-index:56}
+  #ovSortKeep{z-index:54}
   #overlay{z-index:58}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
   .modal.wide{width:min(1120px,96vw)}
@@ -392,9 +392,9 @@
   <div class="modal wide">
     <header><b>保留哪一份？</b> <span class="dim" id="skInfo"></span></header>
     <div class="body">
-      <div class="dim" style="font-size:12px;margin-bottom:8px">这几份撞到同一个目标路径。点<b>「保留这一份」</b>：它留在原位（整理时照常进 <b>&lt;作者&gt;</b> 文件夹）；同 guid 其余非旧版副本判为<b>旧版</b>（名字加 <code>.old</code> 段）<b>进缓存库</b>，并留下新旧版本记录。冷冻库（只读）副本保持原样。</div>
-      <div class="cardinfo" id="skDest"></div>
-      <table class="list"><thead><tr><th style="width:82px"></th><th style="width:104px">级别</th><th>文件</th><th style="width:66px">大小</th><th style="width:118px">建 / 改</th><th style="width:70px">版本</th><th style="width:88px">作者</th><th style="width:96px">MD5</th></tr></thead>
+      <div class="dim" style="font-size:12px;margin-bottom:8px">这几份撞到同一个目标路径——<b>数据与「重复副本」窗口同一处渲染</b>（级别 / 完整路径 / 版本 / 作者 / 大小 / 建改时间 / md5）。点<b>「保留这一份」</b>：这一份<b>留在原位</b>（整理时照常进 <b>&lt;作者&gt;</b> 文件夹）；同 guid 其余非旧版副本判为<b>旧版</b>（文件名加 <span class="mono">.old</span> 段）<b>进缓存库</b>并留新旧版本记录，<b>冷冻库（只读）副本保持原样</b>。<b>md5</b>＝内容指纹（同一档档案，算过就忽略）——同一 guid 各份 <b>md5 不同</b>或<b>建改时间不同</b>时对应格标<b>红块</b>（时间标红到段：年月日不同 → 整串红；只有时分秒不同 → 只标时分秒）；<b>查看引用关系</b>＝在本窗口之上叠一层打开这个 mod（看哪些卡片在用它），关掉即回到这里。</div>
+      <div class="cardinfo" id="skHead"></div>
+      <table class="list dup"><thead><tr><th style="width:118px">级别</th><th>文件名 / 路径</th><th style="width:70px">版本</th><th style="width:96px">作者</th><th style="width:70px">大小</th><th style="width:136px">创建 / 修改</th><th style="width:112px">md5</th><th style="width:186px">操作</th></tr></thead>
         <tbody id="skBody"></tbody></table>
     </div>
     <footer>
@@ -632,6 +632,7 @@ function kvHtml(rows){
 }
 function cardTypeName(t){
   if(!t){ return '<span class="dim">&lt;未识别&gt;</span>'; }
+  if(t === 'sd'){ return '场景卡（studio scene）'; }
   if(t.indexOf('Clothes') >= 0){ return '服装卡（coordinate）'; }
   if(t.indexOf('Chara') >= 0){ return '人物卡（character）'; }
   return esc(t);
@@ -660,7 +661,7 @@ function imageGridHtml(d){
   });
   return html + '</div><div class="dim" style="margin-top:8px;font-size:12px">缩略图按需加载（滚动到才读）；点缩略图在新标签页看大图。</div>';
 }
-function renderStructure(st, d){
+function renderStructure(st, d, tl){
   if(!st){ $('edSections').innerHTML = '<span class="dim">没有结构数据</span>'; return; }
   const c = editCtx;
   $('edTitle').textContent = st.fileName || '';
@@ -690,6 +691,11 @@ function renderStructure(st, d){
   ];
   if(d && d.faceImageSize > 0){
     rows.push(['卡面脸图', `${fmt(d.faceImageSize)} 字节 @${fmt(d.faceImageOffset)}`]);
+  }
+  /* 场景卡（sd）才带 timeline——Timeline 插件条目里的长度（原值 + 折算实际播放时长） */
+  if(st.cardType === 'sd'){
+    const t = tl ? esc(tl) : '<span class="dim">—</span>';
+    rows.push(['timeline', `<b>${t}</b>`]);
   }
   /* 概览末：内嵌贴图第一张（第一行第一列）直接摆出来 */
   let firstImg = '';
@@ -775,7 +781,7 @@ async function loadStructure(){
       $('edSections').innerHTML = '<span style="color:var(--red)">'+esc(r.error)+'</span>';
       return;
     }
-    renderStructure(r.structure, r.detail);
+    renderStructure(r.structure, r.detail, r.timelineText);
     $('edMsg').textContent = '只读视图——软件不会改动卡片文件';
   }catch(e){
     $('edMsg').textContent = '结构读取失败';
@@ -1774,8 +1780,7 @@ async function loadDup(){
   try{
     const r = await api('/api/dup');
     dupState.all = r.items || [];
-    dupState.olds = {};
-    (r.olds || []).forEach(o => { dupState.olds[(o.oldPath||'').toLowerCase()] = o; });
+    dupState.olds = oldRegMap(r.olds);
     dupState.hashErrors = r.hashErrors || [];
     renderDup(true);
   }catch(e){
@@ -1862,68 +1867,89 @@ function dupStampParts(v){
 }
 /* 时间格——两级标红：组内**年月日**不同 → 整串标红；年月日相同、只是**时分秒**不同 → 只标红时分秒
    （判定按显示粒度：去掉毫秒后的「日期 时间」整值——只有毫秒不同不标红） */
-function dupTimeCell(g, f, key, tip){
+/* ===== 一份 mod 副本的参考数据——重复副本窗口 与「按作者整理」冲突小窗**共用同一处渲染**
+   （标签 / 七个数据格 / 标红规则 / 缩略图区 / 旧版登记表：加一处，两窗一起变）===== */
+/* 旧版 / 已登记 / 读不到 标记（olds = 旧版登记表，以路径小写为键） */
+function copyTagHtml(f, olds){
+  let tags = '';
+  if(f.isOld) tags += ' <span class="mk y">旧版</span>';
+  const reg = olds ? olds[(f.filePath||'').toLowerCase()] : null;
+  if(reg) tags += ' <span class="dim" title="已登记旧版：新版 ' + esc(reg.newName||'') + ' · ' + esc(reg.newVersion||'') + '">已登记</span>';
+  if(f.error) tags += ' <span class="mk r" title="' + esc(f.error) + '">读不到</span>';
+  return tags;
+}
+/* 级别 + 库根 */
+function copyLevelCell(f){
+  const tierCell = f.tier === 1 ? '主库' : (f.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
+  const root = (f.rootPath||'').split('\\').pop() || '';
+  return tierCell + ' <span class="dim cellsm">' + esc(root) + '</span>';
+}
+/* 文件名 + 标签 + 完整路径小字（超长省略号截断，悬停看全量） */
+function copyFileCell(f, olds){
+  const fullPath = f.filePath || '';
+  const pathLine = fullPath ? `<div class="dim mono cellsm" style="max-width:460px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fullPath)}">${esc(fullPath)}</div>` : '';
+  return '<span class="mono">' + esc(f.fileName||'') + '</span>' + copyTagHtml(f, olds) + pathLine;
+}
+/* MD5 格——组内内容不一致时标红（warn 为真才标）；没算出来显示破折号（算不出的明细在脚注出声） */
+function copyMd5Html(g, f, warn){
+  const md5 = f.md5 || '';
+  if(!md5) return '<span class="dim">—</span>';
+  const short = md5.slice(0,12);
+  const tip = 'MD5 ' + md5 + '（完整值）';
+  if(warn && dupFieldMixed(g,'md5')) return `<span class="mk r" title="${tip}">${esc(short)}</span>`;
+  return `<span class="mono cellsm" title="${tip}">${esc(short)}</span>`;
+}
+/* 七个数据格（级别 / 文件 / 版本 / 作者 / 大小 / 建改 / MD5）——两窗共用 */
+function copyDataCells(g, f, olds, warn){
+  const ver = f.version ? esc(f.version) : '<span class="dim">—</span>';
+  const author = f.author ? esc(f.author) : '<span class="dim">—</span>';
+  const size = f.size ? (f.size/1048576).toFixed(1) + ' MB' : '';
+  const ct = copyTimeCell(g, f, 'ctime', '各副本创建时间不同——看清再挑', warn);
+  const mt = copyTimeCell(g, f, 'mtime', '各副本修改时间不同——看清再挑', warn);
+  return '<td>' + copyLevelCell(f) + '</td>'
+    + '<td class="mono">' + copyFileCell(f, olds) + '</td>'
+    + '<td>' + ver + '</td><td>' + author + '</td><td class="dim">' + size + '</td>'
+    + '<td class="dim cellsm">建 ' + ct + '<br>改 ' + mt + '</td>'
+    + '<td>' + copyMd5Html(g, f, warn) + '</td>';
+}
+/* 引用卡片缩略图区（组头最右）——前三张 + 查看更多；点它叠层打开引用卡片窗口 */
+function copyThumbBlock(files, cards, cardTotal, guid){
+  const list = cards || [];
+  const name = (files && files[0] && files[0].name) ? files[0].name : '';
+  if(cardTotal === undefined && !list.length) return '';
+  if(!cardTotal && !list.length) return '<span class="dupthumbs" style="cursor:default" title="没有卡片引用这个 mod"><span class="dim" style="font-size:11px;white-space:nowrap">无卡片引用</span></span>';
+  const imgs = list.map(c => c.hasThumb
+    ? `<img class="dupth" loading="lazy" draggable="false" alt="" title="${esc(c.fileName||'')}" src="/api/thumb/${c.id}?lib=${c.lib||0}">`
+    : `<span class="dupth" title="${esc(c.fileName||'')}（无缩略图）"></span>`).join('');
+  return `<span class="dupthumbs" data-act="more" data-guid="${esc(guid)}" data-name="${esc(name)}" title="引用这个 mod 的卡片——点开看全部">${imgs}<span class="dupmore">查看更多 (${cardTotal})</span></span>`;
+}
+/* 旧版登记表——以路径小写为键（两窗共用） */
+function oldRegMap(list){
+  const map = {};
+  (list || []).forEach(o => { if(o && o.oldPath) map[o.oldPath.toLowerCase()] = o; });
+  return map;
+}
+/* 时间格——两级标红（warn 为真才标）：组内**年月日**不同 → 整串标红；年月日相同、只有**时分秒**不同 → 只标红时分秒 */
+function copyTimeCell(g, f, key, tip, warn){
   const v = f[key];
   const shown = x => { const p = dupStampParts(x); if(!p.d && !p.t) return ''; return p.d + ' ' + p.t; };
-  if(!dupPending(g) || !dupFieldMixed(g, key, shown)) return esc(dupStamp(v));
+  if(!warn || !dupFieldMixed(g, key, shown)) return esc(dupStamp(v));
   const p = dupStampParts(v);
   if(!p.t || dupFieldMixed(g, key, x => dupStampParts(x).d)) return `<span class="mk r" title="${tip}">${esc(dupStamp(v))}</span>`;
   return `${esc(p.d)} <span class="mk r" title="${tip}">${esc(p.t)}</span>`;
 }
 function dupFileRow(g, f){
-  const size = f.size ? (f.size/1048576).toFixed(1) + ' MB' : '';
-  const ver = f.version ? esc(f.version) : '<span class="dim">—</span>';
-  const author = f.author ? esc(f.author) : '<span class="dim">—</span>';
-  const reg = dupState.olds[(f.filePath||'').toLowerCase()];
-  let tags = '';
-  if(f.isOld) tags += ' <span class="mk y">旧版</span>';
-  if(reg) tags += ' <span class="dim" title="已登记旧版：新版 ' + esc(reg.newName||'') + ' · ' + esc(reg.newVersion||'') + '">已登记</span>';
-  if(f.error) tags += ' <span class="mk r" title="' + esc(f.error) + '">读不到</span>';
-  const tierCell = f.tier === 1 ? '主库' : (f.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
-  const root = (f.rootPath||'').split('\\').pop() || '';
   const act = dupRowAct(g, f);
   const note = act ? '' : (f.isOld ? '旧版文件位于主库——请重扫核对' : '已是主库当前版本（其余副本已判旧版）');
-  /* 完整文件系统路径——文件名下方小字（副本实际在哪一目了然）；超长省略号截断，悬停看全量 */
-  const fullPath = f.filePath || '';
-  const pathLine = fullPath ? `<div class="dim mono cellsm" style="max-width:460px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fullPath)}">${esc(fullPath)}</div>` : '';
-  /* 标红判据统一：组内该项不一致 + 该组尚未做出主要选择（待确认）——已挑过版本的组不标 */
-  const dupWarn = dupPending(g);
-  /* md5——组内内容不一致时标红（提示人工挑） */
-  const md5 = f.md5 || '';
-  const md5Warn = md5 && dupFieldMixed(g,'md5') && dupWarn;
-  let md5Cell = '<span class="dim">—</span>';
-  if(md5){
-    const short = md5.slice(0,12);
-    const tip = 'MD5 ' + md5 + '（完整值）';
-    if(md5Warn) md5Cell = `<span class="mk r" title="${tip}">${esc(short)}</span>`;
-    else md5Cell = `<span class="mono cellsm" title="${tip}">${esc(short)}</span>`;
-  }
-  /* 建 / 改——两级标红：年月日不同 → 整串标红；年月日相同、只有时分秒不同 → 只标红时分秒 */
-  const ctCell = dupTimeCell(g, f, 'ctime', '各副本创建时间不同——看清再挑');
-  const mtCell = dupTimeCell(g, f, 'mtime', '各副本修改时间不同——看清再挑');
+  /* 数据格与「按作者整理」冲突小窗同一处渲染（copyDataCells）；标红判据：组内该项不一致 + 该组尚未挑过版本 */
   return `<tr class="dupfile${act ? '' : ' noact'}" data-guid="${esc(g.guid)}" data-act="${act}" data-note="${note}" data-path="${esc(f.filePath||'')}" data-tier="${f.tier || 0}">
-    <td>${tierCell} <span class="dim cellsm">${esc(root)}</span></td>
-    <td class="mono">${esc(f.fileName||'')}${tags}${pathLine}</td>
-    <td>${ver}</td><td>${author}</td><td class="dim">${size}</td>
-    <td class="dim cellsm">建 ${ctCell}<br>改 ${mtCell}</td>
-    <td>${md5Cell}</td>
+    ${copyDataCells(g, f, dupState.olds, dupPending(g))}
     <td>${dupBtns(g, f)}</td></tr>`;
 }
 /* 组标题行最右侧的缩略图区——引用这个 guid 的卡片（前三张直观看；点它或「查看更多」叠层打开引用卡片窗口） */
+/* 组标题行最右侧的缩略图区——与「按作者整理」冲突小窗共用 copyThumbBlock */
 function dupThumbs(g){
-  const total = g.cardTotal || 0;
-  const cards = g.cards || [];
-  const name = (g.files && g.files[0] && g.files[0].name) ? g.files[0].name : '';
-  if(g.cardTotal === undefined && !cards.length){
-    return '';
-  }
-  if(!total && !cards.length){
-    return '<span class="dupthumbs" style="cursor:default" title="没有卡片引用这个 mod"><span class="dim" style="font-size:11px;white-space:nowrap">无卡片引用</span></span>';
-  }
-  const imgs = cards.map(c => c.hasThumb
-    ? `<img class="dupth" loading="lazy" draggable="false" alt="" title="${esc(c.fileName||'')}" src="/api/thumb/${c.id}?lib=${c.lib||0}">`
-    : `<span class="dupth" title="${esc(c.fileName||'')}（无缩略图）"></span>`).join('');
-  return `<span class="dupthumbs" data-act="more" data-guid="${esc(g.guid)}" data-name="${esc(name)}" title="引用这个 mod 的卡片——点开看全部">${imgs}<span class="dupmore">查看更多 (${total})</span></span>`;
+  return copyThumbBlock(g.files, g.cards, g.cardTotal, g.guid);
 }
 function renderDup(reset){
   const list = dupFiltered();
@@ -2466,7 +2492,8 @@ async function pollScan(){
     const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
     $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${SCAN_TARGET[s.target]||s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
       + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '')
-      + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '');
+      + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '')
+      + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '');
     $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
     $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
@@ -3041,12 +3068,13 @@ function updateSpExec(){
   $('btnSpExec').disabled = !ok;
 }
 
-/* 冲突小窗——叠在计划窗之上（不关下层、不动阅读位置）：版本 / 作者 / MD5 实时读，点「保留这一份」定案 */
+/* 冲突小窗——叠在计划窗之上（不关下层、不动阅读位置）；数据格与「重复副本」窗口同一处渲染（copyDataCells / copyThumbBlock） */
 let skView = null;
+let skOlds = {};
 async function openSortKeep(seq){
   $('skInfo').textContent = '';
-  $('skDest').innerHTML = '';
-  $('skBody').innerHTML = '<tr><td colspan="8" class="dim" style="padding:8px">读取中（实时读 manifest 与 MD5）…</td></tr>';
+  $('skHead').innerHTML = '';
+  $('skBody').innerHTML = '<tr><td colspan="8" class="dim" style="padding:8px">读取中（逐份读 manifest + 补 MD5 档案——与重复副本同一口径）…</td></tr>';
   $('skFoot').textContent = '';
   $('ovSortKeep').classList.remove('hidden');
   const planId = (spPlan && spPlan.planId) || 0;
@@ -3057,45 +3085,32 @@ async function openSortKeep(seq){
     return;
   }
   skView = r;
+  skOlds = oldRegMap(r.olds);       /* 旧版登记表——「已登记」标记与重复副本共用 */
   renderSortKeep();
 }
 function renderSortKeep(){
   const r = skView;
   if(!r) return;
-  $('skInfo').textContent = r.guid ? ('guid ' + r.guid) : '';
-  $('skDest').innerHTML = '目标路径 <span class="mono">' + esc(r.destPath || '') + '</span>';
   const items = r.items || [];
-  const seen = {};
-  let kinds = 0;
-  items.forEach(x => { if(x.md5 && !seen[x.md5]){ seen[x.md5] = 1; kinds = kinds + 1; } });
-  const md5Mixed = kinds > 1;
+  const g = { guid:r.guid, files:items };
+  $('skInfo').textContent = r.name ? r.name : '';
+  $('skHead').innerHTML = '<div class="dupgrp"><div class="grow"><b class="mono">' + esc(r.guid||'') + '</b> <span class="dim">' + esc(r.name||'') + '</span> · ' + items.length + ' 份（主库 ' + (r.mainCount||0) + '）'
+    + '<div class="dim cellsm">目标 <span class="mono">' + esc(r.destPath||'') + '</span></div></div>'
+    + copyThumbBlock(items, r.cards, r.cardTotal, r.guid) + '</div>';
   let html = '';
   items.forEach(x => {
-    const size = x.size ? (x.size/1048576).toFixed(1) + ' MB' : '';
-    const ver = x.version ? esc(x.version) : '<span class="dim">—</span>';
-    const author = x.author ? esc(x.author) : '<span class="dim">—</span>';
-    const tierCell = x.tier === 1 ? '主库' : (x.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
-    const root = (x.rootPath||'').split('\\').pop() || '';
-    let md5Cell = '<span class="dim">—</span>';
-    if(x.md5){
-      const tip = 'MD5 ' + x.md5 + '（完整值）';
-      md5Cell = md5Mixed ? `<span class="mk r" title="${tip}">${esc(x.md5.slice(0,12))}</span>` : `<span class="mono cellsm" title="${tip}">${esc(x.md5.slice(0,12))}</span>`;
-    }else if(x.hashError){
-      md5Cell = '<span class="mk r" title="' + esc(x.hashError) + '">算不出</span>';
-    }
-    html += `<tr>
-      <td><button class="skkeep" data-seq="${x.seq}">保留这一份</button></td>
-      <td>${tierCell} <span class="dim cellsm">${esc(root)}</span></td>
-      <td class="mono" style="font-size:12px">${esc(x.fileName||'')}<div class="dim mono cellsm" style="max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.filePath||'')}">${esc(x.filePath||'')}</div></td>
-      <td class="dim">${size}</td>
-      <td class="dim cellsm">建 ${esc(x.ctime || '—')}<br>改 ${esc(dupStamp(x.mtime))}</td>
-      <td>${ver}</td><td>${author}</td><td>${md5Cell}</td>
-    </tr>`;
+    html += '<tr>' + copyDataCells(g, x, skOlds, true)
+      + '<td><button class="skkeep" data-seq="' + x.seq + '">保留这一份</button>'
+      + '<button data-act="ref" data-guid="' + esc(r.guid||'') + '" title="在本窗口之上叠一层打开这个 mod——看哪些卡片引用了它">查看引用关系</button></td></tr>';
   });
   $('skBody').innerHTML = html || '<tr><td colspan="8" class="dim" style="padding:8px">没有候选</td></tr>';
-  $('skFoot').textContent = md5Mixed
-    ? ('共 ' + items.length + ' 份 · 各份内容不同（MD5 不一致）——看清再挑')
-    : ('共 ' + items.length + ' 份候选');
+  let foot = '共 ' + items.length + ' 份候选（主库 ' + (r.mainCount||0) + '）';
+  if(items.length > 1 && dupFieldMixed(g, 'md5')) foot += ' · 各份内容不同（md5 不一致）——看清再挑';
+  let reg = 0;
+  items.forEach(x => { if(skOlds[(x.filePath||'').toLowerCase()]) reg = reg + 1; });
+  if(reg) foot += ' · 已登记旧版 ' + reg + ' 份';
+  if(r.hashErrors && r.hashErrors.length) foot += ' · MD5 算不出 ' + r.hashErrors.length + ' 份';
+  $('skFoot').textContent = foot;
 }
 /* 保留这一份——服务端判旧其余副本（与重复副本同一实现）后返回更新过的计划视图，计划窗一并更新 */
 async function keepSortConflict(seq, btn){
@@ -3122,7 +3137,13 @@ async function keepSortConflict(seq, btn){
 }
 $('skBody').addEventListener('click', e => {
   const b = e.target.closest ? e.target.closest('.skkeep') : null;
-  if(b) keepSortConflict(parseInt(b.dataset.seq, 10), b);
+  if(b){ keepSortConflict(parseInt(b.dataset.seq, 10), b); return; }
+  const ref = e.target.closest ? e.target.closest('button[data-act="ref"]') : null;
+  if(ref) gotoModFromDup(ref.dataset.guid);
+});
+$('skHead').addEventListener('click', e => {
+  const m = e.target.closest ? e.target.closest('[data-act="more"]') : null;
+  if(m) openModCards(m.dataset.guid, m.dataset.name || m.dataset.guid);
 });
 $('btnSkClose').onclick = () => $('ovSortKeep').classList.add('hidden');
 

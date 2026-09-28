@@ -1556,33 +1556,37 @@ namespace KKManager.Data
             detail = dest;
             return null;
         }
-        /// <summary>指定保留版本——该副本成为主库当前版本（不在主库则搬入并正名），同 guid 其余非旧版副本判为旧版（加 .old 段并移入缓存库）；成功返回 null，否则返回原因。</summary>
-        public string KeepVersion(RootsConfig cfg, string guid, string filePath, out string detail)
+        /// <summary>判旧其余副本——除保留份外，同 guid 的非旧版副本加 .old 段（主库那份移入缓存库、缓存库那份就地改名）并落新旧版本登记；promoteKeep 为真时保留份搬入主库并正名（重复副本口径），为假时保留份留在原位（按作者整理口径）。成功返回 null，否则返回原因。</summary>
+        public string MarkOldOthers(RootsConfig cfg, string guid, string keepFilePath, bool promoteKeep, List<ModDemoteMove> moves, out string detail)
         {
-            // [段1] 前置校验：主库与缓存库都在 · 副本行存在 · 文件存在
+            // [段1] 前置校验：缓存库在 · 副本行在 · 文件在（promoteKeep 时主库也必须在）
             detail = null;
-            if (string.IsNullOrEmpty(guid) || string.IsNullOrEmpty(filePath))
+            if (string.IsNullOrEmpty(guid) || string.IsNullOrEmpty(keepFilePath))
             {
                 return "缺少 guid 或文件路径";
             }
-            RootEntry mainRoot = FindModRoot(cfg, Tier.Main);
-            if (mainRoot == null)
+            RootEntry mainRoot = null;
+            if (promoteKeep)
             {
-                return "未配置主库（级别 1）的 mod 库根";
+                mainRoot = FindModRoot(cfg, Tier.Main);
+                if (mainRoot == null)
+                {
+                    return "未配置主库（级别 1）的 mod 库根";
+                }
             }
             RootEntry cacheRoot = FindModRoot(cfg, Tier.Cache);
             if (cacheRoot == null)
             {
                 return "未配置缓存库（级别 2）的 mod 库根";
             }
-            ModFileRecord keep = FindModFileRecord(cfg, guid, filePath);
+            ModFileRecord keep = FindModFileRecord(cfg, guid, keepFilePath);
             if (keep == null)
             {
-                return "数据库里没有这条副本行（需重扫核对）：" + filePath;
+                return "数据库里没有这条副本行（需重扫核对）：" + keepFilePath;
             }
-            if (!File.Exists(filePath))
+            if (!File.Exists(keepFilePath))
             {
-                return "文件不存在：" + filePath;
+                return "文件不存在：" + keepFilePath;
             }
             List<ModFileRecord> all = new List<ModFileRecord>();
             foreach (Store s in AllStores(cfg))
@@ -1590,15 +1594,15 @@ namespace KKManager.Data
                 all.AddRange(s.QueryModFileRecords(guid));
             }
             all.Sort(CompareFileByTier);
-            ModInfo keepInfo = ZipModReader.Parse(filePath);
-            string keepName = RootsRules.StripOldFileName(Path.GetFileName(filePath));
+            ModInfo keepInfo = ZipModReader.Parse(keepFilePath);
+            string keepName = RootsRules.StripOldFileName(Path.GetFileName(keepFilePath));
 
             // [段2] 其余副本判旧版：主库 → 加 .old 段移入缓存库 · 缓存库 → 就地加 .old 段 · 冷冻库与已带 .old 的跳过
             int demoted = 0;
             List<string> skipped = new List<string>();
             foreach (ModFileRecord r in all)
             {
-                if (string.Equals(r.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(r.FilePath, keepFilePath, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -1617,7 +1621,11 @@ namespace KKManager.Data
                     continue;
                 }
                 string oldName = RootsRules.MakeOldFileName(Path.GetFileName(r.FilePath));
-                string oldDir = r.Tier == Tier.Main ? cacheRoot.path : Path.GetDirectoryName(r.FilePath);
+                string oldDir = Path.GetDirectoryName(r.FilePath);
+                if (r.Tier == Tier.Main)
+                {
+                    oldDir = cacheRoot.path;
+                }
                 string dest = Path.Combine(oldDir, oldName);
                 if (File.Exists(dest))
                 {
@@ -1649,88 +1657,112 @@ namespace KKManager.Data
                     NewVersion = keepInfo.Version,
                     MarkedAt = Store.Now()
                 });
+                if (moves != null)
+                {
+                    ModDemoteMove mv = new ModDemoteMove();
+                    mv.OldPath = r.FilePath;
+                    mv.NewPath = dest;
+                    mv.NewName = oldName;
+                    mv.RootPath = oldDir;
+                    mv.Tier = Tier.Cache;
+                    moves.Add(mv);
+                }
                 demoted = demoted + 1;
             }
 
-            // [段3] 保留份入主库并正名（已在主库且非旧版则不动）
+            // [段3] 保留份入主库并正名（只走重复副本口径；按作者整理留在原位）
             bool keepMoved = false;
-            if (keep.Tier == Tier.Main)
+            if (promoteKeep)
             {
-                if (RootsRules.IsOldFileName(keep.FileName))
+                if (keep.Tier == Tier.Main)
                 {
-                    string renamed = Path.Combine(Path.GetDirectoryName(keep.FilePath), keepName);
-                    if (File.Exists(renamed))
+                    if (RootsRules.IsOldFileName(keep.FileName))
                     {
-                        return "主库已有同名文件（正名会撞名）：" + renamed;
+                        string renamed = Path.Combine(Path.GetDirectoryName(keep.FilePath), keepName);
+                        if (File.Exists(renamed))
+                        {
+                            return "主库已有同名文件（正名会撞名）：" + renamed;
+                        }
+                        try
+                        {
+                            File.Move(keep.FilePath, renamed);
+                        }
+                        catch (Exception ex)
+                        {
+                            return "保留份正名失败" + FileBusyHint(ex) + " · " + keep.FilePath;
+                        }
+                        if (MoveModFile(cfg, guid, keep.FilePath, keep.RootPath, renamed, Tier.Main, keep.RootPath, keepName) == null)
+                        {
+                            return "保留份已正名但数据库未找到源副本行：" + keep.FilePath;
+                        }
+                        Core.DeleteModOld(keep.FilePath);
+                        keepMoved = true;
                     }
+                }
+                else
+                {
+                    string dest = Path.Combine(mainRoot.path, keepName);
+                    if (File.Exists(dest))
+                    {
+                        return "主库已有同名文件：" + dest;
+                    }
+                    bool readOnlySource = RootsRules.IsReadOnlyRoot(cfg, keep.RootPath);
                     try
                     {
-                        File.Move(keep.FilePath, renamed);
+                        Directory.CreateDirectory(mainRoot.path);
+                        if (readOnlySource)
+                        {
+                            File.Copy(keep.FilePath, dest, false);
+                        }
+                        else
+                        {
+                            File.Move(keep.FilePath, dest);
+                        }
                     }
                     catch (Exception ex)
                     {
-                        return "保留份正名失败" + FileBusyHint(ex) + " · " + keep.FilePath;
+                        return "保留份搬入主库失败" + FileBusyHint(ex);
                     }
-                    if (MoveModFile(cfg, guid, keep.FilePath, keep.RootPath, renamed, Tier.Main, keep.RootPath, keepName) == null)
+                    string moved;
+                    if (readOnlySource)
                     {
-                        return "保留份已正名但数据库未找到源副本行：" + keep.FilePath;
+                        moved = AddModFileCopy(cfg, guid, keep.RootPath, keep.FilePath, dest, Tier.Main, mainRoot.path, keepName);
+                    }
+                    else
+                    {
+                        moved = MoveModFile(cfg, guid, keep.FilePath, keep.RootPath, dest, Tier.Main, mainRoot.path, keepName);
+                    }
+                    if (moved == null)
+                    {
+                        return "保留份已搬移但数据库未找到源副本行：" + keep.FilePath;
                     }
                     Core.DeleteModOld(keep.FilePath);
                     keepMoved = true;
                 }
             }
-            else
-            {
-                string dest = Path.Combine(mainRoot.path, keepName);
-                if (File.Exists(dest))
-                {
-                    return "主库已有同名文件：" + dest;
-                }
-                bool readOnlySource = RootsRules.IsReadOnlyRoot(cfg, keep.RootPath);
-                try
-                {
-                    Directory.CreateDirectory(mainRoot.path);
-                    if (readOnlySource)
-                    {
-                        File.Copy(keep.FilePath, dest, false);
-                    }
-                    else
-                    {
-                        File.Move(keep.FilePath, dest);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    return "保留份搬入主库失败" + FileBusyHint(ex);
-                }
-                string moved;
-                if (readOnlySource)
-                {
-                    moved = AddModFileCopy(cfg, guid, keep.RootPath, keep.FilePath, dest, Tier.Main, mainRoot.path, keepName);
-                }
-                else
-                {
-                    moved = MoveModFile(cfg, guid, keep.FilePath, keep.RootPath, dest, Tier.Main, mainRoot.path, keepName);
-                }
-                if (moved == null)
-                {
-                    return "保留份已搬移但数据库未找到源副本行：" + keep.FilePath;
-                }
-                Core.DeleteModOld(keep.FilePath);
-                keepMoved = true;
-            }
 
             // [段4] 汇总——跳过项出声（失败可见，不静默）
-            detail = "保留 " + keepName + "（版本 " + (keepInfo.Version ?? "<无>") + "）· 判旧版 " + demoted + " 份";
+            string keepVersion = keepInfo.Version;
+            if (keepVersion == null)
+            {
+                keepVersion = "<无>";
+            }
+            detail = "保留 " + keepName + "（版本 " + keepVersion + "）· 判旧版 " + demoted.ToString() + " 份";
             if (keepMoved)
             {
                 detail = detail + " · 保留份已入主库";
             }
             if (skipped.Count > 0)
             {
-                detail = detail + " · 跳过 " + skipped.Count + " 份：" + string.Join("；", skipped);
+                detail = detail + " · 跳过 " + skipped.Count.ToString() + " 份：" + string.Join("；", skipped);
             }
             return null;
+        }
+
+        /// <summary>指定保留版本——该副本成为主库当前版本（不在主库则搬入并正名），同 guid 其余非旧版副本判为旧版（加 .old 段并移入缓存库）；成功返回 null，否则返回原因。</summary>
+        public string KeepVersion(RootsConfig cfg, string guid, string filePath, out string detail)
+        {
+            return MarkOldOthers(cfg, guid, filePath, true, null, out detail);
         }
 
         /// <summary>文件操作失败的统一说明——补上「谁可能占用」与「怎么办」（失败可执行化：不静默、不让人猜）。</summary>
