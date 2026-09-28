@@ -77,10 +77,15 @@
   .dim{color:var(--dim)}
   .hidden{display:none !important}
   .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
-  /* 弹窗层级：基础 50 · 叠加层（整理冲突小窗 54 · 在重复副本 / 计划窗之上打开 mod）55 · 引用明细 58 · 悬停浮层 60 / 70 */
+  /* 弹窗层级：基础 50 · 叠加层（整理冲突小窗 54 · 在重复副本 / 计划窗之上打开 mod）55 · 引用明细 58 · 卡片分析 / 编辑卡片 59 · 编辑授权 / 寻找旧版 60 · 悬停浮层 61 / 70 */
   #ovModCards{z-index:55}
   #ovSortKeep{z-index:54}
   #overlay{z-index:58}
+  /* 从引用明细打开的次级窗都压在它之上（都是全屏遮罩，靠 z-index 定先后）——卡片分析与编辑卡片同一层；编辑授权 / 寻找旧版再压在编辑卡片之上 */
+  #ovAnalyze{z-index:59}
+  #ovEdit{z-index:59}
+  #ovAuth{z-index:60}
+  #ovOld{z-index:60}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
   .modal.wide{width:min(1120px,96vw)}
   .modal header{position:static;border:0;background:transparent;padding:12px 14px 6px}
@@ -98,7 +103,7 @@
   .grow{flex:1}
   input[readonly]{color:var(--dim);background:#1a1d22}
   tr.locked td{background:#1a1d22}
-  .tip{position:fixed;pointer-events:none;background:#0b0e12e6;border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px;z-index:60;white-space:nowrap}
+  .tip{position:fixed;pointer-events:none;background:#0b0e12e6;border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px;z-index:61;white-space:nowrap}
   /* 组成条目预览浮层（文本悬停显示内容）+ 条目缩略图 */
   .tip.comp{white-space:pre-wrap;max-width:560px;max-height:340px;overflow:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.35;pointer-events:none}
   .compThumb{width:18px;height:18px;object-fit:cover;border:1px solid var(--line);border-radius:3px;vertical-align:middle;flex:0 0 auto}
@@ -151,7 +156,7 @@
   label.authbox input{width:15px;height:15px}
   label.authbox.on{color:var(--gold)}
   .edchunk td{font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  /* 编辑卡片（只读结构视图）——分区折叠 + 概览表 + 内嵌贴图网格 */
+  /* 卡片分析（只读结构视图）——分区折叠 + 概览表 + 内嵌贴图网格 */
   .edsec{border:1px solid var(--line);border-radius:8px;margin:10px 0;background:var(--panel2);overflow:hidden}
   .edsec>summary{cursor:pointer;padding:8px 10px;font-size:13px;user-select:none;list-style:none}
   .edsec>summary::-webkit-details-marker{display:none}
@@ -516,15 +521,30 @@
   </div>
 </div>
 
+<div class="overlay hidden" id="ovAnalyze">
+  <div class="modal wide">
+    <header><b>卡片分析</b> <span class="dim" id="anTitle"></span></header>
+    <div class="body">
+      <div class="dim" id="anHint" style="font-size:12px;margin-bottom:8px">卡片文件的结构分析——卡类型 / 卡面预览图 / 内嵌贴图 / mod 声明区 / 服装部件 / 数据块目录 / 写入插件 / 数据区头段 / 场景卡 timeline 长度。<b>只读</b>：不改动卡片文件，也不需要编辑授权。改字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）走左侧那枚「编辑卡片」。</div>
+      <div id="anSections"></div>
+    </div>
+    <footer>
+      <span class="dim" id="anMsg">只读分析——软件不会改动卡片文件</span>
+      <span class="grow"></span>
+      <button id="btnAnReload">重新读取</button>
+      <button id="btnAnClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <div class="overlay hidden" id="ovEdit">
   <div class="modal wide">
     <header><b>编辑卡片</b> <span class="dim" id="edTitle"></span></header>
     <div class="body">
       <div id="edEdit"></div>
-      <div id="edSections"></div>
     </div>
     <footer>
-      <span class="dim" id="edMsg">只读视图——软件不会改动卡片文件</span>
+      <span class="dim" id="edMsg">只改点名字段——其余字节原样搬运</span>
       <span class="grow"></span>
       <button id="btnEditReload">重新读取</button>
       <button id="btnEditClose">关闭</button>
@@ -619,13 +639,13 @@ function askEditAuth(onOk){
   $('btnAuthCancel').onclick = () => $('ovAuth').classList.add('hidden');
 }
 /* 点「编辑卡片」入口——没授权先走二次确认 */
-function requestEdit(cardId, lib){
-  if(editAuth){ openEditor(cardId, lib); return; }
-  askEditAuth(() => openEditor(cardId, lib));
+function requestEdit(cardId, lib, name){
+  if(editAuth){ openEditor(cardId, lib, name); return; }
+  askEditAuth(() => openEditor(cardId, lib, name));
 }
 
-/* ---------- 编辑卡片（只读结构视图——PNG 块表 + 图片区 / 数据区划分） ---------- */
-let editCtx = {cardId:0, lib:0};
+/* ---------- 卡片分析（只读结构视图——PNG 块表 + 图片区 / 数据区划分；不查编辑授权） ---------- */
+let anCtx = {cardId:0, lib:0};
 function secHtml(title, count, bodyHtml, open){
   const c = count ? ' <span class="dim">'+esc(count)+'</span>' : '';
   return `<details class="edsec"${open ? ' open' : ''}><summary><b>${esc(title)}</b>${c}</summary><div class="secbody">${bodyHtml}</div></details>`;
@@ -653,7 +673,7 @@ function chunkTableHtml(chunks){
   return html + '</tbody></table>';
 }
 function imageGridHtml(d){
-  const c = editCtx;
+  const c = anCtx;
   let html = '<div class="edimg">';
   (d.images||[]).forEach(img => {
     const src = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${img.offset}&size=${img.size}&w=96`;
@@ -669,9 +689,9 @@ function imageGridHtml(d){
   return html + '</div><div class="dim" style="margin-top:8px;font-size:12px">缩略图按需加载（滚动到才读）；点缩略图在新标签页看大图。</div>';
 }
 function renderStructure(st, d, tl){
-  if(!st){ $('edSections').innerHTML = '<span class="dim">没有结构数据</span>'; return; }
-  const c = editCtx;
-  $('edTitle').textContent = st.fileName || '';
+  if(!st){ $('anSections').innerHTML = '<span class="dim">没有结构数据</span>'; return; }
+  const c = anCtx;
+  $('anTitle').textContent = st.fileName || '';
   const imgEnd = st.imageEnd > 0 ? fmt(st.imageEnd) : '<未找到>';
   const imgCount = d ? (d.images||[]).length : 0;
   const imgBytes = d ? (d.imageBytesTotal||0) : 0;
@@ -775,34 +795,42 @@ function renderStructure(st, d, tl){
   if(st.error){
     html = '<div style="color:var(--red);margin-bottom:8px">' + esc(st.error) + '</div>' + html;
   }
-  $('edSections').innerHTML = html;
+  $('anSections').innerHTML = html;
 }
 async function loadStructure(){
-  const c = editCtx;
-  $('edMsg').textContent = '读取中…（要扫一遍卡片，大卡需几秒）';
-  $('edSections').innerHTML = '<span class="dim">读取中…</span>';
+  const c = anCtx;
+  $('anMsg').textContent = '读取中…（要扫一遍卡片，大卡需几秒）';
+  $('anSections').innerHTML = '<span class="dim">读取中…</span>';
   try{
     const r = await api(`/api/card/${c.cardId}/structure?lib=${c.lib||0}`);
     if(r.ok !== true && r.error){
-      $('edMsg').textContent = '结构读取失败';
-      $('edSections').innerHTML = '<span style="color:var(--red)">'+esc(r.error)+'</span>';
+      $('anMsg').textContent = '结构读取失败';
+      $('anSections').innerHTML = '<span style="color:var(--red)">'+esc(r.error)+'</span>';
       return;
     }
     renderStructure(r.structure, r.detail, r.timelineText);
-    $('edMsg').textContent = '只读视图——软件不会改动卡片文件';
+    $('anMsg').textContent = '只读分析——软件不会改动卡片文件';
   }catch(e){
-    $('edMsg').textContent = '结构读取失败';
-    $('edSections').innerHTML = '<span style="color:var(--red)">结构读取失败：'+esc(e.message)+'</span>';
+    $('anMsg').textContent = '结构读取失败';
+    $('anSections').innerHTML = '<span style="color:var(--red)">结构读取失败：'+esc(e.message)+'</span>';
   }
 }
-function openEditor(cardId, lib){
+/* 卡片分析入口——只读，不查编辑授权（软件不改动卡片文件） */
+function openAnalyze(cardId, lib){
+  anCtx = {cardId: cardId, lib: lib||0};
+  $('ovAnalyze').classList.remove('hidden');
+  loadStructure();
+}
+/* 编辑卡片入口——只留点名字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）；授权判定照旧 */
+function openEditor(cardId, lib, name){
   editCtx = {cardId: cardId, lib: lib||0};
+  $('edTitle').textContent = name || '';
   $('ovEdit').classList.remove('hidden');
   loadParams();
-  loadStructure();
 }
 
 /* ---------- 编辑字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）——字母表来自 /api/personalities 与 /api/weak-points ---------- */
+let editCtx = {cardId:0, lib:0};
 let persList = null;
 let weakList = null;
 let editParams = null;
@@ -919,7 +947,7 @@ async function saveEdit(){
     $('edSaveMsg').innerHTML = '<b style="color:var(--green)">已写入</b>　' + (r.changes||[]).map(esc).join(' · ')
       + `　字节增量 ${r.delta}　留档 ${esc(arch)}`;
     await loadParams();
-    await loadStructure();
+    if(!$('ovAnalyze').classList.contains('hidden')){ await loadStructure(); }
     renderCardInfo(c.cardId, c.lib);
   }catch(e){
     $('edSaveMsg').innerHTML = '<span style="color:var(--red)">写入失败：'+esc(e.message)+'</span>';
@@ -1577,12 +1605,15 @@ async function openRefs(cardId, tier, lib){
   updateSel();
   $('overlay').classList.remove('hidden');
 }
-/* 卡片信息区（文件名 / 路径 / 四色计数 + 「编辑卡片」入口——未授权时先走二次确认） */
+/* 卡片信息区（文件名 / 路径 / 四色计数 + 「卡片分析」（只读，不查授权）与「编辑卡片」（未授权时先走二次确认）入口） */
 async function renderCardInfo(cardId, lib){
   const box = $('mCardInfo');
   box.innerHTML = '<span class="dim">加载卡片信息…</span>';
   try{
     const c = await api(`/api/card/${cardId}?lib=${lib||0}`);
+    /* 当前卡片上下文——两个窗口（卡片分析 / 编辑卡片）与「寻找旧版」重读都指向这一张 */
+    editCtx = {cardId: cardId, lib: lib||0};
+    anCtx = {cardId: cardId, lib: lib||0};
     box.innerHTML = `<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
       <div style="flex:1;min-width:280px">
         <div><b>${esc(c.fileName)}</b> <span class="dim">${esc(c.cardType||'')}</span></div>
@@ -1592,9 +1623,10 @@ async function renderCardInfo(cardId, lib){
       <div style="white-space:nowrap">
         <span class="mk g">绿 ${c.green}</span> <span class="mk y">黄 ${c.yellow}</span> <span class="mk k">灰 ${c.red}</span> <span class="mk r">红 ${c.black}</span>
       </div>
-      <div><button id="btnEditCard">编辑卡片</button> <button id="btnCardOld">寻找旧版</button></div>
+      <div><button id="btnAnalyzeCard">卡片分析</button> <button id="btnEditCard">编辑卡片</button> <button id="btnCardOld">寻找旧版</button></div>
     </div>`;
-    $('btnEditCard').onclick = () => requestEdit(cardId, lib);
+    $('btnAnalyzeCard').onclick = () => openAnalyze(cardId, lib);
+    $('btnEditCard').onclick = () => requestEdit(cardId, lib, c.fileName);
     $('btnCardOld').onclick = () => openOld(cardId, lib);
   }catch(e){
     box.innerHTML = '<span class="dim">卡片信息加载失败：' + esc(e.message) + '</span>';
@@ -2552,8 +2584,10 @@ $('chkAuth').onchange = e => {
   applyAuth(false);
   askEditAuth(null);
 };
+$('btnAnClose').onclick = () => $('ovAnalyze').classList.add('hidden');
+$('btnAnReload').onclick = () => loadStructure();
 $('btnEditClose').onclick = () => $('ovEdit').classList.add('hidden');
-$('btnEditReload').onclick = () => { loadParams(); loadStructure(); };
+$('btnEditReload').onclick = () => loadParams();
 $('btnOldClose').onclick = () => $('ovOld').classList.add('hidden');
 $('btnOldReload').onclick = () => openOld(editCtx.cardId, editCtx.lib);
 $('btnSave').onclick = () => saveSettings(true);
