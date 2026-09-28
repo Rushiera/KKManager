@@ -32,6 +32,12 @@ namespace KKManager.Core
         /// <summary>XML 被读取上限截断（关键帧数只统计了已读部分）。</summary>
         public bool Truncated { get; set; }
 
+        /// <summary>sceneInfo 里 interpolableGroup 数量（被 timeline 驱动的插值组 / 轨道——每个挂在场景对象上）。</summary>
+        public int Groups { get; set; }
+
+        /// <summary>sceneInfo 里最长关键帧时刻（秒）——**不等于 timeline 长度**（实测 67 vs 71.507 · 130 vs 242），两者分开呈现。</summary>
+        public double MaxKeyframeTime { get; set; }
+
         /// <summary>实际播放时长（秒）= 原时长 / timeScale——播放时钟走 Unity 缩放时间，timeScale 越大越快。</summary>
         public double RealSeconds { get; set; }
 
@@ -57,12 +63,16 @@ namespace KKManager.Core
         private static readonly byte[] ScaleNeedle = Encoding.ASCII.GetBytes("timeScale=\"");
         /// <summary>关键帧元素锚点——&lt;keyframe 。</summary>
         private static readonly byte[] KeyframeNeedle = Encoding.ASCII.GetBytes("<keyframe ");
+        /// <summary>插值组元素锚点——&lt;interpolableGroup 。</summary>
+        private static readonly byte[] GroupNeedle = Encoding.ASCII.GetBytes("<interpolableGroup ");
+        /// <summary>时刻属性锚点——time="（关键帧时刻）。</summary>
+        private static readonly byte[] TimeNeedle = Encoding.ASCII.GetBytes("time=\"");
         /// <summary>首轮尾部窗口——16 MB（实测条目距文件尾最大约 12.5 MB）。</summary>
         private const long TailNear = 16L * 1024 * 1024;
         /// <summary>次轮尾部窗口——64 MB（首轮未命中再放大一档）。</summary>
         private const long TailFar = 64L * 1024 * 1024;
-        /// <summary>sceneInfo XML 的读取上限——4 MB（超出只统计已读部分的关键帧）。</summary>
-        private const int MaxXmlRead = 4 * 1024 * 1024;
+        /// <summary>sceneInfo XML 的读取上限——16 MB（超出只统计已读部分；实测最长 XML 9.6 MB）。</summary>
+        private const int MaxXmlRead = 16 * 1024 * 1024;
 
         /// <summary>读一张场景卡的 timeline 数据（path = 卡片文件；imageEnd = 图片区结束偏移）。</summary>
         public static TimelineInfo Read(string path, long imageEnd)
@@ -162,7 +172,7 @@ namespace KKManager.Core
             return info;
         }
 
-        /// <summary>读 sceneInfo XML（上限 4 MB）——取 duration / timeScale / 关键帧数 / 空轴标记。</summary>
+        /// <summary>读 sceneInfo XML（上限 16 MB）——取 duration / timeScale / 关键帧数 / 插值组数 / 最长关键帧时刻 / 空轴标记。</summary>
         private static void ReadXml(FileStream fs, long xmlAt, int xmlLen, TimelineInfo info)
         {
             int take = xmlLen > MaxXmlRead ? MaxXmlRead : xmlLen;
@@ -197,17 +207,10 @@ namespace KKManager.Core
             }
             info.RealSeconds = info.Duration / info.TimeScale;
 
-            int keys = 0;
-            for (int i = 0; i <= n - KeyframeNeedle.Length; i = i + 1)
-            {
-                if (xml[i] == KeyframeNeedle[0] && MatchAt(xml, i, KeyframeNeedle))
-                {
-                    keys = keys + 1;
-                    i = i + KeyframeNeedle.Length;
-                }
-            }
-            info.Keyframes = keys;
-            info.IsEmpty = keys == 0 && !info.Truncated;
+            info.Keyframes = CountNeedle(xml, n, KeyframeNeedle);
+            info.Groups = CountNeedle(xml, n, GroupNeedle);
+            info.MaxKeyframeTime = MaxQuotedNumber(xml, n, TimeNeedle);
+            info.IsEmpty = info.Keyframes == 0 && !info.Truncated;
         }
 
         /// <summary>在 [from, to) 区间流式找 timeline 条目锚点，返回文件偏移（未命中 -1）。</summary>
@@ -274,6 +277,51 @@ namespace KKManager.Core
                 return sb.ToString();
             }
             return null;
+        }
+        /// <summary>统计缓冲里 needle 出现的次数。</summary>
+        private static int CountNeedle(byte[] buf, int n, byte[] needle)
+        {
+            int count = 0;
+            for (int i = 0; i <= n - needle.Length; i = i + 1)
+            {
+                if (buf[i] == needle[0] && MatchAt(buf, i, needle))
+                {
+                    count = count + 1;
+                    i = i + needle.Length;
+                }
+            }
+            return count;
+        }
+        /// <summary>扫全缓冲里 needle 之后带引号的数值文本，取最大值；没有返回 0。</summary>
+        private static double MaxQuotedNumber(byte[] buf, int n, byte[] needle)
+        {
+            double best = 0;
+            for (int i = 0; i <= n - needle.Length; i = i + 1)
+            {
+                if (buf[i] != needle[0] || !MatchAt(buf, i, needle))
+                {
+                    continue;
+                }
+                var sb = new StringBuilder();
+                int p = i + needle.Length;
+                while (p < n)
+                {
+                    byte b = buf[p];
+                    bool ok = (b >= 0x30 && b <= 0x39) || b == 0x2E || b == 0x2D;
+                    if (!ok)
+                    {
+                        break;
+                    }
+                    sb.Append((char)b);
+                    p = p + 1;
+                }
+                double v;
+                if (double.TryParse(sb.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out v) && v > best)
+                {
+                    best = v;
+                }
+            }
+            return best;
         }
 
         /// <summary>在缓冲区指定位置匹配字节序列。</summary>

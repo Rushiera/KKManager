@@ -42,9 +42,9 @@
   .item.s-cold{border-color:var(--gray)}
   .item.s-miss{border-color:var(--red)}
   .item .thumb{width:100%;aspect-ratio:252/352;background:#0e1013 center/cover no-repeat;display:block}
-  /* 场景卡（sd）是 16:9 横版（实测 1600×900 / 320×180）——按自身比例显示，并在网格里占两列宽 */
+  /* 场景卡（sd）是 16:9 横版（实测 1600×900 / 320×180）——按自身比例显示；卡片页网格里占一列（与人物卡同列宽、无留白——约合原两列宽的 48% 宽 / 59% 高）· 矮卡不被行高拉伸 */
   .item.t-sd .thumb{aspect-ratio:16/9}
-  .grid .item.t-sd{grid-column:span 2}
+  .grid .item.t-sd{align-self:start}
   .mzrow .item.t-sd{flex:0 0 240px;width:240px}
   .mzrow.open .item.t-sd{grid-column:span 2}
   .item .meta{padding:6px 8px;font-size:12px}
@@ -167,6 +167,12 @@
   .edkv{width:100%;border-collapse:collapse;font-size:12px}
   .edkv th{width:132px;text-align:left;color:var(--dim);font-weight:600;padding:3px 8px 3px 0;vertical-align:top;white-space:nowrap}
   .edkv td{padding:3px 0}
+  /* 卡类型配色（概览）——人物卡 蓝 · 服装卡 金 · 场景卡 紫 · 未识别 灰；色点与文字同色 */
+  .ct-chara{color:var(--accent)}
+  .ct-clothes{color:var(--gold)}
+  .ct-sd{color:#c08cff}
+  .ct-none{color:var(--dim)}
+  .ctdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:currentColor}
   .edimg{display:flex;flex-wrap:wrap;gap:8px}
   .edimg .cell{width:104px;font-size:11px;color:var(--dim);text-align:center;line-height:1.25}
   .edimg img{width:100px;height:100px;object-fit:contain;background:#0b0d10;border:1px solid var(--line);border-radius:6px;display:block;margin-bottom:3px}
@@ -525,7 +531,7 @@
   <div class="modal wide">
     <header><b>卡片分析</b> <span class="dim" id="anTitle"></span></header>
     <div class="body">
-      <div class="dim" id="anHint" style="font-size:12px;margin-bottom:8px">卡片文件的结构分析——卡类型 / 卡面预览图 / 内嵌贴图 / mod 声明区 / 服装部件 / 数据块目录 / 写入插件 / 数据区头段 / 场景卡 timeline 长度。<b>只读</b>：不改动卡片文件，也不需要编辑授权。改字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）走左侧那枚「编辑卡片」。</div>
+      <div class="dim" id="anHint" style="font-size:12px;margin-bottom:8px">卡片文件的结构分析——卡类型 / 卡面预览图 / 内嵌贴图 / mod 声明区 / 服装部件 / <b>服装槽位（七套：服装 + 饰品）</b> / 数据块目录 / 写入插件 / 数据区头段 / 场景卡 timeline 长度。<b>只读</b>：不改动卡片文件，也不需要编辑授权。改字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 是否接受）走左侧那枚「编辑卡片」。</div>
       <div id="anSections"></div>
     </div>
     <footer>
@@ -664,6 +670,14 @@ function cardTypeName(t){
   if(t.indexOf('Chara') >= 0){ return '人物卡（character）'; }
   return esc(t);
 }
+/* 卡类型配色类——概览里给三种卡类型明确颜色标注（人物卡 蓝 · 服装卡 金 · 场景卡 紫） */
+function cardTypeClass(t){
+  if(!t){ return 'ct-none'; }
+  if(t === 'sd'){ return 'ct-sd'; }
+  if(t.indexOf('Clothes') >= 0){ return 'ct-clothes'; }
+  if(t.indexOf('Chara') >= 0){ return 'ct-chara'; }
+  return 'ct-none';
+}
 function chunkTableHtml(chunks){
   let html = '<table class="list edchunk"><thead><tr><th style="width:150px">偏移</th><th style="width:70px">类型</th><th style="width:150px">数据长度</th><th>CRC</th></tr></thead><tbody>';
   (chunks||[]).forEach(c => {
@@ -688,7 +702,50 @@ function imageGridHtml(d){
   });
   return html + '</div><div class="dim" style="margin-top:8px;font-size:12px">缩略图按需加载（滚动到才读）；点缩略图在新标签页看大图。</div>';
 }
-function renderStructure(st, d, tl){
+/* 颜色色块——每组的底色 / 图案色画成小方框（悬停看该组原文） */
+function colorChips(colors){
+  if(!colors || !colors.length){ return ''; }
+  let out = '';
+  colors.forEach(txt => {
+    const m = String(txt).match(/#[0-9A-F]{6}/g);
+    if(!m || !m.length){ return; }
+    out += `<span title="${esc(txt)}" style="display:inline-block;width:10px;height:10px;margin-left:2px;border:1px solid #444;background:${m[0]};vertical-align:-1px"></span>`;
+    if(m[1]){
+      out += `<span title="${esc(txt)}" style="display:inline-block;width:10px;height:10px;margin-left:1px;border:1px solid #444;background:${m[1]};vertical-align:-1px"></span>`;
+    }
+  });
+  return out;
+}
+/* 服装槽位（Coordinate 块）渲染——七套槽位，每套：非空服装 + 非空饰品 + 化妆（空槽只计数，不铺满） */
+function coordHtml(co){
+  let html = '';
+  (co.outfits||[]).forEach(o => {
+    const cl = (o.clothes||[]).filter(p => p.id !== 0);
+    const ac = (o.accessories||[]).filter(p => p.id !== 0);
+    html += '<div style="border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:6px">';
+    html += `<div><b>[${o.index}] ${esc(o.typeName)}</b> <span class="dim">服装 ${cl.length} 件 · 饰品 ${ac.length} 件 · 化妆 ${o.enableMakeup ? '开' : '关'}${o.makeupText ? ' · ' + esc(o.makeupText) : ''}</span></div>`;
+    cl.forEach(p => {
+      const first = (p.colors||[]).length ? `<span class="dim mono" style="font-size:11px"> ${esc(p.colors[0])}</span>` : '';
+      html += `<div style="font-size:12px;line-height:1.9;padding-left:12px">服装 <b>${esc(p.slot)}</b>：<span class="mono">id=${p.id}</span> · 袖型 ${p.sleevesType} · 徽章 ${p.emblemeId}/${p.emblemeId2} · 隐藏 ${p.hideOptA ? '是' : '否'}/${p.hideOptB ? '是' : '否'}${colorChips(p.colors)}${first}</div>`;
+    });
+    ac.forEach(p => {
+      const first = (p.colors||[]).length ? `<span class="dim mono" style="font-size:11px"> ${esc(p.colors[0])}</span>` : '';
+      html += `<div style="font-size:12px;line-height:1.9;padding-left:12px">饰品 <b>#${p.index} ${esc(p.typeName)}</b>：<span class="mono">id=${p.id}</span> · 挂点 ${esc(p.parentName)}${colorChips(p.colors)}${first}</div>`;
+    });
+    (o.warnings||[]).forEach(w => { html += `<div style="color:var(--yellow);font-size:11px;padding-left:12px">${esc(w)}</div>`; });
+    html += '</div>';
+  });
+  (co.warnings||[]).forEach(w => { html += `<div style="color:var(--yellow);font-size:11px">${esc(w)}</div>`; });
+  return html;
+}
+function secText(s){
+  if(s === null || s === undefined || !isFinite(Number(s))) return '—';
+  let cs = Math.round(Number(s)*100);
+  if(cs < 0) cs = 0;
+  const m = Math.floor(cs/6000), r = Math.floor((cs%6000)/100), f = cs%100;
+  return String(m).padStart(2,'0')+':'+String(r).padStart(2,'0')+'.'+String(f).padStart(2,'0');
+}
+function renderStructure(st, d, tl, co, sc, tlo){
   if(!st){ $('anSections').innerHTML = '<span class="dim">没有结构数据</span>'; return; }
   const c = anCtx;
   $('anTitle').textContent = st.fileName || '';
@@ -705,7 +762,7 @@ function renderStructure(st, d, tl){
   const rows = [
     ['文件', `<span class="mono dim">${esc(st.filePath||'')}</span>`],
     ['大小 / 改于', `<b>${fmt(st.size)}</b> 字节 · ${esc(st.mtime||'')}`],
-    ['卡类型', `<b>${cardTypeName(st.cardType)}</b> <span class="dim mono">${esc(st.cardType||'')}</span>`],
+    ['卡类型', `<span class="ctdot ${cardTypeClass(st.cardType)}"></span><b class="${cardTypeClass(st.cardType)}">${cardTypeName(st.cardType)}</b> <span class="dim mono">${esc(st.cardType||'')}</span>`],
     ['角色名', d && d.charName ? `<b>${esc(d.charName)}</b>` : '<span class="dim">&lt;头段未记录&gt;</span>'],
     ['数据版本', esc(st.dataVersion||'<无>')],
     ['卡面预览图', `${imgEnd} 字节（占文件 ${pctFile}）· PNG 块 ${(st.chunks||[]).length} 个`],
@@ -714,15 +771,24 @@ function renderStructure(st, d, tl){
     ['mod 声明', `<b>${refs.length}</b> 条 → 去重 <b>${uniq.size}</b> 个 mod`],
     ['写入数据的插件', d ? `<b>${(d.pluginNames||[]).length}</b> 个` : '<span class="dim">—</span>'],
     ['服装部件', d ? `<b>${(d.parts||[]).length}</b> 件` : '<span class="dim">—</span>'],
+    ['服装槽位', co && !co.error ? `<b>${(co.outfits||[]).length}</b> 套 · 服装 9 槽 + 饰品 20 槽（Coordinate 块）` : '<span class="dim">—</span>'],
     ['数据块目录', d && (d.blocks||[]).length ? `<b>${d.blocks.length}</b> 条` : '<span class="dim">无（老格式）</span>']
   ];
   if(d && d.faceImageSize > 0){
     rows.push(['卡面脸图', `${fmt(d.faceImageSize)} 字节 @${fmt(d.faceImageOffset)}`]);
   }
-  /* 场景卡（sd）才带 timeline——Timeline 插件条目里的长度（原值 + 折算实际播放时长） */
+  /* 场景卡（sd）才带 timeline——Timeline 插件条目里的长度（原值 + 折算实际播放时长）+ 时间轴深度 */
   if(st.cardType === 'sd'){
     const t = tl ? esc(tl) : '<span class="dim">—</span>';
-    rows.push(['timeline', `<b>${t}</b>`]);
+    let extra = '';
+    if(tlo && tlo.hasEntry && !tlo.isEmpty){
+      extra = `<br><span class="dim" style="font-size:11px">关键帧 ${fmt(tlo.keyframes)} · 插值组 ${tlo.groups} · 最长关键帧 ${secText(tlo.maxKeyframeTime)}（与 timeline 长度口径不同，两者不等）</span>`;
+    }
+    rows.push(['timeline', `<b>${t}</b>${extra}`]);
+    if(sc && !sc.error){
+      rows.push(['内嵌角色数据', `<b>${sc.charaDataCount}</b> 份（场景里带的角色卡数据）`]);
+      rows.push(['场景插件条目', `<b>${(sc.plugins||[]).length}</b> 条（数据区里的插件数据）`]);
+    }
   }
   /* 概览末：内嵌贴图第一张（第一行第一列）直接摆出来 */
   let firstImg = '';
@@ -760,6 +826,11 @@ function renderStructure(st, d, tl){
     html += secHtml('服装部件（parts）', d.parts.length + ' 件', t + '</tbody></table>', false);
   }
 
+  /* ④b 服装槽位（Coordinate 块）——七套槽位，每套含服装 9 槽 + 饰品 20 槽 + 化妆 */
+  if(co && !co.error && (co.outfits||[]).length){
+    html += secHtml('服装槽位（Coordinate）', co.outfits.length + ' 套 · 服装 9 槽 + 饰品 20 槽', coordHtml(co), false);
+  }
+
   /* ⑤ 数据块目录 */
   if(d && (d.blocks||[]).length){
     let t = '<table class="list"><thead><tr><th>块名</th><th style="width:100px">版本</th><th style="width:140px">位置</th><th style="width:170px">大小</th></tr></thead><tbody>';
@@ -774,6 +845,17 @@ function renderStructure(st, d, tl){
     let t = '<div class="mono" style="font-size:12px;line-height:1.7">';
     d.pluginNames.forEach(n => { t += '· ' + esc(n) + '<br>'; });
     html += secHtml('写入数据的插件（KKEx）', d.pluginNames.length + ' 个', t + '</div>', false);
+  }
+
+  /* ⑥b 场景插件（sd 专有）——数据区里的插件数据条目（timeline / kkpe / vnge_* 等） */
+  if(sc && !sc.error && (sc.plugins||[]).length){
+    let t = '<table class="list"><thead><tr><th>插件键</th><th style="width:200px">值形态</th><th style="width:130px">字节数</th><th style="width:150px">偏移</th></tr></thead><tbody>';
+    sc.plugins.forEach(p => {
+      t += `<tr><td class="mono"><b>${esc(p.key||'')}</b></td><td>${esc(p.shape||'')}</td><td class="mono">${p.bytes > 0 ? fmt(p.bytes) : '<span class="dim">—</span>'}</td><td class="mono dim">${fmt(p.offset)}</td></tr>`;
+    });
+    t += '</tbody></table><div class="dim" style="margin-top:6px;font-size:12px">内嵌角色卡数据 <b>' + sc.charaDataCount + '</b> 份（数据块目录命中）· 数据区已扫描 ' + fmt(sc.scannedBytes) + ' 字节 · 插件条目 = 该场景里各插件写下的数据（timeline / kkpe / VNGE 各子系统）</div>';
+    (sc.warnings||[]).forEach(w => { t += `<div style="color:var(--yellow);font-size:11px">${esc(w)}</div>`; });
+    html += secHtml('场景插件（数据区条目）', (sc.plugins||[]).length + ' 条', t, false);
   }
 
   /* ⑦ PNG 块表 */
@@ -808,7 +890,7 @@ async function loadStructure(){
       $('anSections').innerHTML = '<span style="color:var(--red)">'+esc(r.error)+'</span>';
       return;
     }
-    renderStructure(r.structure, r.detail, r.timelineText);
+    renderStructure(r.structure, r.detail, r.timelineText, r.coords, r.scene, r.timeline);
     $('anMsg').textContent = '只读分析——软件不会改动卡片文件';
   }catch(e){
     $('anMsg').textContent = '结构读取失败';
