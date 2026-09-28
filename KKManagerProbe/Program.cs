@@ -137,10 +137,19 @@ namespace KKManager.Probe
                     return CompareRange(args[1], args[2], long.Parse(args[3]), long.Parse(args[4]), long.Parse(args[5]));
                 case "tlinfo":
                     return TlInfo(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
+                case "mp":
+                    if (args.Length < 6)
+                    {
+                        Console.Error.WriteLine("用法: mp <file> <out.txt> <start> <len> [最大深度]");
+                        return 2;
+                    }
+                    return MpDump(args[1], args[2], long.Parse(args[3]), long.Parse(args[4]), args.Length > 5 ? int.Parse(args[5]) : 6);
                 case "htmlcheck":
                     return ProbeHtml(args[1], args[2]);
                 case "extractjs":
                     return ExtractJs(args[1], args[2]);
+                case "sditems":
+                    return SdItems(args[1], args[2]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
@@ -3822,6 +3831,813 @@ namespace KKManager.Probe
             int minutes = seconds / 60;
             int rest = seconds % 60;
             return minutes.ToString("00") + ":" + rest.ToString("00") + ".00";
+        }
+
+        /// <summary>MessagePack 结构 dump——把文件指定区间按 MessagePack 递归展开成文本（只读侦察用）。</summary>
+        private static int MpDump(string src, string outPath, long start, long len, int maxDepth)
+        {
+            if (!File.Exists(src))
+            {
+                Console.Error.WriteLine("文件不存在: " + src);
+                return 2;
+            }
+            long fileLen = new FileInfo(src).Length;
+            if (start < 0 || start >= fileLen)
+            {
+                Console.Error.WriteLine("起点超出文件范围: " + start);
+                return 2;
+            }
+            long take = len <= 0 ? fileLen - start : len;
+            if (take > 4L * 1024L * 1024L)
+            {
+                take = 4L * 1024L * 1024L;
+            }
+            byte[] buf = new byte[(int)take];
+            int n;
+            using (var fs = File.OpenRead(src))
+            {
+                fs.Position = start;
+                n = ReadFull(fs, buf, buf.Length);
+            }
+            string parent = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(parent))
+            {
+                Directory.CreateDirectory(parent);
+            }
+            using (var sw = new StreamWriter(outPath, false, new UTF8Encoding(true)))
+            {
+                sw.WriteLine("# MessagePack dump —— " + src);
+                sw.WriteLine("# 区间 @" + start.ToString("N0") + " + " + n.ToString("N0") + " 字节 · 最大深度 " + maxDepth);
+                sw.WriteLine();
+                int pos = 0;
+                MpDumpValue(buf, ref pos, n, 0, maxDepth, sw, "", start);
+                sw.WriteLine();
+                sw.WriteLine("# 解析结束于 @" + (start + pos).ToString("N0") + " · 区间内剩余 " + (n - pos).ToString("N0") + " 字节");
+            }
+            Console.WriteLine("mp: " + outPath);
+            return 0;
+        }
+
+        /// <summary>
+        /// 场景卡插件数据侦察——数据区里的插件条目清单（键名 + 值形态 + 长度），
+        /// 另统计内嵌角色数据份数（lstInfo 命中）与 timeline 深度（关键帧 / 最大时刻 / 插值组数）。
+        /// </summary>
+        private static int SdItems(string src, string outPath)
+        {
+            if (!File.Exists(src))
+            {
+                Console.Error.WriteLine("文件不存在: " + src);
+                return 2;
+            }
+            long len = new FileInfo(src).Length;
+            long dataStart;
+            string version = null;
+            byte[] sceneInfoNeedle = { 0xA9, 0x73, 0x63, 0x65, 0x6E, 0x65, 0x49, 0x6E, 0x66, 0x6F };
+            byte[] mainNeedle = { 0xA4, 0x6D, 0x61, 0x69, 0x6E };
+            byte[] lstNeedle = { 0xA7, 0x6C, 0x73, 0x74, 0x49, 0x6E, 0x66, 0x6F };
+            byte[] keyframeNeedle = Encoding.ASCII.GetBytes("<keyframe ");
+            byte[] groupNeedle = Encoding.ASCII.GetBytes("<interpolableGroup ");
+            byte[] timeNeedle = Encoding.ASCII.GetBytes("time=\"");
+
+            using (var fs = File.OpenRead(src))
+            {
+                dataStart = ProbeFindPngEnd(fs, len);
+                if (dataStart < 0)
+                {
+                    Console.Error.WriteLine("未找到 IEND——非卡片 PNG");
+                    return 2;
+                }
+                fs.Position = dataStart;
+                var br = new BinaryReader(fs);
+                string first = Read7BitString(br);
+                if (first == null || !IsVersionLike(first))
+                {
+                    Console.Error.WriteLine("不是场景卡（数据区首段不是版本号）");
+                    return 2;
+                }
+                version = first;
+            }
+
+            var seen = new HashSet<long>();
+            var names = new List<string>();
+            var shapes = new List<string>();
+            var offs = new List<long>();
+            var sizes = new List<long>();
+            int lstCount = 0;
+            long timelineXmlAt = 0;
+            int timelineXmlLen = 0;
+
+            using (var fs = File.OpenRead(src))
+            {
+                const int BufSize = 1 << 20;
+                byte[] buf = new byte[BufSize + 256];
+                long pos = dataStart;
+                long consumed = dataStart;
+                int carry = 0;
+                while (pos < len)
+                {
+                    long want = len - pos;
+                    if (want > BufSize)
+                    {
+                        want = BufSize;
+                    }
+                    fs.Position = pos;
+                    int read = fs.Read(buf, carry, (int)want);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+                    pos = pos + read;
+                    long baseOff = consumed - carry;
+                    consumed = consumed + read;
+                    int total = carry + read;
+
+                    for (int i = 0; i <= total - lstNeedle.Length; i = i + 1)
+                    {
+                        if (buf[i] == lstNeedle[0] && MatchAt(buf, i, lstNeedle))
+                        {
+                            lstCount = lstCount + 1;
+                        }
+                    }
+
+                    for (int i = 64; i <= total - 96; i = i + 1)
+                    {
+                        if (buf[i] != 0x92 || buf[i + 1] != 0x00)
+                        {
+                            continue;
+                        }
+                        long at = baseOff + i;
+                        if (!seen.Add(at))
+                        {
+                            continue;
+                        }
+                        string name = ReadKeyBack(buf, i);
+                        if (name == null)
+                        {
+                            continue;
+                        }
+                        int shapeStart = i + 3;
+                        string shape = null;
+                        long payloadAt = 0;
+                        long payloadLen = 0;
+                        if (MatchAt(buf, shapeStart, sceneInfoNeedle))
+                        {
+                            shape = "sceneInfo(XML)";
+                            int sh = shapeStart + sceneInfoNeedle.Length;
+                            byte hb = buf[sh];
+                            if (hb == 0xD9)
+                            {
+                                payloadLen = buf[sh + 1];
+                                payloadAt = at + (sh + 2 - i);
+                            }
+                            else if (hb == 0xDA)
+                            {
+                                payloadLen = (buf[sh + 1] << 8) | buf[sh + 2];
+                                payloadAt = at + (sh + 3 - i);
+                            }
+                            else if (hb == 0xDB)
+                            {
+                                payloadLen = ((long)buf[sh + 1] << 24) | ((long)buf[sh + 2] << 16) | ((long)buf[sh + 3] << 8) | buf[sh + 4];
+                                payloadAt = at + (sh + 5 - i);
+                            }
+                            else
+                            {
+                                shape = "sceneInfo(未识别头 0x" + hb.ToString("X2") + ")";
+                            }
+                        }
+                        else if (MatchAt(buf, shapeStart, mainNeedle))
+                        {
+                            int sh = shapeStart + mainNeedle.Length;
+                            byte hb = buf[sh];
+                            if (hb >= 0xA0 && hb <= 0xBF)
+                            {
+                                shape = "main(短串)";
+                                payloadLen = hb - 0xA0;
+                            }
+                            else if (hb == 0xD9)
+                            {
+                                shape = "main(JSON)";
+                                payloadLen = buf[sh + 1];
+                            }
+                            else if (hb == 0xDA)
+                            {
+                                shape = "main(JSON)";
+                                payloadLen = (buf[sh + 1] << 8) | buf[sh + 2];
+                            }
+                            else if (hb == 0xDB)
+                            {
+                                shape = "main(JSON)";
+                                payloadLen = ((long)buf[sh + 1] << 24) | ((long)buf[sh + 2] << 16) | ((long)buf[sh + 3] << 8) | buf[sh + 4];
+                            }
+                            else
+                            {
+                                shape = "main(其它 0x" + hb.ToString("X2") + ")";
+                            }
+                        }
+                        if (shape == null)
+                        {
+                            continue;
+                        }
+                        offs.Add(at);
+                        names.Add(name);
+                        shapes.Add(shape);
+                        sizes.Add(payloadLen);
+                        if (name == "timeline" && timelineXmlLen == 0)
+                        {
+                            timelineXmlAt = payloadAt;
+                            timelineXmlLen = (int)payloadLen;
+                        }
+                    }
+
+                    int newCarry = total < 64 ? total : 64;
+                    Array.Copy(buf, total - newCarry, buf, 0, newCarry);
+                    carry = newCarry;
+                }
+            }
+
+            int keys = 0;
+            int groups = 0;
+            double maxTime = 0;
+            if (timelineXmlLen > 0 && timelineXmlLen <= 16 * 1024 * 1024)
+            {
+                byte[] xml = new byte[timelineXmlLen];
+                int n;
+                using (var fs = File.OpenRead(src))
+                {
+                    fs.Position = timelineXmlAt;
+                    n = ReadFull(fs, xml, xml.Length);
+                }
+                for (int i = 0; i <= n - keyframeNeedle.Length; i = i + 1)
+                {
+                    if (xml[i] == keyframeNeedle[0] && MatchAt(xml, i, keyframeNeedle))
+                    {
+                        keys = keys + 1;
+                        i = i + keyframeNeedle.Length;
+                    }
+                }
+                for (int i = 0; i <= n - groupNeedle.Length; i = i + 1)
+                {
+                    if (xml[i] == groupNeedle[0] && MatchAt(xml, i, groupNeedle))
+                    {
+                        groups = groups + 1;
+                        i = i + groupNeedle.Length;
+                    }
+                }
+                for (int i = 0; i <= n - timeNeedle.Length; i = i + 1)
+                {
+                    if (xml[i] != timeNeedle[0] || !MatchAt(xml, i, timeNeedle))
+                    {
+                        continue;
+                    }
+                    var sb = new StringBuilder();
+                    int p = i + timeNeedle.Length;
+                    while (p < n)
+                    {
+                        byte b = xml[p];
+                        if (!((b >= 0x30 && b <= 0x39) || b == 0x2E))
+                        {
+                            break;
+                        }
+                        sb.Append((char)b);
+                        p = p + 1;
+                    }
+                    double v;
+                    if (double.TryParse(sb.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) && v > maxTime)
+                    {
+                        maxTime = v;
+                    }
+                }
+            }
+
+            string parent = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(parent))
+            {
+                Directory.CreateDirectory(parent);
+            }
+            using (var sw = new StreamWriter(outPath, false, new UTF8Encoding(true)))
+            {
+                sw.WriteLine("# 场景卡插件数据侦察 —— " + src);
+                sw.WriteLine("# 大小 " + len.ToString("N0") + " 字节 · 数据区起点 " + dataStart.ToString("N0") + " · 场景版本 " + version);
+                sw.WriteLine();
+                sw.WriteLine("## 插件数据条目（" + offs.Count.ToString("N0") + " 条）");
+                for (int i = 0; i < offs.Count; i = i + 1)
+                {
+                    sw.WriteLine("- @" + offs[i].ToString("N0") + "  " + names[i] + "  " + shapes[i] + "  " + (sizes[i] > 0 ? (sizes[i].ToString("N0") + " 字节") : "长度未解析"));
+                }
+                sw.WriteLine();
+                sw.WriteLine("## 内嵌角色数据（lstInfo 命中）: " + lstCount.ToString("N0") + " 份");
+                sw.WriteLine("## timeline 深度: 关键帧 " + keys.ToString("N0") + " · 插值组 " + groups.ToString("N0")
+                    + " · 最大关键帧时刻 " + maxTime.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " 秒 · XML " + timelineXmlLen.ToString("N0") + " 字节");
+            }
+            Console.WriteLine("sditems: " + outPath);
+            return 0;
+        }
+
+        /// <summary>从 0x92 位置往前回溯相邻的 fixstr 键名；不是 ASCII 名字返回 null。</summary>
+        private static string ReadKeyBack(byte[] buf, int at)
+        {
+            for (int n = 1; n <= 31; n = n + 1)
+            {
+                int hp = at - 1 - n;
+                if (hp < 0)
+                {
+                    return null;
+                }
+                if (buf[hp] != (byte)(0xA0 | n))
+                {
+                    continue;
+                }
+                var sb = new StringBuilder();
+                for (int k = 0; k < n; k = k + 1)
+                {
+                    byte c = buf[hp + 1 + k];
+                    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+                    if (!ok)
+                    {
+                        return null;
+                    }
+                    sb.Append((char)c);
+                }
+                return sb.ToString();
+            }
+            return null;
+        }
+
+        /// <summary>递归 dump 一个 MessagePack 值（prefix 为行首前缀，用于 map 键）。</summary>
+        private static void MpDumpValue(byte[] buf, ref int pos, int end, int depth, int maxDepth, StreamWriter sw, string prefix, long baseOff)
+        {
+            string indent = new string(' ', depth * 2);
+            if (pos >= end)
+            {
+                sw.WriteLine(indent + prefix + "<越界>");
+                return;
+            }
+            int at = pos;
+            byte b = buf[pos];
+            if (b <= 0x7F)
+            {
+                pos = pos + 1;
+                sw.WriteLine(indent + prefix + b + "(@" + (baseOff + at) + ")");
+                return;
+            }
+            if (b >= 0xE0)
+            {
+                pos = pos + 1;
+                sw.WriteLine(indent + prefix + (b - 256) + "(@" + (baseOff + at) + ")");
+                return;
+            }
+            if (b >= 0x80 && b <= 0x8F)
+            {
+                pos = pos + 1;
+                MpDumpMap(buf, ref pos, end, b - 0x80, depth, maxDepth, sw, prefix, baseOff, at);
+                return;
+            }
+            if (b >= 0x90 && b <= 0x9F)
+            {
+                pos = pos + 1;
+                MpDumpArray(buf, ref pos, end, b - 0x90, depth, maxDepth, sw, prefix, baseOff, at);
+                return;
+            }
+            if (b >= 0xA0 && b <= 0xBF)
+            {
+                pos = pos + 1;
+                string s = MpReadStrBody(buf, ref pos, end, b - 0xA0);
+                sw.WriteLine(indent + prefix + "\"" + s + "\"(@" + (baseOff + at) + " len " + (b - 0xA0) + ")");
+                return;
+            }
+            switch (b)
+            {
+                case 0xC0:
+                    pos = pos + 1;
+                    sw.WriteLine(indent + prefix + "nil(@" + (baseOff + at) + ")");
+                    return;
+                case 0xC2:
+                    pos = pos + 1;
+                    sw.WriteLine(indent + prefix + "false(@" + (baseOff + at) + ")");
+                    return;
+                case 0xC3:
+                    pos = pos + 1;
+                    sw.WriteLine(indent + prefix + "true(@" + (baseOff + at) + ")");
+                    return;
+                case 0xCA:
+                    pos = pos + 1;
+                    if (pos + 4 <= end)
+                    {
+                        float f = MpFloat32(buf, pos);
+                        pos = pos + 4;
+                        sw.WriteLine(indent + prefix + "float " + f.ToString("0.#####") + "(@" + (baseOff + at) + ")");
+                    }
+                    else
+                    {
+                        pos = end;
+                    }
+                    return;
+                case 0xCB:
+                    pos = pos + 1;
+                    if (pos + 8 <= end)
+                    {
+                        double d = MpFloat64(buf, pos);
+                        pos = pos + 8;
+                        sw.WriteLine(indent + prefix + "double " + d.ToString("0.#####") + "(@" + (baseOff + at) + ")");
+                    }
+                    else
+                    {
+                        pos = end;
+                    }
+                    return;
+                case 0xCC:
+                case 0xCD:
+                case 0xCE:
+                case 0xCF:
+                    {
+                        int width = 1 << (b - 0xCC);
+                        pos = pos + 1;
+                        long v = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            v = (v << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        sw.WriteLine(indent + prefix + "uint " + v + "(@" + (baseOff + at) + ")");
+                        return;
+                    }
+                case 0xD0:
+                case 0xD1:
+                case 0xD2:
+                case 0xD3:
+                    {
+                        int width = 1 << (b - 0xD0);
+                        pos = pos + 1;
+                        long v = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            v = (v << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        int shift = 64 - 8 * width;
+                        long sv = (v << shift) >> shift;
+                        sw.WriteLine(indent + prefix + "int " + sv + "(@" + (baseOff + at) + ")");
+                        return;
+                    }
+                case 0xD9:
+                case 0xDA:
+                case 0xDB:
+                    {
+                        int width = b == 0xD9 ? 1 : (b == 0xDA ? 2 : 4);
+                        pos = pos + 1;
+                        long slen = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            slen = (slen << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        string s2 = MpReadStrBody(buf, ref pos, end, slen);
+                        sw.WriteLine(indent + prefix + "\"" + s2 + "\"(@" + (baseOff + at) + " len " + slen + ")");
+                        return;
+                    }
+                case 0xDC:
+                case 0xDD:
+                    {
+                        int width = b == 0xDC ? 2 : 4;
+                        pos = pos + 1;
+                        long cnt = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            cnt = (cnt << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        MpDumpArray(buf, ref pos, end, cnt, depth, maxDepth, sw, prefix, baseOff, at);
+                        return;
+                    }
+                case 0xDE:
+                case 0xDF:
+                    {
+                        int width = b == 0xDE ? 2 : 4;
+                        pos = pos + 1;
+                        long cnt = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            cnt = (cnt << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        MpDumpMap(buf, ref pos, end, cnt, depth, maxDepth, sw, prefix, baseOff, at);
+                        return;
+                    }
+                case 0xC4:
+                case 0xC5:
+                case 0xC6:
+                    {
+                        int width = b == 0xC4 ? 1 : (b == 0xC5 ? 2 : 4);
+                        pos = pos + 1;
+                        long cnt = 0;
+                        for (int i = 0; i < width && pos < end; i = i + 1)
+                        {
+                            cnt = (cnt << 8) | buf[pos];
+                            pos = pos + 1;
+                        }
+                        sw.WriteLine(indent + prefix + "bin[" + cnt + "]@" + (baseOff + at));
+                        pos = pos + (int)Math.Min(cnt, end - pos);
+                        return;
+                    }
+                default:
+                    pos = pos + 1;
+                    sw.WriteLine(indent + prefix + "?(0x" + b.ToString("X2") + ")@" + (baseOff + at));
+                    return;
+            }
+        }
+
+        /// <summary>dump 一个 MessagePack map（键按字符串读，值递归）。</summary>
+        private static void MpDumpMap(byte[] buf, ref int pos, int end, long count, int depth, int maxDepth, StreamWriter sw, string prefix, long baseOff, int at)
+        {
+            string indent = new string(' ', depth * 2);
+            sw.WriteLine(indent + prefix + "map " + count + "(@" + (baseOff + at) + ")");
+            if (depth >= maxDepth)
+            {
+                sw.WriteLine(indent + "  <深度截断>");
+                MpSkipMap(buf, ref pos, end, count);
+                return;
+            }
+            for (long i = 0; i < count; i = i + 1)
+            {
+                if (pos >= end)
+                {
+                    sw.WriteLine(indent + "  <越界>");
+                    return;
+                }
+                string key = MpReadKey(buf, ref pos, end);
+                if (key == null)
+                {
+                    sw.WriteLine(indent + "  <键读取失败 @" + (baseOff + pos) + ">");
+                    return;
+                }
+                MpDumpValue(buf, ref pos, end, depth + 1, maxDepth, sw, key + " = ", baseOff);
+            }
+        }
+
+        /// <summary>dump 一个 MessagePack 数组（浮点数组折叠成一行）。</summary>
+        private static void MpDumpArray(byte[] buf, ref int pos, int end, long count, int depth, int maxDepth, StreamWriter sw, string prefix, long baseOff, int at)
+        {
+            string indent = new string(' ', depth * 2);
+            if (count >= 6 && pos < end && (buf[pos] == 0xCA || buf[pos] == 0xCB))
+            {
+                bool f32 = buf[pos] == 0xCA;
+                int width = f32 ? 4 : 8;
+                if (pos + 1 + count * width <= end)
+                {
+                    pos = pos + 1;
+                    var sb = new StringBuilder();
+                    for (long i = 0; i < count; i = i + 1)
+                    {
+                        if (i > 0)
+                        {
+                            sb.Append(" ");
+                        }
+                        if (f32)
+                        {
+                            sb.Append(MpFloat32(buf, pos).ToString("0.###"));
+                        }
+                        else
+                        {
+                            sb.Append(MpFloat64(buf, pos).ToString("0.###"));
+                        }
+                        pos = pos + width;
+                    }
+                    sw.WriteLine(indent + prefix + (f32 ? "float32" : "float64") + "[" + count + "] " + sb + "(@" + (baseOff + at) + ")");
+                    return;
+                }
+            }
+            sw.WriteLine(indent + prefix + "array " + count + "(@" + (baseOff + at) + ")");
+            if (depth >= maxDepth)
+            {
+                sw.WriteLine(indent + "  <深度截断>");
+                MpSkipArray(buf, ref pos, end, count);
+                return;
+            }
+            for (long i = 0; i < count; i = i + 1)
+            {
+                if (pos >= end)
+                {
+                    sw.WriteLine(indent + "  <越界>");
+                    return;
+                }
+                MpDumpValue(buf, ref pos, end, depth + 1, maxDepth, sw, "#" + i + " = ", baseOff);
+            }
+        }
+
+        /// <summary>读一个 map 的键（字符串）——非字符串返回 null。</summary>
+        private static string MpReadKey(byte[] buf, ref int pos, int end)
+        {
+            if (pos >= end)
+            {
+                return null;
+            }
+            byte b = buf[pos];
+            long len;
+            if (b >= 0xA0 && b <= 0xBF)
+            {
+                len = b - 0xA0;
+                pos = pos + 1;
+            }
+            else if (b == 0xD9 || b == 0xDA || b == 0xDB)
+            {
+                int width = b == 0xD9 ? 1 : (b == 0xDA ? 2 : 4);
+                pos = pos + 1;
+                len = 0;
+                for (int i = 0; i < width && pos < end; i = i + 1)
+                {
+                    len = (len << 8) | buf[pos];
+                    pos = pos + 1;
+                }
+            }
+            else
+            {
+                return null;
+            }
+            return MpReadStrBody(buf, ref pos, end, len);
+        }
+
+        /// <summary>读字符串体（超长截断显示，指针按实际长度前进）。</summary>
+        private static string MpReadStrBody(byte[] buf, ref int pos, int end, long len)
+        {
+            if (len < 0 || pos + len > end)
+            {
+                len = Math.Max(0, end - pos);
+            }
+            string s = Encoding.UTF8.GetString(buf, pos, (int)len);
+            pos = pos + (int)len;
+            if (s.Length > 120)
+            {
+                s = s.Substring(0, 120) + "…";
+            }
+            return s;
+        }
+
+        /// <summary>读大端 float32（MessagePack 的浮点是网络字节序）。</summary>
+        private static float MpFloat32(byte[] buf, int at)
+        {
+            int bits = (buf[at] << 24) | (buf[at + 1] << 16) | (buf[at + 2] << 8) | buf[at + 3];
+            return BitConverter.Int32BitsToSingle(bits);
+        }
+
+        /// <summary>读大端 float64。</summary>
+        private static double MpFloat64(byte[] buf, int at)
+        {
+            long bits = ((long)buf[at] << 56) | ((long)buf[at + 1] << 48) | ((long)buf[at + 2] << 40) | ((long)buf[at + 3] << 32)
+                | ((long)buf[at + 4] << 24) | ((long)buf[at + 5] << 16) | ((long)buf[at + 6] << 8) | buf[at + 7];
+            return BitConverter.Int64BitsToDouble(bits);
+        }
+
+        /// <summary>跳过一个 MessagePack 值（不输出——深度截断处用，保证同层后续键仍可见）。</summary>
+        private static void MpSkipValue(byte[] buf, ref int pos, int end)
+        {
+            if (pos >= end)
+            {
+                return;
+            }
+            byte b = buf[pos];
+            if (b <= 0x7F || b >= 0xE0)
+            {
+                pos = pos + 1;
+                return;
+            }
+            if (b >= 0x80 && b <= 0x8F)
+            {
+                pos = pos + 1;
+                MpSkipMap(buf, ref pos, end, b - 0x80);
+                return;
+            }
+            if (b >= 0x90 && b <= 0x9F)
+            {
+                pos = pos + 1;
+                MpSkipArray(buf, ref pos, end, b - 0x90);
+                return;
+            }
+            if (b >= 0xA0 && b <= 0xBF)
+            {
+                long slen = b - 0xA0;
+                pos = pos + 1;
+                pos = (int)Math.Min(end, pos + slen);
+                return;
+            }
+            switch (b)
+            {
+                case 0xC0:
+                case 0xC2:
+                case 0xC3:
+                    pos = pos + 1;
+                    return;
+                case 0xCA:
+                    pos = (int)Math.Min(end, pos + 5L);
+                    return;
+                case 0xCB:
+                    pos = (int)Math.Min(end, pos + 9L);
+                    return;
+                case 0xCC:
+                case 0xD0:
+                    pos = (int)Math.Min(end, pos + 2L);
+                    return;
+                case 0xCD:
+                case 0xD1:
+                    pos = (int)Math.Min(end, pos + 3L);
+                    return;
+                case 0xCE:
+                case 0xD2:
+                    pos = (int)Math.Min(end, pos + 5L);
+                    return;
+                case 0xCF:
+                case 0xD3:
+                    pos = (int)Math.Min(end, pos + 9L);
+                    return;
+                case 0xD9:
+                case 0xDA:
+                case 0xDB:
+                    {
+                        int width = b == 0xD9 ? 1 : (b == 0xDA ? 2 : 4);
+                        pos = pos + 1;
+                        long slen = MpSkipUInt(buf, ref pos, end, width);
+                        pos = (int)Math.Min(end, pos + slen);
+                        return;
+                    }
+                case 0xC4:
+                case 0xC5:
+                case 0xC6:
+                    {
+                        int width = b == 0xC4 ? 1 : (b == 0xC5 ? 2 : 4);
+                        pos = pos + 1;
+                        long blen = MpSkipUInt(buf, ref pos, end, width);
+                        pos = (int)Math.Min(end, pos + blen);
+                        return;
+                    }
+                case 0xC7:
+                case 0xC8:
+                case 0xC9:
+                    {
+                        int width = b == 0xC7 ? 1 : (b == 0xC8 ? 2 : 4);
+                        pos = pos + 1;
+                        long elen = MpSkipUInt(buf, ref pos, end, width);
+                        pos = (int)Math.Min(end, pos + elen + 1);
+                        return;
+                    }
+                case 0xD4:
+                case 0xD5:
+                case 0xD6:
+                case 0xD7:
+                case 0xD8:
+                    pos = (int)Math.Min(end, pos + 2L + (1L << (b - 0xD4)));
+                    return;
+                case 0xDC:
+                case 0xDD:
+                    {
+                        int width = b == 0xDC ? 2 : 4;
+                        pos = pos + 1;
+                        long cnt = MpSkipUInt(buf, ref pos, end, width);
+                        MpSkipArray(buf, ref pos, end, cnt);
+                        return;
+                    }
+                case 0xDE:
+                case 0xDF:
+                    {
+                        int width = b == 0xDE ? 2 : 4;
+                        pos = pos + 1;
+                        long cnt = MpSkipUInt(buf, ref pos, end, width);
+                        MpSkipMap(buf, ref pos, end, cnt);
+                        return;
+                    }
+                default:
+                    pos = pos + 1;
+                    return;
+            }
+        }
+
+        /// <summary>跳过一个 MessagePack map 的内容（count 个键值对）。</summary>
+        private static void MpSkipMap(byte[] buf, ref int pos, int end, long count)
+        {
+            for (long i = 0; i < count && pos < end; i = i + 1)
+            {
+                MpSkipValue(buf, ref pos, end);
+                MpSkipValue(buf, ref pos, end);
+            }
+        }
+
+        /// <summary>跳过一个 MessagePack 数组的内容。</summary>
+        private static void MpSkipArray(byte[] buf, ref int pos, int end, long count)
+        {
+            for (long i = 0; i < count && pos < end; i = i + 1)
+            {
+                MpSkipValue(buf, ref pos, end);
+            }
+        }
+
+        /// <summary>读大端无符号整数（1..4 字节，跳过用）。</summary>
+        private static long MpSkipUInt(byte[] buf, ref int pos, int end, int width)
+        {
+            long v = 0;
+            for (int i = 0; i < width && pos < end; i = i + 1)
+            {
+                v = (v << 8) | buf[pos];
+                pos = pos + 1;
+            }
+            return v;
         }
     }
 }

@@ -1140,7 +1140,7 @@ namespace KKManager.Web
                 Results.Json(_hub.QueryCardRefs(lib, id, tier)));
 
             // 卡片文件结构（只读）——PNG 块表 + 图片区 / 数据区划分 + 数据区内容（部件 / 声明区 / 贴图 / 插件）
-            // 场景卡（sd）另带 timeline 长度（Timeline 插件条目——按卡片缓存，size + mtime 判失效）
+            // 场景卡（sd）另带 timeline 长度（Timeline 插件条目——按卡片缓存，size + mtime 判失效）+ 场景深度（插件条目 / 内嵌角色卡数据份数）
             app.MapGet("/api/card/{id}/structure", (long id, int lib) =>
             {
                 RootsConfig cfg = LoadConfig();
@@ -1153,6 +1153,8 @@ namespace KKManager.Web
                 CardDetailResult detail = null;
                 TimelineInfo timeline = null;
                 string timelineText = null;
+                CardCoordinateResult coords = null;
+                SceneInfoResult scene = null;
                 if (st.Error == null && st.ImageEnd > 0)
                 {
                     detail = CardDetail.Parse(path, st.ImageEnd);
@@ -1160,9 +1162,16 @@ namespace KKManager.Web
                     {
                         timeline = ReadTimelineCached(lib, id, path, st.ImageEnd);
                         timelineText = TimelineReader.Describe(timeline);
+                        // 场景卡（sd）深度分析——插件数据条目（timeline / kkpe / vnge_*）+ 内嵌角色卡数据份数
+                        scene = SceneReader.Read(path, st.ImageEnd);
+                    }
+                    else
+                    {
+                        // 服装 / 饰品（Coordinate 块七套槽位）——人物卡才有；非人物卡读出错误文本，前端按错误不显示
+                        coords = CardCoordinate.Read(path);
                     }
                 }
-                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detail, timeline = timeline, timelineText = timelineText });
+                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detail, timeline = timeline, timelineText = timelineText, coords = coords, scene = scene });
             });
 
             // 卡片内嵌图片缩略图（只读）——按偏移 / 长度取数据区里的 PNG，缩放为 JPEG 返回

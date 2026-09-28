@@ -322,6 +322,33 @@ namespace KKManager.Core
             }
             return false;
         }
+        /// <summary>读浮点（float32 / float64）；失败返回 false。</summary>
+        public bool TryReadDouble(out double value)
+        {
+            value = 0;
+            if (_pos >= _buf.Length)
+            {
+                return false;
+            }
+            byte b = _buf[_pos];
+            if (b == 0xCA && _pos + 5 <= _buf.Length)
+            {
+                int bits = (_buf[_pos + 1] << 24) | (_buf[_pos + 2] << 16) | (_buf[_pos + 3] << 8) | _buf[_pos + 4];
+                value = BitConverter.Int32BitsToSingle(bits);
+                _pos = _pos + 5;
+                return true;
+            }
+            if (b == 0xCB && _pos + 9 <= _buf.Length)
+            {
+                long bits = ((long)_buf[_pos + 1] << 56) | ((long)_buf[_pos + 2] << 48) | ((long)_buf[_pos + 3] << 40)
+                    | ((long)_buf[_pos + 4] << 32) | ((long)_buf[_pos + 5] << 24) | ((long)_buf[_pos + 6] << 16)
+                    | ((long)_buf[_pos + 7] << 8) | _buf[_pos + 8];
+                value = BitConverter.Int64BitsToDouble(bits);
+                _pos = _pos + 9;
+                return true;
+            }
+            return false;
+        }
         /// <summary>读布尔（MessagePack true / false）；失败返回 false。</summary>
         public bool TryReadBool(out bool value)
         {

@@ -50,6 +50,10 @@ namespace KKManager
                     return CardDetailCommand(rest);
                 case "card-timeline":
                     return CardTimelineCommand(rest);
+                case "card-scene":
+                    return CardSceneCommand(rest);
+                case "card-coord":
+                    return CardCoordinateCommand(rest);
                 case "card-params":
                     return CardParamsCommand(rest);
                 case "card-edit":
@@ -121,6 +125,8 @@ namespace KKManager
             Console.WriteLine("  cardinfo  <card.png>                  解析单张卡片的声明区");
             Console.WriteLine("  card-structure <card.png>             卡片文件结构（PNG 块表 + 图片区 / 数据区划分）");
             Console.WriteLine("  card-timeline <card.png>              场景卡（sd）的 timeline 长度（Timeline 插件条目 duration / timeScale——与面板同一实现）");
+            Console.WriteLine("  card-scene <card.png>                 场景卡（sd）深度分析（插件数据条目 timeline / kkpe / vnge_* + 内嵌角色卡数据份数 + timeline 深度）");
+            Console.WriteLine("  card-coord <card.png> [--all]         卡片服装 / 饰品（Coordinate 块七套槽位：服装 9 槽 + 饰品 20 槽 + 化妆）");
             Console.WriteLine("  thumb     <card.png> <out.jpg>        导出缩略图（离线核对）");
             Console.WriteLine("  scan-mods [目录...]                   扫描 mod 库（无目录则用已配置的库根）");
             Console.WriteLine("  scan-cards [目录...]                  扫描卡片库（无目录则用已配置的库根）");
@@ -443,8 +449,121 @@ namespace KKManager
             {
                 Console.WriteLine("  原时长   : " + TimelineReader.SecondsText(t.Duration) + " 秒（" + TimelineReader.FormatSeconds(t.Duration) + "）");
                 Console.WriteLine("  timeScale: " + TimelineReader.SecondsText(t.TimeScale) + "（实际播放 " + TimelineReader.FormatSeconds(t.RealSeconds) + "）");
-                Console.WriteLine("  关键帧   : " + t.Keyframes.ToString("N0") + " 个 · sceneInfo XML " + t.XmlLength.ToString("N0")
-                    + " 字节 · 命中阶段 " + (t.HitStage == null ? "<无>" : t.HitStage));
+                Console.WriteLine("  关键帧   : " + t.Keyframes.ToString("N0") + " 个 · 插值组 " + t.Groups
+                    + " · 最长关键帧 " + TimelineReader.FormatSeconds(t.MaxKeyframeTime)
+                    + " · sceneInfo XML " + t.XmlLength.ToString("N0") + " 字节 · 命中阶段 " + (t.HitStage == null ? "<无>" : t.HitStage));
+            }
+            return 0;
+        }
+        /// <summary>场景卡（sd）深度分析——插件数据条目（timeline / kkpe / vnge_*）+ 内嵌角色卡数据份数 + timeline 深度（只读；与面板同一实现）。</summary>
+        private static int CardSceneCommand(List<string> rest)
+        {
+            RequireArgs(rest, "card-scene <card.png>", 1);
+            CardStructure st = CardDocument.Parse(rest[0]);
+            if (st.Error != null)
+            {
+                Console.WriteLine("诊断       : " + st.Error);
+                return 3;
+            }
+            string path = st.FilePath == null ? rest[0] : st.FilePath;
+            Console.WriteLine("文件       : " + path);
+            Console.WriteLine("卡类型     : " + (st.CardType == null ? "<无>" : st.CardType)
+                + " · 数据标记 " + (st.DataVersion == null ? "<无>" : st.DataVersion));
+            if (st.CardType != CardReader.SceneCardType)
+            {
+                Console.WriteLine("场景分析   : 不是场景卡——只有 Studio 场景卡（sd）带插件数据条目与内嵌角色数据");
+                return 0;
+            }
+            SceneInfoResult s = SceneReader.Read(path, st.ImageEnd);
+            if (s.Error != null)
+            {
+                Console.WriteLine("诊断       : " + s.Error);
+                return 3;
+            }
+            Console.WriteLine("数据区     : " + st.DataSize.ToString("N0") + " 字节 · 已扫描 " + s.ScannedBytes.ToString("N0") + " 字节");
+            Console.WriteLine("内嵌角色   : " + s.CharaDataCount + " 份（数据块目录命中）");
+            Console.WriteLine("插件条目   : " + s.Plugins.Count + " 条");
+            foreach (ScenePluginItem it in s.Plugins)
+            {
+                Console.WriteLine("  @" + it.Offset.ToString("N0").PadLeft(14) + "  " + it.Key.PadRight(22) + "  " + it.Shape
+                    + (it.Bytes > 0 ? "  " + it.Bytes.ToString("N0") + " 字节" : ""));
+            }
+            TimelineInfo t = TimelineReader.Read(path, st.ImageEnd);
+            Console.WriteLine("timeline   : " + TimelineReader.Describe(t));
+            if (t.Error == null && t.HasEntry && !t.IsEmpty)
+            {
+                Console.WriteLine("  timeline 深度: 关键帧 " + t.Keyframes.ToString("N0") + " · 插值组 " + t.Groups
+                    + " · 最长关键帧 " + TimelineReader.FormatSeconds(t.MaxKeyframeTime));
+            }
+            foreach (string w in s.Warnings)
+            {
+                Console.WriteLine("提示       : " + w);
+            }
+            return 0;
+        }
+
+        /// <summary>卡片服装 / 饰品——Coordinate 块的七套槽位（服装 9 槽 + 饰品 20 槽 + 化妆开关与化妆 id）。</summary>
+        private static int CardCoordinateCommand(List<string> rest)
+        {
+            bool all = rest.Remove("--all");
+            RequireArgs(rest, "card-coord <card.png> [--all]", 1);
+            CardCoordinateResult r = CardCoordinate.Read(rest[0]);
+            Console.WriteLine("文件       : " + (r.FilePath == null ? rest[0] : r.FilePath));
+            if (r.Error != null)
+            {
+                Console.WriteLine("诊断       : " + r.Error);
+                return 3;
+            }
+            Console.WriteLine("Coordinate : v" + (r.BlockVersion == null ? "?" : r.BlockVersion)
+                + " · " + r.BlockSize.ToString("N0") + " 字节 · " + r.Outfits.Count + " 套"
+                + (all ? "（全量列出）" : "（只列非空槽位 · --all 列全部）"));
+            for (int i = 0; i < r.Outfits.Count; i = i + 1)
+            {
+                CardCoordinateOutfit o = r.Outfits[i];
+                Console.WriteLine();
+                Console.WriteLine("[" + o.Index + "] " + o.TypeName
+                    + " — 服装 " + CardCoordinateResult.ClothesCount(o) + " 件 · 饰品 " + CardCoordinateResult.AccessoryCount(o) + " 件"
+                    + " · 化妆 " + (o.EnableMakeup ? "开" : "关") + (o.MakeupText == null ? "" : "（" + o.MakeupText + "）"));
+                for (int k = 0; k < o.Clothes.Count; k = k + 1)
+                {
+                    CardClothesPart p = o.Clothes[k];
+                    if (!all && p.Id == 0)
+                    {
+                        continue;
+                    }
+                    Console.WriteLine("  服装 " + p.Slot + "： id=" + p.Id
+                        + " · 袖型 " + p.SleevesType
+                        + " · 徽章 " + p.EmblemeId + "/" + p.EmblemeId2
+                        + " · 隐藏 " + (p.HideOptA ? "是" : "否") + "/" + (p.HideOptB ? "是" : "否"));
+                    for (int c = 0; c < p.Colors.Count; c = c + 1)
+                    {
+                        Console.WriteLine("        " + p.Colors[c]);
+                    }
+                }
+                for (int k = 0; k < o.Accessories.Count; k = k + 1)
+                {
+                    CardAccessoryPart p = o.Accessories[k];
+                    if (!all && p.Id == 0)
+                    {
+                        continue;
+                    }
+                    Console.WriteLine("  饰品 #" + p.Index + " " + p.TypeName + "： id=" + p.Id
+                        + " · 挂点 " + p.ParentName + (p.ParentKey == null ? "" : "（" + p.ParentKey + "）")
+                        + " · 不晃 " + (p.NoShake ? "是" : "否")
+                        + " · 隐藏类别 " + p.HideCategory);
+                    for (int c = 0; c < p.Colors.Count; c = c + 1)
+                    {
+                        Console.WriteLine("        " + p.Colors[c]);
+                    }
+                }
+                for (int w = 0; w < o.Warnings.Count; w = w + 1)
+                {
+                    Console.WriteLine("  提示： " + o.Warnings[w]);
+                }
+            }
+            for (int w = 0; w < r.Warnings.Count; w = w + 1)
+            {
+                Console.WriteLine("提示       : " + r.Warnings[w]);
             }
             return 0;
         }
