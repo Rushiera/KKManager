@@ -85,7 +85,7 @@ namespace KKManager.Probe
         {
             if (args.Length < 3)
             {
-                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js>");
+                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB]");
                 return 2;
             }
 
@@ -135,6 +135,8 @@ namespace KKManager.Probe
                         return 2;
                     }
                     return CompareRange(args[1], args[2], long.Parse(args[3]), long.Parse(args[4]), long.Parse(args[5]));
+                case "tlinfo":
+                    return TlInfo(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
                 case "htmlcheck":
                     return ProbeHtml(args[1], args[2]);
                 case "extractjs":
@@ -3339,6 +3341,487 @@ namespace KKManager.Probe
                 Console.WriteLine("差异：" + diff.ToString("N0") + " 字节不同 · 首个差异 @" + first.ToString("N0"));
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// Studio 场景卡 timeline 长度侦察——tlinfo &lt;file.png|目录&gt; &lt;out.txt&gt; [最大文件 MB · 0=不限]。
+        /// 数据区（IEND 之后）流式扫描 Timeline 插件条目锚点（MessagePack 键 fixstr8 "timeline"），
+        /// 取该条目内的 XML 根，读 duration 属性（秒）。
+        /// </summary>
+        private static int TlInfo(string src, string outPath, int maxMb)
+        {
+            bool isDir = Directory.Exists(src);
+            if (!isDir && !File.Exists(src))
+            {
+                Console.Error.WriteLine("路径不存在: " + src);
+                return 2;
+            }
+            string parent = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(parent))
+            {
+                Directory.CreateDirectory(parent);
+            }
+            var files = new List<string>();
+            if (isDir)
+            {
+                string[] found = Directory.GetFiles(src, "*.png", SearchOption.TopDirectoryOnly);
+                Array.Sort(found, StringComparer.Ordinal);
+                for (int i = 0; i < found.Length; i = i + 1)
+                {
+                    files.Add(found[i]);
+                }
+            }
+            else
+            {
+                files.Add(src);
+            }
+
+            int withTimeline = 0;
+            int withoutTimeline = 0;
+            int skipped = 0;
+            int failed = 0;
+
+            using (var sw = new StreamWriter(outPath, false, new UTF8Encoding(true)))
+            {
+                sw.WriteLine("# timeline 长度侦察 —— " + src);
+                sw.WriteLine("# 文件上限: " + (maxMb > 0 ? maxMb.ToString("N0") + " MB" : "不限"));
+                sw.WriteLine();
+                for (int i = 0; i < files.Count; i = i + 1)
+                {
+                    var fi = new FileInfo(files[i]);
+                    if (maxMb > 0 && fi.Length > (long)maxMb * 1024L * 1024L)
+                    {
+                        skipped = skipped + 1;
+                        sw.WriteLine("## " + fi.Name);
+                        sw.WriteLine("- 跳过：超出文件上限（" + fi.Length.ToString("N0") + " 字节）");
+                        sw.WriteLine();
+                        continue;
+                    }
+                    try
+                    {
+                        if (TlProbeOne(files[i], fi, sw))
+                        {
+                            withTimeline = withTimeline + 1;
+                        }
+                        else
+                        {
+                            withoutTimeline = withoutTimeline + 1;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failed = failed + 1;
+                        sw.WriteLine("## " + fi.Name);
+                        sw.WriteLine("- 异常: " + ex.GetType().Name + " · " + ex.Message);
+                        sw.WriteLine();
+                    }
+                }
+                sw.WriteLine("## 汇总");
+                sw.WriteLine("- 文件 " + files.Count.ToString("N0") + " 个：有 timeline " + withTimeline.ToString("N0") + " · 无 timeline " + withoutTimeline.ToString("N0") + " · 跳过 " + skipped.ToString("N0") + " · 异常 " + failed.ToString("N0"));
+            }
+            Console.WriteLine("tlinfo: " + outPath);
+            return 0;
+        }
+
+        /// <summary>单文件 timeline 侦察——命中 timeline 条目返回 true；明细写入报告。</summary>
+        private static bool TlProbeOne(string file, FileInfo fi, StreamWriter sw)
+        {
+            byte[] keyNeedle = { 0xA8, 0x74, 0x69, 0x6D, 0x65, 0x6C, 0x69, 0x6E, 0x65 };
+            byte[] durNeedle = Encoding.ASCII.GetBytes("duration=\"");
+            byte[] kfNeedle = Encoding.ASCII.GetBytes("<keyframe ");
+            byte[] timeNeedle = Encoding.ASCII.GetBytes("time=\"");
+
+            sw.WriteLine("## " + fi.Name);
+            sw.WriteLine("- 大小: " + fi.Length.ToString("N0") + " 字节");
+
+            long dataStart;
+            long scanStart;
+            string head1 = null;
+            string head2 = null;
+            bool isScene = false;
+            var hits = new List<long>();
+            int durSeen = 0;
+
+            using (var fs = File.OpenRead(file))
+            {
+                dataStart = ProbeFindPngEnd(fs, fi.Length);
+                if (dataStart < 0)
+                {
+                    sw.WriteLine("- 未找到 IEND——非卡片 PNG");
+                    sw.WriteLine();
+                    return false;
+                }
+                fs.Position = dataStart;
+                var br = new BinaryReader(fs);
+                string first = Read7BitString(br);
+                if (first != null && IsVersionLike(first))
+                {
+                    isScene = true;
+                    head1 = first;
+                    head2 = null;
+                }
+                else
+                {
+                    fs.Position = dataStart;
+                    br = new BinaryReader(fs);
+                    br.ReadInt32();
+                    head1 = Read7BitString(br);
+                    if (fs.Length - fs.Position >= 1)
+                    {
+                        head2 = Read7BitString(br);
+                    }
+                }
+                scanStart = fs.Position;
+                sw.WriteLine("- 数据区起点 " + dataStart.ToString("N0") + " · 数据区 " + (fi.Length - dataStart).ToString("N0") + " 字节 · 扫描起点 " + scanStart.ToString("N0"));
+                if (isScene)
+                {
+                    sw.WriteLine("- 类型判定 场景卡（数据区首个 7bit 串是版本号 " + head1 + "，不是 int32 标记 + 卡类型）");
+                }
+                else
+                {
+                    sw.WriteLine("- 类型判定 卡片（int32 标记 + 卡类型）· 卡类型 " + (head1 == null ? "(未读到)" : head1) + " · 数据版本 " + (head2 == null ? "(未读到)" : head2));
+                }
+
+                const int BufSize = 1 << 20;
+                byte[] buf = new byte[BufSize + 128];
+                long remain = fi.Length - scanStart;
+                long consumed = scanStart;
+                int carry = 0;
+                while (remain > 0)
+                {
+                    int want = (int)Math.Min(BufSize, remain);
+                    int read = fs.Read(buf, carry, want);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+                    remain = remain - read;
+                    long baseOff = consumed - carry;
+                    consumed = consumed + read;
+                    int total = carry + read;
+                    for (int i = 0; i <= total - keyNeedle.Length; i = i + 1)
+                    {
+                        if (buf[i] == keyNeedle[0] && MatchAt(buf, i, keyNeedle))
+                        {
+                            long at = baseOff + i;
+                            if (hits.Count == 0 || at > hits[hits.Count - 1] + 9)
+                            {
+                                hits.Add(at);
+                            }
+                        }
+                    }
+                    for (int i = 0; i <= total - durNeedle.Length; i = i + 1)
+                    {
+                        if (buf[i] == durNeedle[0] && MatchAt(buf, i, durNeedle))
+                        {
+                            durSeen = durSeen + 1;
+                            i = i + durNeedle.Length;
+                        }
+                    }
+                    int newCarry = Math.Min(64, total);
+                    Array.Copy(buf, total - newCarry, buf, 0, newCarry);
+                    carry = newCarry;
+                }
+            }
+
+            sw.WriteLine("- timeline 键命中 " + hits.Count.ToString("N0") + " 处 · 数据区 duration=\" 出现 " + durSeen.ToString("N0") + " 次");
+            for (int h = 0; h < hits.Count; h = h + 1)
+            {
+                long at = hits[h];
+                byte[] head = new byte[4096];
+                int n;
+                using (var fs2 = File.OpenRead(file))
+                {
+                    fs2.Position = at;
+                    n = ReadFull(fs2, head, head.Length);
+                }
+                string shape = "结构未识别";
+                int xmlLen = -1;
+                long xmlAt = at + 27;
+                if (n > 24 && head[9] == 0x92 && head[11] == 0x81 && head[12] == 0xA9 && Encoding.ASCII.GetString(head, 13, 9) == "sceneInfo")
+                {
+                    byte hb = head[22];
+                    if (hb == 0xD9)
+                    {
+                        xmlLen = head[23];
+                        xmlAt = at + 25;
+                    }
+                    else if (hb == 0xDA)
+                    {
+                        xmlLen = (head[23] << 8) | head[24];
+                        xmlAt = at + 26;
+                    }
+                    else if (hb == 0xDB)
+                    {
+                        xmlLen = (head[23] << 24) | (head[24] << 16) | (head[25] << 8) | head[26];
+                        xmlAt = at + 27;
+                    }
+                    shape = "条目版本字节 " + head[10].ToString("X2") + " · XML 字符串头 " + hb.ToString("X2");
+                }
+                sw.WriteLine("  · #" + (h + 1) + " @" + at.ToString("N0") + "（距文件尾 " + (fi.Length - at).ToString("N0") + " 字节 · " + shape + "）");
+                if (xmlAt + 200 <= at + n)
+                {
+                    string xmlHead = Encoding.UTF8.GetString(head, (int)(xmlAt - at), 200);
+                    xmlHead = xmlHead.Replace("\r", " ").Replace("\n", " ");
+                    sw.WriteLine("     XML 头: " + xmlHead);
+                }
+                if (xmlLen > 0)
+                {
+                    sw.WriteLine("     XML 长度 " + xmlLen.ToString("N0") + " 字节");
+                    DumpTimelineXml(file, xmlAt, xmlLen, durNeedle, kfNeedle, timeNeedle, sw);
+                }
+                else
+                {
+                    sw.WriteLine("     => XML 长度不可读（结构未识别），未取 duration");
+                }
+            }
+            sw.WriteLine();
+            return hits.Count > 0;
+        }
+
+        /// <summary>读 Timeline 的 sceneInfo XML（上限 4 MB），统计 duration / 关键帧数 / 最大关键帧时间。</summary>
+        private static void DumpTimelineXml(string file, long xmlAt, int xmlLen, byte[] durNeedle, byte[] kfNeedle, byte[] timeNeedle, StreamWriter sw)
+        {
+            int take = xmlLen;
+            if (take > 4 * 1024 * 1024)
+            {
+                take = 4 * 1024 * 1024;
+                sw.WriteLine("     （XML 超过 4 MB——只读前 4 MB）");
+            }
+            byte[] xml = new byte[take];
+            int n;
+            using (var fs = File.OpenRead(file))
+            {
+                fs.Position = xmlAt;
+                n = ReadFull(fs, xml, take);
+            }
+            string durationText = ReadQuotedNumber(xml, n, durNeedle, true);
+            int keyframes = 0;
+            double maxTime = -1;
+            for (int i = 0; i <= n - kfNeedle.Length; i = i + 1)
+            {
+                if (xml[i] == kfNeedle[0] && MatchAt(xml, i, kfNeedle))
+                {
+                    keyframes = keyframes + 1;
+                }
+            }
+            for (int i = 0; i <= n - timeNeedle.Length; i = i + 1)
+            {
+                if (xml[i] == timeNeedle[0] && MatchAt(xml, i, timeNeedle))
+                {
+                    double v = ReadNumber(xml, i + timeNeedle.Length, n);
+                    if (v > maxTime)
+                    {
+                        maxTime = v;
+                    }
+                }
+            }
+            string rootTag = FirstRootTag(xml, n);
+            bool emptyRoot = false;
+            if (rootTag != null && rootTag.EndsWith("/>", StringComparison.Ordinal))
+            {
+                emptyRoot = true;
+            }
+            string line = "     => ";
+            if (durationText == null)
+            {
+                line = line + "未读到 duration 属性";
+            }
+            else
+            {
+                line = line + "duration = " + durationText + " 秒 → " + FormatSeconds(durationText);
+            }
+            line = line + " · 关键帧 " + keyframes.ToString("N0") + " 个";
+            if (maxTime >= 0)
+            {
+                line = line + " · 最大关键帧时间 " + maxTime.ToString("0.###") + " 秒";
+            }
+            if (emptyRoot)
+            {
+                line = line + " · 空时间轴（root 自闭合、无关键帧内容）";
+            }
+            if (rootTag != null)
+            {
+                line = line + " · root 标签: " + rootTag;
+            }
+            sw.WriteLine(line);
+        }
+
+        /// <summary>取 XML 里第一个 root 标签（从 &lt;root 到最近的 &gt;）。</summary>
+        private static string FirstRootTag(byte[] xml, int n)
+        {
+            byte[] needle = Encoding.ASCII.GetBytes("<root");
+            for (int i = 0; i <= n - needle.Length; i = i + 1)
+            {
+                if (xml[i] == needle[0] && MatchAt(xml, i, needle))
+                {
+                    int end = i;
+                    while (end < n && xml[end] != 0x3E)
+                    {
+                        end = end + 1;
+                    }
+                    if (end >= n)
+                    {
+                        return null;
+                    }
+                    return Encoding.UTF8.GetString(xml, i, end - i + 1);
+                }
+            }
+            return null;
+        }
+
+        /// <summary>在字节缓冲里找 needle，随后读带引号的数值文本。</summary>
+        private static string ReadQuotedNumber(byte[] buf, int n, byte[] needle, bool allowMinus)
+        {
+            for (int i = 0; i <= n - needle.Length; i = i + 1)
+            {
+                if (buf[i] != needle[0] || !MatchAt(buf, i, needle))
+                {
+                    continue;
+                }
+                var sb = new StringBuilder();
+                int p = i + needle.Length;
+                while (p < n)
+                {
+                    byte b = buf[p];
+                    bool ok = (b >= 0x30 && b <= 0x39) || b == 0x2E || (allowMinus && b == 0x2D);
+                    if (!ok)
+                    {
+                        break;
+                    }
+                    sb.Append((char)b);
+                    p = p + 1;
+                }
+                return sb.ToString();
+            }
+            return null;
+        }
+
+        /// <summary>从缓冲指定位置读一个十进制数字（含小数点），无数字返回 -1。</summary>
+        private static double ReadNumber(byte[] buf, int at, int n)
+        {
+            int p = at;
+            double value = 0;
+            bool frac = false;
+            double scale = 0.1;
+            int digits = 0;
+            while (p < n)
+            {
+                byte b = buf[p];
+                if (b == 0x2E)
+                {
+                    frac = true;
+                    p = p + 1;
+                    continue;
+                }
+                if (b < 0x30 || b > 0x39)
+                {
+                    break;
+                }
+                double d = b - 0x30;
+                if (!frac)
+                {
+                    value = value * 10 + d;
+                }
+                else
+                {
+                    value = value + d * scale;
+                    scale = scale / 10;
+                }
+                digits = digits + 1;
+                p = p + 1;
+            }
+            if (digits == 0)
+            {
+                return -1;
+            }
+            return value;
+        }
+
+        /// <summary>判断字符串是否是「版本号」形态（只含数字与点，且至少一个点）。</summary>
+        private static bool IsVersionLike(string s)
+        {
+            if (s == null || s.Length == 0 || s.Length > 16)
+            {
+                return false;
+            }
+            bool dot = false;
+            for (int i = 0; i < s.Length; i = i + 1)
+            {
+                char c = s[i];
+                if (c == '.')
+                {
+                    dot = true;
+                    continue;
+                }
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return dot;
+        }
+
+        /// <summary>定位 PNG 的 IEND 结束偏移（图片区终点）；未找到返回 -1。</summary>
+        private static long ProbeFindPngEnd(FileStream fs, long len)
+        {
+            byte[] hdr = new byte[8];
+            long pos = 8;
+            while (pos + 8 <= len)
+            {
+                fs.Position = pos;
+                if (ReadFull(fs, hdr, 8) != 8)
+                {
+                    return -1;
+                }
+                long clen = ((long)hdr[0] << 24) | ((long)hdr[1] << 16) | ((long)hdr[2] << 8) | hdr[3];
+                string type = Encoding.ASCII.GetString(hdr, 4, 4);
+                if (type == "IEND")
+                {
+                    return pos + 12;
+                }
+                if (clen < 0 || pos + 12 + clen > len)
+                {
+                    return -1;
+                }
+                pos += 12 + clen;
+            }
+            return -1;
+        }
+
+        /// <summary>读 7-bit 长度前缀的 UTF-8 字符串（BinaryWriter.Write(string) 形态）。</summary>
+        private static string Read7BitString(BinaryReader br)
+        {
+            int len = 0;
+            int shift = 0;
+            while (true)
+            {
+                byte b = br.ReadByte();
+                len |= (b & 0x7F) << shift;
+                if ((b & 0x80) == 0)
+                {
+                    break;
+                }
+                shift += 7;
+                if (shift > 28)
+                {
+                    throw new InvalidDataException("7-bit 长度前缀异常");
+                }
+            }
+            return Encoding.UTF8.GetString(br.ReadBytes(len));
+        }
+
+        /// <summary>秒数文本 → mm:ss.00 显示形态。</summary>
+        private static string FormatSeconds(string secondsText)
+        {
+            int seconds;
+            if (!int.TryParse(secondsText, out seconds))
+            {
+                return "(非整数秒)";
+            }
+            int minutes = seconds / 60;
+            int rest = seconds % 60;
+            return minutes.ToString("00") + ":" + rest.ToString("00") + ".00";
         }
     }
 }

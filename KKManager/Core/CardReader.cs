@@ -106,12 +106,9 @@ namespace KKManager.Core
                 {
                     fs.Position = info.ImageEnd;
                     var br = new BinaryReader(fs);
-                    br.ReadInt32();
-                    info.CardType = Read7BitString(br);
-                    if (fs.Length - fs.Position >= 1)
-                    {
-                        info.DataVersion = Read7BitString(br);
-                    }
+                    ReadCardHead(br, out string headType, out string headVersion);
+                    info.CardType = headType;
+                    info.DataVersion = headVersion;
                     // 服装卡：数据区头段第三段是角色名（人物卡此处是脸图长度，不能按字符串读）
                     if (info.CardType != null && info.CardType.Contains("Clothes") && fs.Length - fs.Position >= 1)
                     {
@@ -122,6 +119,104 @@ namespace KKManager.Core
             }
 
             return info;
+        }
+
+        /// <summary>场景卡（Studio 场景）的类型记录值——数据区头段是 7bit 版本串（没有 int32 标记 + 卡类型），无法沿用游戏内标记串。</summary>
+        public const string SceneCardType = "sd";
+
+        /// <summary>
+        /// 读卡片数据区头段——先按「版本号形态」试场景卡（Studio 场景数据区首段即版本号），
+        /// 不成立再按卡片布局读（int32 标记 + 卡类型 + 数据版本）。
+        /// </summary>
+        public static void ReadCardHead(BinaryReader br, out string cardType, out string dataVersion)
+        {
+            cardType = null;
+            dataVersion = null;
+            string sceneVersion = TryReadSceneVersion(br);
+            if (sceneVersion != null)
+            {
+                cardType = SceneCardType;
+                dataVersion = sceneVersion;
+                return;
+            }
+            br.ReadInt32();
+            cardType = Read7BitString(br);
+            if (br.BaseStream.Length - br.BaseStream.Position >= 1)
+            {
+                dataVersion = Read7BitString(br);
+            }
+        }
+
+        /// <summary>试读场景卡的数据区首段——是版本号形态则取走（流位置停在版本串之后），否则流位置不动返回 null。</summary>
+        private static string TryReadSceneVersion(BinaryReader br)
+        {
+            long start = br.BaseStream.Position;
+            if (br.BaseStream.Length - start < 2)
+            {
+                return null;
+            }
+            int len = br.ReadByte();
+            if (len <= 0 || len > 16 || br.BaseStream.Length - br.BaseStream.Position < len)
+            {
+                br.BaseStream.Position = start;
+                return null;
+            }
+            byte[] body = br.ReadBytes(len);
+            br.BaseStream.Position = start;
+            string s = Encoding.ASCII.GetString(body);
+            if (!IsVersionLike(s))
+            {
+                return null;
+            }
+            br.BaseStream.Position = start + 1 + len;
+            return s;
+        }
+
+        /// <summary>版本号形态判据——只含数字与点、至少一个点、长度 1..16。</summary>
+        public static bool IsVersionLike(string s)
+        {
+            if (s == null || s.Length == 0 || s.Length > 16)
+            {
+                return false;
+            }
+            bool dot = false;
+            for (int i = 0; i < s.Length; i = i + 1)
+            {
+                char c = s[i];
+                if (c == '.')
+                {
+                    dot = true;
+                    continue;
+                }
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return dot;
+        }
+
+        /// <summary>只读卡片数据区头段（存量类型补正用——不扫声明区），读到返回 true。</summary>
+        public static bool ReadHeadOnly(string path, out string cardType, out string dataVersion)
+        {
+            cardType = null;
+            dataVersion = null;
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+            using (FileStream fs = File.OpenRead(path))
+            {
+                long iend = FindPngEnd(fs, fs.Length);
+                if (iend <= 0 || fs.Length - iend < 5)
+                {
+                    return false;
+                }
+                fs.Position = iend;
+                BinaryReader br = new BinaryReader(fs);
+                ReadCardHead(br, out cardType, out dataVersion);
+                return cardType != null;
+            }
         }
 
         /// <summary>定位 PNG 的 IEND 结束偏移（图片区终点）；未找到返回 -1。</summary>

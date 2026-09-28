@@ -49,6 +49,9 @@ namespace KKManager.Core
         /// <summary>本次扫描为存量卡片补读到角色名的数。</summary>
         public int NamesFilled { get; set; }
 
+        /// <summary>本次扫描为存量卡片补正卡类型的数（本版之前场景卡的 card_type 记成了数据区头段的乱码）。</summary>
+        public int TypesFixed { get; set; }
+
         /// <summary>本次扫描因磁盘上已不存在而清理的记录数——卡片行 / mod 副本涉及的 guid 数 / 旧版登记条数之和。</summary>
         public int Removed { get; set; }
 
@@ -73,6 +76,7 @@ namespace KKManager.Core
             ThumbBytes += other.ThumbBytes;
             NamesRead += other.NamesRead;
             NamesFilled += other.NamesFilled;
+            TypesFixed += other.TypesFixed;
             Removed += other.Removed;
             Elapsed += other.Elapsed;
             foreach (string e in other.Errors)
@@ -93,6 +97,20 @@ namespace KKManager.Core
     {
         private const int MaxErrors = 200;
         private const int BatchSize = 500;
+
+        /// <summary>库里记的卡类型是否需要补正——空值，或既不是场景卡标记也不是游戏内标记串（「【…】」形态，本版之前场景卡记的是数据区头段乱码）。</summary>
+        private static bool NeedsTypeFix(string storedType)
+        {
+            if (string.IsNullOrEmpty(storedType))
+            {
+                return true;
+            }
+            if (storedType == CardReader.SceneCardType)
+            {
+                return false;
+            }
+            return storedType.IndexOf('【') < 0;
+        }
 
         /// <summary>扫描 mod 库（按级别升序）——按库根路由到对应库文件；库根不存在时出声跳过，不代建目录。</summary>
         public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, bool force, Action<string> log)
@@ -305,6 +323,17 @@ namespace KKManager.Core
                         if (stamps.TryGetValue(f, out old) && old[0] == fi.Length.ToString() && old[1] == mtime)
                         {
                             result.Skipped++;
+                            if (old.Length > 3 && NeedsTypeFix(old[3]))
+                            {
+                                // 存量类型补正：本版之前场景卡的 card_type 记成了数据区头段的乱码——只读文件头段重判一次
+                                string fixedType;
+                                string fixedVersion;
+                                if (CardReader.ReadHeadOnly(f, out fixedType, out fixedVersion) && fixedType != old[3])
+                                {
+                                    store.UpdateCardType(f, fixedType, fixedVersion);
+                                    result.TypesFixed++;
+                                }
+                            }
                             if (old.Length > 2 && old[2] == "1")
                             {
                                 // 存量补名：人物卡的角色名列还空着（本版新列）——只读 Parameter 块补上，不重扫声明区

@@ -169,7 +169,7 @@ namespace KKManager.Core
             return st;
         }
 
-        /// <summary>读数据区头部——int32 标记 + 7bit 串（卡类型）+ 7bit 串（数据版本）+ 首 64 字节 hex。</summary>
+        /// <summary>读数据区头部——卡类型（场景卡 sd / 人物卡 / 服装卡）+ 数据版本 + 首 64 字节 hex。</summary>
         private static void ReadDataHead(FileStream fs, CardStructure st)
         {
             byte[] head = new byte[256];
@@ -199,14 +199,12 @@ namespace KKManager.Core
             }
             try
             {
-                using (MemoryStream ms = new MemoryStream(head, 4, n - 4, false))
+                using (MemoryStream ms = new MemoryStream(head, 0, n, false))
                 using (BinaryReader br = new BinaryReader(ms))
                 {
-                    st.CardType = CardReader.Read7BitString(br);
-                    if (ms.Position < ms.Length)
-                    {
-                        st.DataVersion = CardReader.Read7BitString(br);
-                    }
+                    CardReader.ReadCardHead(br, out string cardType, out string dataVersion);
+                    st.CardType = cardType;
+                    st.DataVersion = dataVersion;
                 }
             }
             catch (Exception ex)

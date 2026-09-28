@@ -611,14 +611,17 @@ namespace KKManager.Core
             return r;
         }
 
-        /// <summary>读数据区头段——标记 / 卡类型 / 数据版本 / 角色名（服装卡）或脸图长度（人物卡）。</summary>
+        /// <summary>读数据区头段——卡类型（场景卡 / 人物卡 / 服装卡）与角色名（服装卡）或脸图长度（人物卡）。</summary>
         private static void ReadHead(FileStream fs, long imageEnd, CardDetailResult r)
         {
             fs.Position = imageEnd;
             BinaryReader br = new BinaryReader(fs);
-            br.ReadInt32();
-            string cardType = CardReader.Read7BitString(br);
-            CardReader.Read7BitString(br);
+            CardReader.ReadCardHead(br, out string cardType, out _);
+            if (cardType == CardReader.SceneCardType)
+            {
+                // 场景卡：头段只有场景数据版本，其后就是场景数据——没有角色名段、没有脸图
+                return;
+            }
             long afterHead = fs.Position;
 
             if (cardType != null && cardType.IndexOf("Clothes", StringComparison.Ordinal) >= 0)
