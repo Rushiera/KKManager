@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using KKManager.Core;
@@ -134,7 +135,7 @@ namespace KKManager
             Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
-            Console.WriteLine("  cards [--order mtime|size|file|chara] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现）");
+            Console.WriteLine("  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）");
             Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者 / 创建时间 / MD5 + 引用卡片数与前三个卡片名——MD5 只算冲突文件，算过就忽略）");
             Console.WriteLine("  composition <guid>                    查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容；--force 强制重读容器）");
             Console.WriteLine("  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图（--tex 导出缩小版 PNG · --max N 限张数）");
@@ -491,6 +492,22 @@ namespace KKManager
                     + "  " + face.Size.ToString("N0").PadLeft(12) + " 字节  " + face.Width + "×" + face.Height
                     + (face.IsFace ? "  [脸图]" : ""));
             }
+            if (s.CharaData.Count > 0)
+            {
+                Console.WriteLine("内嵌角色明细: " + s.CharaData.Count + " 份（份头段 × 数据块目录）");
+                foreach (SceneCharaData chd in s.CharaData)
+                {
+                    Console.Write("  第 " + chd.Index + " 份 · 数据版本 " + (chd.DataVersion == null ? "?" : chd.DataVersion)
+                        + " · 卡面图 @" + chd.FaceOffset.ToString("N0") + "（" + chd.FaceSize.ToString("N0") + " 字节）"
+                        + " · 块 " + chd.Blocks.Count + " 个：");
+                    for (int bi = 0; bi < chd.Blocks.Count; bi = bi + 1)
+                    {
+                        Console.Write((bi == 0 ? "" : " · ") + chd.Blocks[bi].Name + " v" + chd.Blocks[bi].Version
+                            + "（" + chd.Blocks[bi].Size.ToString("N0") + " 字节）");
+                    }
+                    Console.WriteLine();
+                }
+            }
             Console.WriteLine("插件条目   : " + s.Plugins.Count + " 条");
             foreach (ScenePluginItem it in s.Plugins)
             {
@@ -715,6 +732,7 @@ namespace KKManager
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 Console.WriteLine("  卡类型补正 " + r.TypesFixed);
+                Console.WriteLine("  timeline 读取 " + r.TimelineRead);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -744,6 +762,7 @@ namespace KKManager
                     + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 Console.WriteLine("  卡类型补正 " + r.TypesFixed);
+                Console.WriteLine("  timeline 读取 " + r.TimelineRead);
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -1040,7 +1059,10 @@ namespace KKManager
                 foreach (CardRow r in rows)
                 {
                     string name = string.IsNullOrEmpty(r.CharaName) ? "（无名）" : r.CharaName;
-                    Console.WriteLine("  " + name + "  |  " + r.Folder + "  |  " + r.FileName);
+                    string tl = r.TimelineSeconds.HasValue
+                        ? "  |  timeline " + r.TimelineSeconds.Value.ToString("0.###", CultureInfo.InvariantCulture) + " 秒"
+                        : "";
+                    Console.WriteLine("  " + name + "  |  " + r.Folder + "  |  " + r.FileName + tl);
                 }
             }
             return 0;

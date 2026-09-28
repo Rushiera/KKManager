@@ -302,6 +302,7 @@
     <button class="sortbtn" id="btnSortSize" title="按文件大小降序（再点切升序）">按大小 ▼</button>
     <button class="sortbtn" id="btnSortFile" title="按文件夹分组 · 组内按文件名升序（再点切降序）">按文件名 ▲</button>
     <button class="sortbtn" id="btnSortChara" title="按文件夹分组 · 组内按角色名升序（名字读自卡片数据区；没名字的卡排最后；再点切降序）">按角色名 ▲</button>
+    <button class="sortbtn" id="btnSortTimeline" title="按文件夹分组 · 组内按 timeline 长度降序（只有场景卡有 timeline——先跑一次「扫描主要」读到长度；没读到的卡排最后；再点切升序）">按 timeline ▼</button>
   </div>
 
   <div id="viewCards"><div class="grid" id="cardsGrid"></div></div>
@@ -592,7 +593,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let state = { tab:'cards', page:1, folder:null, root:null, cardSort:'mtime', cardDesc:true, roots:{gameRoot:'',modRoots:[],cardRoots:[]}, refs:[], cards:[], rendered:0, batch:120, foldFolders:false,
+let state = { tab:'cards', page:1, folder:null, root:null, cardSort:'mtime', cardDesc:true, cardSortHint:'', roots:{gameRoot:'',modRoots:[],cardRoots:[]}, refs:[], cards:[], rendered:0, batch:120, foldFolders:false,
   modRows:[], modView:[], modShown:0, modBatch:200, modSort:{key:'used', dir:'desc'}, modAuthors:[], auAll:[], auPending:null };
 
 async function api(path, opts){
@@ -820,6 +821,17 @@ function renderStructure(st, d, tl, co, sc, tlo){
     </div>`;
   }
   html += secHtml('概览', '', kvHtml(rows) + firstImg, true);
+
+  /* ①b 内嵌角色数据（sd 专有）——每份：数据版本 / 卡面图 / 数据块目录 */
+  if(sc && !sc.error && (sc.charaData||[]).length){
+    let t = '<table class="list"><thead><tr><th style="width:70px">份</th><th style="width:90px">数据版本</th><th style="width:190px">卡面图</th><th>数据块目录</th></tr></thead><tbody>';
+    (sc.charaData||[]).forEach(cd => {
+      let blocks = (cd.blocks||[]).map(b => `<span class="mono" style="display:inline-block;margin:0 6px 3px 0;padding:1px 6px;border:1px solid var(--line);border-radius:4px;font-size:12px">${esc(b.name||'')} <span class="dim">v${esc(b.version||'')} · ${fmt(b.size)}</span></span>`).join('');
+      t += `<tr><td>第 ${cd.index} 份</td><td class="mono dim">${esc(cd.dataVersion||'?')}</td><td class="mono dim" style="font-size:12px">@${fmt(cd.faceOffset)}<br>${fmt(cd.faceSize)} 字节</td><td>${blocks || '<span class="dim">未解析</span>'}</td></tr>`;
+    });
+    t += '</tbody></table><div class="dim" style="margin-top:6px;font-size:12px">每份 = 场景里一份内嵌角色卡数据（份头段 + 数据块目录）；块表 = 该份角色卡的数据块（KKEx / Custom / Coordinate / Parameter / Status 等）与块字节数</div>';
+    html += secHtml('内嵌角色数据（每份）', (sc.charaData||[]).length + ' 份', t, false);
+  }
 
   /* ② 内嵌贴图（缩略图网格） */
   if(imgCount){
@@ -1447,11 +1459,16 @@ function cardStateClass(c){
 function cardItemClass(c){
   return 'item ' + cardStateClass(c) + (c.cardType === 'sd' ? ' t-sd' : '');
 }
+/* 列表小字里的 timeline 长度（只有场景卡读到时有值——让「按 timeline 长度」排序的依据在卡片上可见） */
+function tlSub(c){
+  if(c.timelineSeconds === null || c.timelineSeconds === undefined) return '';
+  return ' · timeline ' + secText(c.timelineSeconds);
+}
 function cardHtml(c){
   const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
   return `<div class="${cardItemClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
       <div class="meta"><div class="name">${esc(c.fileName)}</div>
-      <div class="sub">${c.charaName ? esc(c.charaName) + ' · ' : ''}${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB</div></div></div>`;
+      <div class="sub">${c.charaName ? esc(c.charaName) + ' · ' : ''}${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB${tlSub(c)}</div></div></div>`;
 }
 /* 分块渲染——卡片多时不再一次性铺满 DOM（滚动到底再补一批） */
 function renderCardsChunk(){
@@ -1463,30 +1480,35 @@ function renderCardsChunk(){
   updateCardsInfo();
 }
 function updateCardsInfo(){
-  $('pageInfo').textContent = state.cards.length
+  $('pageInfo').textContent = (state.cards.length
     ? `已显示 ${state.rendered} / 共 ${state.cards.length} 张（滚动继续加载）`
-    : '无结果';
+    : '无结果') + (state.cardSortHint || '');
 }
-/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——四种排序都按文件夹分组，只换组内主键；
-   「按大小」首点降序，「按文件名」「按角色名」首点升序；可切向的键连点来回切 */
+/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——五种排序都按文件夹分组，只换组内主键；
+   「按大小」「按 timeline」首点降序，「按文件名」「按角色名」首点升序；可切向的键连点来回切 */
 function applyCardSort(){
   $('btnSortMtime').classList.toggle('on', state.cardSort === 'mtime');
   $('btnSortSize').classList.toggle('on', state.cardSort === 'size');
   $('btnSortFile').classList.toggle('on', state.cardSort === 'file');
   $('btnSortChara').classList.toggle('on', state.cardSort === 'chara');
+  $('btnSortTimeline').classList.toggle('on', state.cardSort === 'timeline');
   $('btnSortSize').textContent = '按大小 ' + (state.cardDesc ? '▼' : '▲');
   $('btnSortSize').title = state.cardDesc ? '按文件大小降序（再点切升序）' : '按文件大小升序（再点切降序）';
   $('btnSortFile').textContent = '按文件名 ' + (state.cardDesc ? '▼' : '▲');
   $('btnSortFile').title = state.cardDesc ? '按文件名降序（再点切升序）' : '按文件名升序（再点切降序）';
   $('btnSortChara').textContent = '按角色名 ' + (state.cardDesc ? '▼' : '▲');
   $('btnSortChara').title = state.cardDesc ? '按角色名降序（没名字的卡仍排最后；再点切升序）' : '按角色名升序（没名字的卡排最后；再点切降序）';
+  $('btnSortTimeline').textContent = '按 timeline ' + (state.cardDesc ? '▼' : '▲');
+  $('btnSortTimeline').title = state.cardDesc
+    ? '按 timeline 长度降序（只有场景卡有；没读到的卡排最后；再点切升序）'
+    : '按 timeline 长度升序（只有场景卡有；没读到的卡排最后；再点切降序）';
 }
 function setCardSort(key){
-  if((key === 'size' || key === 'file' || key === 'chara') && state.cardSort === key){
+  if((key === 'size' || key === 'file' || key === 'chara' || key === 'timeline') && state.cardSort === key){
     state.cardDesc = !state.cardDesc;   /* 同一键连点：升降序来回切 */
   }else{
     state.cardSort = key;
-    state.cardDesc = (key === 'size');  /* 大小首点降序；文件名 / 角色名首点升序 */
+    state.cardDesc = (key === 'size' || key === 'timeline');  /* 大小 / timeline 首点降序；文件名 / 角色名首点升序 */
   }
   applyCardSort();
   state.page = 1;
@@ -1499,6 +1521,17 @@ async function loadCards(){
   if(state.root) url += '&root=' + encodeURIComponent(state.root);
   const data = await api(url);
   state.cards = data; state.rendered = 0;
+  /* 「按 timeline 长度」的排序依据来自扫描期落库——顺带报一句有多少张卡带长度（没读到的恒排最后） */
+  state.cardSortHint = '';
+  if(state.cardSort === 'timeline' && data.length){
+    let withTl = 0;
+    for(let i=0;i<data.length;i++){
+      if(data[i].timelineSeconds !== null && data[i].timelineSeconds !== undefined){ withTl++; }
+    }
+    state.cardSortHint = withTl === 0
+      ? ' · 库里还没有 timeline 长度（先跑一次「扫描主要」——只有场景卡有）'
+      : ` · 带 timeline 的卡 ${withTl} 张`;
+  }
   $('cardsGrid').innerHTML = data.length ? '' : '<div class="dim">无结果</div>';
   renderCardsChunk();
 }
@@ -2665,7 +2698,8 @@ async function pollScan(){
     $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${SCAN_TARGET[s.target]||s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
       + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '')
       + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '')
-      + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '');
+      + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '')
+      + ((s.timelineRead||0) > 0 ? ` · timeline 读 ${s.timelineRead}` : '');
     $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
     $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
@@ -2726,6 +2760,7 @@ $('btnSortMtime').onclick = () => setCardSort('mtime');
 $('btnSortSize').onclick = () => setCardSort('size');
 $('btnSortFile').onclick = () => setCardSort('file');
 $('btnSortChara').onclick = () => setCardSort('chara');
+$('btnSortTimeline').onclick = () => setCardSort('timeline');
 $('btnPickGameRoot').onclick = pickGameRoot;
 $('gameRoot').addEventListener('change', () => { syncMainRoots().catch(e => alert('刷新级别 1 路径失败：' + e.message)); });
 $('btnScanMain').onclick = () => startScan('main');

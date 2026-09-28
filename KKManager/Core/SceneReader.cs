@@ -43,6 +43,25 @@ namespace KKManager.Core
         public int Count { get; set; }
     }
 
+    /// <summary>场景里的一份内嵌角色卡数据（份头段 + 数据块目录）。</summary>
+    public class SceneCharaData
+    {
+        /// <summary>份序号（1 起，按份头段在文件内出现顺序）。</summary>
+        public int Index { get; set; }
+
+        /// <summary>该份头段声明的数据版本串（如 0.0.0）。</summary>
+        public string DataVersion { get; set; }
+
+        /// <summary>该份卡面图在文件内的偏移。</summary>
+        public long FaceOffset { get; set; }
+
+        /// <summary>该份卡面图字节数（头段声明值）。</summary>
+        public long FaceSize { get; set; }
+
+        /// <summary>该份的数据块目录（块名 / 版本 / 位置 / 大小）。</summary>
+        public List<CardBlockInfo> Blocks { get; } = new List<CardBlockInfo>();
+    }
+
     /// <summary>场景卡（sd）数据区深度分析结果——只读快照。</summary>
     public class SceneInfoResult
     {
@@ -76,11 +95,20 @@ namespace KKManager.Core
         /// <summary>内嵌角色数据的首张图（每份一张——该份角色卡的卡面图；由 AttachCharaFaces 按数据区图片清单装配）。</summary>
         public List<CardImageInfo> CharaFaces { get; } = new List<CardImageInfo>();
 
+        /// <summary>内嵌角色数据明细（每份：数据版本 / 卡面图 / 数据块目录）。</summary>
+        public List<SceneCharaData> CharaData { get; } = new List<SceneCharaData>();
+
         /// <summary>内嵌角色卡数据的卡面图偏移（份头段锚点扫出——内部用，不参与序列化）。</summary>
         internal List<long> CharaFaceOffsets { get; } = new List<long>();
 
         /// <summary>各份头段声明的脸图字节数（与偏移一一对应——内部用）。</summary>
         internal List<long> CharaFaceSizes { get; } = new List<long>();
+
+        /// <summary>各份头段声明的数据版本串（与偏移一一对应——内部用）。</summary>
+        internal List<string> CharaVersions { get; } = new List<string>();
+
+        /// <summary>各份数据块目录在文件内的偏移（升序——内部用）。</summary>
+        internal List<long> CharaLstOffsets { get; } = new List<long>();
 
         /// <summary>解析告警（失败必须可见）。</summary>
         public List<string> Warnings { get; } = new List<string>();
@@ -220,6 +248,7 @@ namespace KKManager.Core
                                 if (lstSeen.Add(lstAt))
                                 {
                                     r.CharaDataCount = r.CharaDataCount + 1;
+                                    r.CharaLstOffsets.Add(lstAt);
                                 }
                             }
                         }
@@ -253,6 +282,7 @@ namespace KKManager.Core
                             {
                                 r.CharaFaceOffsets.Add(faceOff);
                                 r.CharaFaceSizes.Add(faceLen);
+                                r.CharaVersions.Add(dataVer);
                             }
                         }
 
@@ -305,6 +335,31 @@ namespace KKManager.Core
                         ReadSssb(path, it, r);
                     }
                 }
+
+                // 内嵌角色数据明细——份头段（数据版本 / 卡面图）× 数据块目录 按出现顺序配对
+                int pairs = r.CharaFaceOffsets.Count < r.CharaLstOffsets.Count ? r.CharaFaceOffsets.Count : r.CharaLstOffsets.Count;
+                for (int k = 0; k < pairs; k = k + 1)
+                {
+                    SceneCharaData cd = new SceneCharaData
+                    {
+                        Index = k + 1,
+                        DataVersion = k < r.CharaVersions.Count ? r.CharaVersions[k] : null,
+                        FaceOffset = r.CharaFaceOffsets[k],
+                        FaceSize = r.CharaFaceSizes[k]
+                    };
+                    List<CardBlockInfo> blocks = ReadBlockTable(path, r.CharaLstOffsets[k]);
+                    if (blocks.Count == 0)
+                    {
+                        r.Warnings.Add("第 " + (k + 1) + " 份角色数据的块表未解析出条目（@" + r.CharaLstOffsets[k].ToString("N0") + "）");
+                    }
+                    cd.Blocks.AddRange(blocks);
+                    r.CharaData.Add(cd);
+                }
+                if (r.CharaFaceOffsets.Count != r.CharaLstOffsets.Count)
+                {
+                    r.Warnings.Add("份头段 " + r.CharaFaceOffsets.Count + " 个 · 数据块目录 " + r.CharaLstOffsets.Count
+                        + " 处——数量不等，明细按 " + pairs + " 份配对");
+                }
             }
             catch (IOException ex)
             {
@@ -316,6 +371,89 @@ namespace KKManager.Core
                 r.Warnings.Add("未识别到插件数据条目（数据区里没有 timeline / kkpe / vnge_* 形态的条目）");
             }
             return r;
+        }
+        /// <summary>读一份角色数据的数据块目录（lstInfo 数组——每项 map：name / version / pos / size）。</summary>
+        private static List<CardBlockInfo> ReadBlockTable(string path, long lstAt)
+        {
+            var list = new List<CardBlockInfo>();
+            byte[] buf = ReadValue(path, lstAt + LstInfoMark.Length, 64 * 1024, 64 * 1024);
+            if (buf == null)
+            {
+                return list;
+            }
+            MsgPackCursor cur = new MsgPackCursor(buf, 0);
+            int count;
+            if (!cur.TryReadArrayHeader(out count))
+            {
+                return list;
+            }
+            for (int i = 0; i < count; i = i + 1)
+            {
+                int keys;
+                if (!cur.TryReadMapHeader(out keys))
+                {
+                    break;
+                }
+                CardBlockInfo b = new CardBlockInfo();
+                bool ok = true;
+                for (int k = 0; k < keys; k = k + 1)
+                {
+                    string key;
+                    if (!cur.TryReadString(out key))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    if (key == "name" || key == "version")
+                    {
+                        string v;
+                        if (!cur.TryReadString(out v))
+                        {
+                            ok = false;
+                            break;
+                        }
+                        if (key == "name")
+                        {
+                            b.Name = v;
+                        }
+                        else
+                        {
+                            b.Version = v;
+                        }
+                    }
+                    else if (key == "pos" || key == "size")
+                    {
+                        long v;
+                        if (!cur.TryReadLong(out v))
+                        {
+                            ok = false;
+                            break;
+                        }
+                        if (key == "pos")
+                        {
+                            b.Pos = v;
+                        }
+                        else
+                        {
+                            b.Size = v;
+                        }
+                    }
+                    else if (!cur.TrySkipValue())
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok)
+                {
+                    break;
+                }
+                if (b.Name != null && b.Name.Length > 0)
+                {
+                    list.Add(b);
+                }
+            }
+            return list;
         }
 
         /// <summary>读 kkpe 的 sceneInfo XML——itemInfo 条数与名字清单（按出现次数降序）。</summary>
