@@ -788,11 +788,29 @@ function renderStructure(st, d, tl, co, sc, tlo){
     if(sc && !sc.error){
       rows.push(['内嵌角色数据', `<b>${sc.charaDataCount}</b> 份（场景里带的角色卡数据）`]);
       rows.push(['场景插件条目', `<b>${(sc.plugins||[]).length}</b> 条（数据区里的插件数据）`]);
+      if((sc.propNames||[]).length){
+        rows.push(['场景道具名', `<b>${(sc.propNames||[]).length}</b> 种（kkpe 记录 · itemInfo ${fmt(sc.kkpeItemCount)} 条）`]);
+      }
     }
   }
-  /* 概览末：内嵌贴图第一张（第一行第一列）直接摆出来 */
+  /* 概览末：内嵌贴图预览——人物卡 / 服装卡摆第一张；场景卡（sd）按内嵌角色数据份数逐份摆该份首图 */
   let firstImg = '';
-  if(d && (d.images||[]).length){
+  const sdFaces = (sc && !sc.error) ? (sc.charaFaces||[]) : [];
+  if(st.cardType === 'sd' && sdFaces.length){
+    let faceCells = '';
+    sdFaces.forEach((f, k) => {
+      const fsrc = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${f.offset}&size=${f.size}&w=192`;
+      const fbig = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${f.offset}&size=${f.size}&w=512`;
+      faceCells += `<div style="text-align:center">
+        <a href="${fbig}" target="_blank" rel="noopener"><img src="${fsrc}" style="width:144px;height:144px;object-fit:contain;background:#0b0d10;border:1px solid var(--line);border-radius:6px" onerror="this.classList.add('bad')"></a>
+        <div class="dim" style="font-size:12px;line-height:1.6">第 ${k+1} 份 · #${f.index}${f.isFace ? ' · 脸图' : ''}<br>${f.width}×${f.height} · ${fmt(f.size)} 字节</div>
+      </div>`;
+    });
+    firstImg = `<div style="margin-top:10px">
+      <div class="dim" style="font-size:12px;margin-bottom:6px">内嵌角色数据 <b>${sdFaces.length}</b> 份 · 每份一张（该份首张内嵌贴图 = 角色卡卡面）</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">${faceCells}</div>
+    </div>`;
+  }else if(d && (d.images||[]).length){
     const i0 = d.images[0];
     const s0 = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${i0.offset}&size=${i0.size}&w=192`;
     const b0 = `/api/card/${c.cardId}/image?lib=${c.lib||0}&offset=${i0.offset}&size=${i0.size}&w=512`;
@@ -849,13 +867,42 @@ function renderStructure(st, d, tl, co, sc, tlo){
 
   /* ⑥b 场景插件（sd 专有）——数据区里的插件数据条目（timeline / kkpe / vnge_* 等） */
   if(sc && !sc.error && (sc.plugins||[]).length){
-    let t = '<table class="list"><thead><tr><th>插件键</th><th style="width:200px">值形态</th><th style="width:130px">字节数</th><th style="width:150px">偏移</th></tr></thead><tbody>';
+    let t = '<table class="list"><thead><tr><th>插件键</th><th style="width:70px">版本</th><th style="width:150px">值形态</th><th style="width:120px">字节数</th><th>内容</th></tr></thead><tbody>';
     sc.plugins.forEach(p => {
-      t += `<tr><td class="mono"><b>${esc(p.key||'')}</b></td><td>${esc(p.shape||'')}</td><td class="mono">${p.bytes > 0 ? fmt(p.bytes) : '<span class="dim">—</span>'}</td><td class="mono dim">${fmt(p.offset)}</td></tr>`;
+      t += `<tr><td class="mono"><b>${esc(p.key||'')}</b></td><td class="mono dim">${p.version ? esc(p.version) : '—'}</td><td class="dim">${esc(p.shape||'')}</td><td class="mono">${p.bytes > 0 ? fmt(p.bytes) : '<span class="dim">—</span>'}</td><td class="dim">${esc(p.summary||'')}</td></tr>`;
     });
     t += '</tbody></table><div class="dim" style="margin-top:6px;font-size:12px">内嵌角色卡数据 <b>' + sc.charaDataCount + '</b> 份（数据块目录命中）· 数据区已扫描 ' + fmt(sc.scannedBytes) + ' 字节 · 插件条目 = 该场景里各插件写下的数据（timeline / kkpe / VNGE 各子系统）</div>';
     (sc.warnings||[]).forEach(w => { t += `<div style="color:var(--yellow);font-size:11px">${esc(w)}</div>`; });
     html += secHtml('场景插件（数据区条目）', (sc.plugins||[]).length + ' 条', t, false);
+  }
+
+  /* ⑥c 场景道具（kkpe 记录）——itemInfo 名清单（游戏内道具 / 节点名） */
+  if(sc && !sc.error && (sc.propNames||[]).length){
+    let t = '<div style="line-height:2.1">';
+    sc.propNames.forEach(n => {
+      t += `<span class="mono" style="display:inline-block;margin:0 6px 4px 0;padding:1px 6px;border:1px solid var(--line);border-radius:4px;font-size:12px">${esc(n.name)} <span class="dim">×${n.count}</span></span>`;
+    });
+    t += '</div><div class="dim" style="margin-top:6px;font-size:12px">itemInfo <b>' + fmt(sc.kkpeItemCount) + '</b> 条记录（KKPE 插件记下的场景道具 / 节点——名称为游戏内道具名，×N = 该名字被记录的节点数）</div>';
+    html += secHtml('场景道具（kkpe 记录）', (sc.propNames||[]).length + ' 种名', t, false);
+  }
+
+  /* ⑥d 时间轴（timeline）详情——时长 / 缩放 / 关键帧 / 插值组 + 轨道组名 */
+  if(st.cardType === 'sd' && tlo && tlo.hasEntry && !tlo.isEmpty){
+    let t = kvHtml([
+      ['时间轴长度', `<b>${secText(tlo.duration)}</b>（${fmt(tlo.duration)} 秒）`],
+      ['时间缩放', `timeScale ${tlo.timeScale} · 实际播放 <b>${secText(tlo.realSeconds)}</b>`],
+      ['关键帧', fmt(tlo.keyframes) + ' 个'],
+      ['插值组（轨道）', fmt(tlo.groups) + ' 个'],
+      ['最长关键帧', secText(tlo.maxKeyframeTime) + '（与时间轴长度口径不同，两者不等）']
+    ]);
+    const gs = tlo.groupNames || [];
+    if(gs.length){
+      let chips = '<div style="margin-top:8px;line-height:2.1">';
+      gs.forEach(g => { chips += `<span class="mono" style="display:inline-block;margin:0 6px 4px 0;padding:1px 6px;border:1px solid var(--line);border-radius:4px;font-size:12px">${esc(g)}</span>`; });
+      chips += '</div>';
+      t += '<div class="dim" style="font-size:12px;margin-top:6px">轨道组名（' + gs.length + ' 个——被 Timeline 驱动的部位 / 对象）</div>' + chips;
+    }
+    html += secHtml('时间轴（timeline）', fmt(tlo.groups) + ' 组 · ' + fmt(tlo.keyframes) + ' 关键帧', t, false);
   }
 
   /* ⑦ PNG 块表 */

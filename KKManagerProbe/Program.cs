@@ -74,7 +74,7 @@ namespace KKManager.Probe
         public int TypeID;
     }
 
-    internal static class Program
+    internal static partial class Program
     {
         private static readonly string[] ScanKeywords =
         {
@@ -150,6 +150,8 @@ namespace KKManager.Probe
                     return ExtractJs(args[1], args[2]);
                 case "sditems":
                     return SdItems(args[1], args[2]);
+                case "sdscan":
+                    return SdScanCommand(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 16);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;

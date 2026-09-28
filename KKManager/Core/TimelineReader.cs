@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -38,6 +39,9 @@ namespace KKManager.Core
         /// <summary>sceneInfo 里最长关键帧时刻（秒）——**不等于 timeline 长度**（实测 67 vs 71.507 · 130 vs 242），两者分开呈现。</summary>
         public double MaxKeyframeTime { get; set; }
 
+        /// <summary>插值组名（Timeline 轨道——被驱动的部位 / 对象；去重，最多 200 个）。</summary>
+        public List<string> GroupNames { get; } = new List<string>();
+
         /// <summary>实际播放时长（秒）= 原时长 / timeScale——播放时钟走 Unity 缩放时间，timeScale 越大越快。</summary>
         public double RealSeconds { get; set; }
 
@@ -67,6 +71,8 @@ namespace KKManager.Core
         private static readonly byte[] GroupNeedle = Encoding.ASCII.GetBytes("<interpolableGroup ");
         /// <summary>时刻属性锚点——time="（关键帧时刻）。</summary>
         private static readonly byte[] TimeNeedle = Encoding.ASCII.GetBytes("time=\"");
+        /// <summary>名字属性锚点——name="（插值组名）。</summary>
+        private static readonly byte[] NameNeedle = Encoding.ASCII.GetBytes("name=\"");
         /// <summary>首轮尾部窗口——16 MB（实测条目距文件尾最大约 12.5 MB）。</summary>
         private const long TailNear = 16L * 1024 * 1024;
         /// <summary>次轮尾部窗口——64 MB（首轮未命中再放大一档）。</summary>
@@ -172,7 +178,7 @@ namespace KKManager.Core
             return info;
         }
 
-        /// <summary>读 sceneInfo XML（上限 16 MB）——取 duration / timeScale / 关键帧数 / 插值组数 / 最长关键帧时刻 / 空轴标记。</summary>
+        /// <summary>读 sceneInfo XML（上限 16 MB）——取 duration / timeScale / 关键帧数 / 插值组数 / 最长关键帧时刻 / 插值组名 / 空轴标记。</summary>
         private static void ReadXml(FileStream fs, long xmlAt, int xmlLen, TimelineInfo info)
         {
             int take = xmlLen > MaxXmlRead ? MaxXmlRead : xmlLen;
@@ -211,6 +217,25 @@ namespace KKManager.Core
             info.Groups = CountNeedle(xml, n, GroupNeedle);
             info.MaxKeyframeTime = MaxQuotedNumber(xml, n, TimeNeedle);
             info.IsEmpty = info.Keyframes == 0 && !info.Truncated;
+
+            // 插值组名（Timeline 轨道）——从第一个 interpolableGroup 起取 name 属性，去重（上限 200）
+            int firstGroup = IndexOfNeedle(xml, n, GroupNeedle);
+            if (firstGroup < 0)
+            {
+                firstGroup = 0;
+            }
+            for (int i = firstGroup; i <= n - NameNeedle.Length && info.GroupNames.Count < 200; i = i + 1)
+            {
+                if (xml[i] != NameNeedle[0] || !MatchAt(xml, i, NameNeedle))
+                {
+                    continue;
+                }
+                string name = ReadQuotedText(xml, n, NameNeedle, i);
+                if (!string.IsNullOrEmpty(name) && !info.GroupNames.Contains(name))
+                {
+                    info.GroupNames.Add(name);
+                }
+            }
         }
 
         /// <summary>在 [from, to) 区间流式找 timeline 条目锚点，返回文件偏移（未命中 -1）。</summary>
@@ -275,6 +300,37 @@ namespace KKManager.Core
                     p = p + 1;
                 }
                 return sb.ToString();
+            }
+            return null;
+        }
+        /// <summary>找 needle 在缓冲里首次出现的位置；无则 -1。</summary>
+        private static int IndexOfNeedle(byte[] buf, int n, byte[] needle)
+        {
+            for (int i = 0; i <= n - needle.Length; i = i + 1)
+            {
+                if (buf[i] == needle[0] && MatchAt(buf, i, needle))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        /// <summary>读 needle 之后带引号的文本（UTF-8 解码；从 fromAt 起找 needle）；无则 null。</summary>
+        private static string ReadQuotedText(byte[] buf, int n, byte[] needle, int fromAt)
+        {
+            for (int i = fromAt; i <= n - needle.Length; i = i + 1)
+            {
+                if (buf[i] != needle[0] || !MatchAt(buf, i, needle))
+                {
+                    continue;
+                }
+                int start = i + needle.Length;
+                int p = start;
+                while (p < n && buf[p] != 0x22)
+                {
+                    p = p + 1;
+                }
+                return Encoding.UTF8.GetString(buf, start, p - start);
             }
             return null;
         }

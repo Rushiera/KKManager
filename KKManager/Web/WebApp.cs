@@ -1164,6 +1164,8 @@ namespace KKManager.Web
                         timelineText = TimelineReader.Describe(timeline);
                         // 场景卡（sd）深度分析——插件数据条目（timeline / kkpe / vnge_*）+ 内嵌角色卡数据份数
                         scene = SceneReader.Read(path, st.ImageEnd);
+                        // 每份内嵌角色数据的首图——与数据区图片清单对上（宽高 / 字节数取自 CardDetail 的同一遍扫描）
+                        scene.AttachCharaFaces(detail.Images);
                     }
                     else
                     {

@@ -482,11 +482,40 @@ namespace KKManager
             }
             Console.WriteLine("数据区     : " + st.DataSize.ToString("N0") + " 字节 · 已扫描 " + s.ScannedBytes.ToString("N0") + " 字节");
             Console.WriteLine("内嵌角色   : " + s.CharaDataCount + " 份（数据块目录命中）");
+            CardDetailResult cd = CardDetail.Parse(path, st.ImageEnd);
+            s.AttachCharaFaces(cd.Images);
+            Console.WriteLine("内嵌角色首图: " + s.CharaFaces.Count + " 张（每份一张——该份角色卡的卡面图）");
+            foreach (CardImageInfo face in s.CharaFaces)
+            {
+                Console.WriteLine("  #" + face.Index.ToString().PadLeft(3) + " @" + face.Offset.ToString("N0").PadLeft(14)
+                    + "  " + face.Size.ToString("N0").PadLeft(12) + " 字节  " + face.Width + "×" + face.Height
+                    + (face.IsFace ? "  [脸图]" : ""));
+            }
             Console.WriteLine("插件条目   : " + s.Plugins.Count + " 条");
             foreach (ScenePluginItem it in s.Plugins)
             {
-                Console.WriteLine("  @" + it.Offset.ToString("N0").PadLeft(14) + "  " + it.Key.PadRight(22) + "  " + it.Shape
-                    + (it.Bytes > 0 ? "  " + it.Bytes.ToString("N0") + " 字节" : ""));
+                Console.WriteLine("  @" + it.Offset.ToString("N0").PadLeft(14) + "  " + it.Key.PadRight(22)
+                    + (string.IsNullOrEmpty(it.Version) ? "        " : ("v" + it.Version).PadRight(8)) + "  " + it.Shape.PadRight(18)
+                    + (it.Bytes > 0 ? "  " + it.Bytes.ToString("N0").PadLeft(12) + " 字节" : "              ")
+                    + (string.IsNullOrEmpty(it.Summary) ? "" : "  " + it.Summary));
+            }
+            if (s.KkpeItemCount >= 0)
+            {
+                Console.WriteLine("场景道具   : itemInfo " + s.KkpeItemCount.ToString("N0") + " 条 · 名字 " + s.PropNames.Count + " 种（kkpe 记录）");
+                int shown = 0;
+                foreach (SceneNameCount nc in s.PropNames)
+                {
+                    if (shown >= 30)
+                    {
+                        break;
+                    }
+                    Console.WriteLine("  ×" + nc.Count.ToString().PadLeft(4) + "  " + nc.Name);
+                    shown = shown + 1;
+                }
+            }
+            if (s.SssbObjects >= 0)
+            {
+                Console.WriteLine("场景快照   : 对象 " + s.SssbObjects + " 个（相机 " + s.SssbCameras + " 个——vnge_sssb）");
             }
             TimelineInfo t = TimelineReader.Read(path, st.ImageEnd);
             Console.WriteLine("timeline   : " + TimelineReader.Describe(t));
@@ -494,6 +523,10 @@ namespace KKManager
             {
                 Console.WriteLine("  timeline 深度: 关键帧 " + t.Keyframes.ToString("N0") + " · 插值组 " + t.Groups
                     + " · 最长关键帧 " + TimelineReader.FormatSeconds(t.MaxKeyframeTime));
+                if (t.GroupNames.Count > 0)
+                {
+                    Console.WriteLine("  轨道组名 : " + string.Join(" · ", t.GroupNames));
+                }
             }
             foreach (string w in s.Warnings)
             {
