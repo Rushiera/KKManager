@@ -181,6 +181,9 @@ namespace KKManager.Data
 
         /// <summary>是否有缩略图。</summary>
         public bool HasThumb { get; set; }
+
+        /// <summary>卡类型（sd = Studio 场景卡——缩略图按 16:9 横版显示）。</summary>
+        public string CardType { get; set; }
     }
 
     /// <summary>mod 行（查询结果）。</summary>
@@ -2188,7 +2191,7 @@ namespace KKManager.Data
                 names.Add("$g" + i.ToString());
             }
             // [段2] 一次取全部匹配行——card_mod 先按 (guid, card_id) 去重，与计数口径一致（同一卡多行只算一次）
-            string sql = @"SELECT cm.mod_guid, c.id, c.file_name, c.root_path, c.folder, (c.thumb IS NOT NULL)
+            string sql = @"SELECT cm.mod_guid, c.id, c.file_name, c.root_path, c.folder, (c.thumb IS NOT NULL), c.card_type
                              FROM (SELECT DISTINCT mod_guid, card_id FROM card_mod WHERE mod_guid IN (" + string.Join(",", names) + @")) cm
                              JOIN card c ON c.id = cm.card_id";
             using (SqliteCommand cmd = NewCommand(sql))
@@ -2208,6 +2211,7 @@ namespace KKManager.Data
                         row.RootPath = r.IsDBNull(3) ? null : r.GetString(3);
                         row.Folder = r.IsDBNull(4) ? "" : r.GetString(4);
                         row.HasThumb = r.GetInt64(5) != 0;
+                        row.CardType = r.IsDBNull(6) ? null : r.GetString(6);
                         list.Add(row);
                     }
                 }

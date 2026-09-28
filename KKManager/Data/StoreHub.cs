@@ -722,6 +722,7 @@ namespace KKManager.Data
                     cr.RootPath = row.RootPath;
                     cr.Folder = row.Folder;
                     cr.HasThumb = row.HasThumb;
+                    cr.CardType = row.CardType;
                     cr.Lib = lib;
                     hit.Top.Add(cr);
                 }

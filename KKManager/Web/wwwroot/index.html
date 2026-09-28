@@ -42,6 +42,11 @@
   .item.s-cold{border-color:var(--gray)}
   .item.s-miss{border-color:var(--red)}
   .item .thumb{width:100%;aspect-ratio:252/352;background:#0e1013 center/cover no-repeat;display:block}
+  /* 场景卡（sd）是 16:9 横版（实测 1600×900 / 320×180）——按自身比例显示，并在网格里占两列宽 */
+  .item.t-sd .thumb{aspect-ratio:16/9}
+  .grid .item.t-sd{grid-column:span 2}
+  .mzrow .item.t-sd{flex:0 0 240px;width:240px}
+  .mzrow.open .item.t-sd{grid-column:span 2}
   .item .meta{padding:6px 8px;font-size:12px}
   .item .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .item .sub{color:var(--dim);font-size:11px;margin-top:2px}
@@ -178,6 +183,8 @@
   .dupgrp{display:flex;align-items:center;gap:10px}
   .dupthumbs{display:flex;align-items:center;gap:4px;flex:0 0 auto;cursor:pointer}
   .dupth{width:22px;height:30px;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:var(--panel2);display:block}
+  /* 场景卡（sd）16:9——小图也按横版（人物卡 / 服装卡仍是竖版 22×30） */
+  .dupth.sd{width:30px;height:17px}
   .dupthumbs:hover .dupth{border-color:var(--accent)}
   .dupmore{font-size:10px;color:var(--accent);border:1px solid var(--line);border-radius:4px;padding:2px 5px;white-space:nowrap;background:var(--panel2)}
   .dupthumbs:hover .dupmore{border-color:var(--accent)}
@@ -1279,9 +1286,13 @@ function cardStateClass(c){
   if(c.yellow > 0) return 's-cache';
   return 's-ok';
 }
+/* 卡片项 class——四色边框 + 场景卡（sd）类型标记；三处缩略图区共用同一判据 */
+function cardItemClass(c){
+  return 'item ' + cardStateClass(c) + (c.cardType === 'sd' ? ' t-sd' : '');
+}
 function cardHtml(c){
   const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
-  return `<div class="item ${cardStateClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
+  return `<div class="${cardItemClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
       <div class="meta"><div class="name">${esc(c.fileName)}</div>
       <div class="sub">${c.charaName ? esc(c.charaName) + ' · ' : ''}${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB</div></div></div>`;
 }
@@ -1919,8 +1930,8 @@ function copyThumbBlock(files, cards, cardTotal, guid){
   if(cardTotal === undefined && !list.length) return '';
   if(!cardTotal && !list.length) return '<span class="dupthumbs" style="cursor:default" title="没有卡片引用这个 mod"><span class="dim" style="font-size:11px;white-space:nowrap">无卡片引用</span></span>';
   const imgs = list.map(c => c.hasThumb
-    ? `<img class="dupth" loading="lazy" draggable="false" alt="" title="${esc(c.fileName||'')}" src="/api/thumb/${c.id}?lib=${c.lib||0}">`
-    : `<span class="dupth" title="${esc(c.fileName||'')}（无缩略图）"></span>`).join('');
+    ? `<img class="dupth${c.cardType === 'sd' ? ' sd' : ''}" loading="lazy" draggable="false" alt="" title="${esc(c.fileName||'')}" src="/api/thumb/${c.id}?lib=${c.lib||0}">`
+    : `<span class="dupth${c.cardType === 'sd' ? ' sd' : ''}" title="${esc(c.fileName||'')}（无缩略图）"></span>`).join('');
   return `<span class="dupthumbs" data-act="more" data-guid="${esc(guid)}" data-name="${esc(name)}" title="引用这个 mod 的卡片——点开看全部">${imgs}<span class="dupmore">查看更多 (${cardTotal})</span></span>`;
 }
 /* 旧版登记表——以路径小写为键（两窗共用） */
@@ -2467,7 +2478,7 @@ function renderModCards(){
   const grid = $('mcGrid');
   grid.innerHTML = mcState.items.map(c => {
     const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
-    return `<div class="item ${cardStateClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
+    return `<div class="${cardItemClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
       <div class="meta"><div class="name">${esc(c.fileName)}</div>
       <div class="sub">${esc(c.folder || '(根目录)')}</div></div></div>`;
   }).join('') || '<div class="dim">没有卡片引用这个 mod</div>';
