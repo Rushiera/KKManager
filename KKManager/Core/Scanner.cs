@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using KKManager.Data;
 
@@ -51,6 +52,8 @@ namespace KKManager.Core
 
         /// <summary>本次扫描为存量卡片补正卡类型的数（本版之前场景卡的 card_type 记成了数据区头段的乱码）。</summary>
         public int TypesFixed { get; set; }
+        /// <summary>本次扫描为场景卡读到 timeline 长度的数（供「按 timeline 长度」排序——读失败不计数，原因进错误明细）。</summary>
+        public int TimelineRead { get; set; }
 
         /// <summary>本次扫描因磁盘上已不存在而清理的记录数——卡片行 / mod 副本涉及的 guid 数 / 旧版登记条数之和。</summary>
         public int Removed { get; set; }
@@ -77,6 +80,7 @@ namespace KKManager.Core
             NamesRead += other.NamesRead;
             NamesFilled += other.NamesFilled;
             TypesFixed += other.TypesFixed;
+            TimelineRead += other.TimelineRead;
             Removed += other.Removed;
             Elapsed += other.Elapsed;
             foreach (string e in other.Errors)
@@ -340,6 +344,22 @@ namespace KKManager.Core
                                 store.UpdateCardName(f, CardName.ReadCharacter(f));
                                 result.NamesFilled++;
                             }
+                            if (old.Length > 4 && old[4] == "1")
+                            {
+                                // 存量 timeline 补齐：场景卡的长度还没读过（本版新口径）——读一次落表，供「按 timeline 长度」排序
+                                long oldCardId = long.Parse(old[5], CultureInfo.InvariantCulture);
+                                long oldImageEnd = long.Parse(old[6], CultureInfo.InvariantCulture);
+                                TimelineInfo cached = TimelineReader.Read(f, oldImageEnd);
+                                if (cached.Error == null)
+                                {
+                                    store.SaveCardTimeline(oldCardId, f, fi.Length, mtime, cached);
+                                    result.TimelineRead++;
+                                }
+                                else
+                                {
+                                    AddError(result, Path.GetFileName(f) + " timeline → " + cached.Error);
+                                }
+                            }
                             continue;
                         }
 
@@ -386,6 +406,20 @@ namespace KKManager.Core
                         store.ReplaceCardRefs(id, c.ModRefs);
                         result.Added++;
                         result.RefEntries += c.ModRefs.Count;
+                        if (c.CardType == CardReader.SceneCardType)
+                        {
+                            // 场景卡：顺带读 timeline 长度落表（供「按 timeline 长度」排序——空轴也落表，判空看关键帧）
+                            TimelineInfo tl = TimelineReader.Read(f, c.ImageEnd);
+                            if (tl.Error == null)
+                            {
+                                store.SaveCardTimeline(id, f, fi.Length, mtime, tl);
+                                result.TimelineRead++;
+                            }
+                            else
+                            {
+                                AddError(result, Path.GetFileName(f) + " timeline → " + tl.Error);
+                            }
+                        }
 
                         batchCount++;
                         if (batchCount >= BatchSize)

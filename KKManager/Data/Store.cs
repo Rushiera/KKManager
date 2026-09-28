@@ -116,6 +116,8 @@ namespace KKManager.Data
 
         /// <summary>游戏内角色名（读自卡片数据区；null / 空串 = 未读到或卡片没有名字——排序时排最后）。</summary>
         public string CharaName { get; set; }
+        /// <summary>timeline 长度（秒）——只有场景卡（sd）有；null = 未读过或卡片没有 timeline，排序时恒排组内最后。</summary>
+        public double? TimelineSeconds { get; set; }
 
         /// <summary>是否有缩略图。</summary>
         public bool HasThumb { get; set; }
@@ -995,22 +997,29 @@ namespace KKManager.Data
             return map;
         }
 
-        /// <summary>载入卡片时间戳索引——file_path → [size, mtime, 是否待补角色名, 卡类型]（第三项 "1" = 人物卡且名字尚未读过，扫描时补读；第四项 = 库里记的卡类型，供存量类型补正）。</summary>
+        /// <summary>载入卡片时间戳索引——file_path → [size, mtime, 是否待补角色名, 卡类型, 是否待补 timeline, 卡片 id, 图片区结束偏移]（第三项 "1" = 人物卡且名字尚未读过，扫描时补读；第四项 = 库里记的卡类型，供存量类型补正；第五项 "1" = 场景卡且 timeline 尚无有效缓存，扫描时补读；后两项供补读落表用）。</summary>
         public Dictionary<string, string[]> LoadCardStamps()
         {
             var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-            using (SqliteCommand cmd = NewCommand("SELECT file_path, size, mtime, (chara_name IS NULL AND card_type LIKE '%Chara%'), card_type FROM card"))
+            using (SqliteCommand cmd = NewCommand(@"SELECT c.file_path, c.size, c.mtime,
+                             (c.chara_name IS NULL AND c.card_type LIKE '%Chara%'), c.card_type,
+                             CASE WHEN c.card_type = 'sd' AND (t.card_id IS NULL OR t.size <> c.size OR IFNULL(t.mtime,'') <> IFNULL(c.mtime,'')) THEN 1 ELSE 0 END,
+                             c.id, c.image_end
+                             FROM card c LEFT JOIN card_timeline t ON t.card_id = c.id"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
                 {
                     map[r.GetString(0)] = new[]
                     {
-                        r.GetInt64(1).ToString(CultureInfo.InvariantCulture),
-                        r.IsDBNull(2) ? "" : r.GetString(2),
-                        r.GetInt64(3) != 0 ? "1" : "0",
-                        r.IsDBNull(4) ? "" : r.GetString(4)
-                    };
+                                r.GetInt64(1).ToString(CultureInfo.InvariantCulture),
+                                r.IsDBNull(2) ? "" : r.GetString(2),
+                                r.GetInt64(3) != 0 ? "1" : "0",
+                                r.IsDBNull(4) ? "" : r.GetString(4),
+                                r.GetInt64(5) != 0 ? "1" : "0",
+                                r.GetInt64(6).ToString(CultureInfo.InvariantCulture),
+                                r.IsDBNull(7) ? "0" : r.GetInt64(7).ToString(CultureInfo.InvariantCulture)
+                            };
                 }
             }
             return map;
@@ -1538,7 +1547,7 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>分页查询卡片（filter：all / pending / ready / black / nomod / nothumb；folder：文件夹过滤；root：库根过滤；order：排序键——mtime（默认）/ size；desc：组内方向，只对 size 生效，mtime 恒倒序）；size ≤ 0 = 不限条数。</summary>
+        /// <summary>分页查询卡片（filter：all / pending / ready / black / nomod / nothumb；folder：文件夹过滤；root：库根过滤；order：排序键——mtime（默认）/ size / file / chara / timeline（timeline 长度，没有 timeline 的卡恒排组内最后）；desc：组内方向，只对可切向的键生效，mtime 恒倒序）；size ≤ 0 = 不限条数。</summary>
         public List<CardRow> QueryCards(int page, int size, string filter, string q, string folder, string root, string order, bool desc)
         {
             var list = new List<CardRow>();
@@ -1604,11 +1613,21 @@ namespace KKManager.Data
             {
                 orderBy = "ORDER BY c.folder, CASE WHEN c.chara_name IS NULL OR c.chara_name = '' THEN 1 ELSE 0 END, c.chara_name ASC, c.id";
             }
+            else if (order == "timeline" && desc)
+            {
+                orderBy = "ORDER BY c.folder, CASE WHEN tl.duration IS NULL THEN 1 ELSE 0 END, tl.duration DESC, c.id";
+            }
+            else if (order == "timeline")
+            {
+                orderBy = "ORDER BY c.folder, CASE WHEN tl.duration IS NULL THEN 1 ELSE 0 END, tl.duration ASC, c.id";
+            }
             string sql = ColorCte + @" SELECT c.id, c.file_name, c.card_type, c.size, c.mtime,
                      c.root_path, c.tier, c.folder, c.mod_count,
                      COALESCE(a.green,0), COALESCE(a.yellow,0), COALESCE(a.red,0), COALESCE(a.black,0),
-                     (c.thumb IS NOT NULL), c.chara_name
-                     FROM card c LEFT JOIN agg a ON a.card_id = c.id " + where + @" " + orderBy + @"
+                     (c.thumb IS NOT NULL), c.chara_name,
+                     CASE WHEN tl.has_entry = 1 AND tl.is_empty = 0 THEN tl.duration END
+                     FROM card c LEFT JOIN agg a ON a.card_id = c.id
+                     LEFT JOIN card_timeline tl ON tl.card_id = c.id " + where + @" " + orderBy + @"
                      LIMIT $size OFFSET $off";
 
             using (SqliteCommand cmd = NewCommand(sql))
@@ -1648,7 +1667,8 @@ namespace KKManager.Data
                             Red = r.GetInt64(11),
                             Black = r.GetInt64(12),
                             HasThumb = r.GetInt64(13) != 0,
-                            CharaName = r.IsDBNull(14) ? null : r.GetString(14)
+                            CharaName = r.IsDBNull(14) ? null : r.GetString(14),
+                            TimelineSeconds = r.IsDBNull(15) ? (double?)null : r.GetDouble(15)
                         });
                     }
                 }

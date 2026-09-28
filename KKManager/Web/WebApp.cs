@@ -69,6 +69,9 @@ namespace KKManager.Web
         /// <summary>本次扫描为存量卡片补正卡类型的数。</summary>
         public int TypesFixed { get; set; }
 
+        /// <summary>本次扫描为场景卡读到 timeline 长度的数。</summary>
+        public int TimelineRead { get; set; }
+
         /// <summary>本次扫描清理的已消失记录数。</summary>
         public int Removed { get; set; }
 
@@ -973,6 +976,7 @@ namespace KKManager.Web
                     namesRead = s.NamesRead,
                     namesFilled = s.NamesFilled,
                     typesFixed = s.TypesFixed,
+                    timelineRead = s.TimelineRead,
                     removed = s.Removed,
                     startedAt = s.StartedAt,
                     finishedAt = s.FinishedAt,
@@ -1099,9 +1103,9 @@ namespace KKManager.Web
 
             app.MapGet("/api/cards", (int page, int size, string filter, string q, string folder, string root, string order, bool? desc) =>
             {
-                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size" && order != "file" && order != "chara")
+                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size" && order != "file" && order != "chara" && order != "timeline")
                 {
-                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size / file / chara）" });
+                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size / file / chara / timeline）" });
                 }
                 bool descending = desc == null || desc.Value;
                 if (size <= 0)
@@ -2849,6 +2853,7 @@ namespace KKManager.Web
                             _scan.NamesRead = r.NamesRead;
                             _scan.NamesFilled = r.NamesFilled;
                             _scan.TypesFixed = r.TypesFixed;
+                            _scan.TimelineRead = r.TimelineRead;
                             _scan.Removed = r.Removed;
                             _scan.Errors.AddRange(r.Errors);
                             _scan.Message = "扫描完成，用时 " + r.Elapsed.TotalSeconds.ToString("F1") + " 秒";

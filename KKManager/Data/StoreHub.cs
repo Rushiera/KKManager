@@ -401,7 +401,7 @@ namespace KKManager.Data
             return string.CompareOrdinal(a.Key, b.Key);
         }
 
-        /// <summary>卡片列表——指定 root 时只查该库；否则跨库合并后排序分页（order：排序键 mtime / size；desc：方向，只对 size 生效）。</summary>
+        /// <summary>卡片列表——指定 root 时只查该库；否则跨库合并后排序分页（order：排序键 mtime / size / file / chara / timeline；desc：方向，只对可切向的键生效）。</summary>
         public List<CardRow> QueryCards(RootsConfig cfg, int page, int size, string filter, string q, string folder, string root, string order, bool desc)
         {
             if (!string.IsNullOrEmpty(root))
@@ -429,13 +429,13 @@ namespace KKManager.Data
             return Slice(list, page, size);
         }
 
-        /// <summary>卡片排序器——文件夹 · 主键（修改时间倒序 / 文件大小按方向）· 库位 · 编号。</summary>
+        /// <summary>卡片排序器——文件夹 · 主键（修改时间倒序 / 文件大小 / 文件名 / 角色名 / timeline 长度按方向）· 库位 · 编号。</summary>
         private sealed class CardComparer : IComparer<CardRow>
         {
-            /// <summary>排序键（mtime / size）。</summary>
+            /// <summary>排序键（mtime / size / file / chara / timeline）。</summary>
             private readonly string _order;
 
-            /// <summary>组内方向——真 = 降序（只对 size 生效）。</summary>
+            /// <summary>组内方向——真 = 降序（只对可切向的键生效）。</summary>
             private readonly bool _desc;
 
             /// <summary>构造排序器。</summary>
@@ -483,6 +483,23 @@ namespace KKManager.Data
                     else if (!ea)
                     {
                         c = string.Compare(a.CharaName, b.CharaName, StringComparison.OrdinalIgnoreCase);
+                        if (_desc)
+                        {
+                            c = -c;
+                        }
+                    }
+                }
+                else if (_order == "timeline")
+                {
+                    bool ea = !a.TimelineSeconds.HasValue;
+                    bool eb = !b.TimelineSeconds.HasValue;
+                    if (ea != eb)
+                    {
+                        c = ea ? 1 : -1;
+                    }
+                    else if (!ea)
+                    {
+                        c = a.TimelineSeconds.Value.CompareTo(b.TimelineSeconds.Value);
                         if (_desc)
                         {
                             c = -c;
