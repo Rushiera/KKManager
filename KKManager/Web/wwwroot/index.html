@@ -72,8 +72,9 @@
   .dim{color:var(--dim)}
   .hidden{display:none !important}
   .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
-  /* 弹窗层级：基础 50 · 叠加层（在重复副本之上打开 mod）55 · 引用明细 58 · 悬停浮层 60 / 70 */
+  /* 弹窗层级：基础 50 · 叠加层（在重复副本之上打开 mod · 在整理计划之上开冲突小窗）55 / 56 · 引用明细 58 · 悬停浮层 60 / 70 */
   #ovModCards{z-index:55}
+  #ovSortKeep{z-index:56}
   #overlay{z-index:58}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
   .modal.wide{width:min(1120px,96vw)}
@@ -383,6 +384,23 @@
       <span class="grow"></span>
       <button id="btnSeGo" class="primary" disabled>确认执行</button>
       <button id="btnSeCancel">取消</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovSortKeep">
+  <div class="modal wide">
+    <header><b>保留哪一份？</b> <span class="dim" id="skInfo"></span></header>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:8px">这几份撞到同一个目标路径。点<b>「保留这一份」</b>：它留在原位（整理时照常进 <b>&lt;作者&gt;</b> 文件夹）；同 guid 其余非旧版副本判为<b>旧版</b>（名字加 <code>.old</code> 段）<b>进缓存库</b>，并留下新旧版本记录。冷冻库（只读）副本保持原样。</div>
+      <div class="cardinfo" id="skDest"></div>
+      <table class="list"><thead><tr><th style="width:82px"></th><th style="width:104px">级别</th><th>文件</th><th style="width:66px">大小</th><th style="width:118px">建 / 改</th><th style="width:70px">版本</th><th style="width:88px">作者</th><th style="width:96px">MD5</th></tr></thead>
+        <tbody id="skBody"></tbody></table>
+    </div>
+    <footer>
+      <span class="dim" id="skFoot"></span>
+      <span class="grow"></span>
+      <button id="btnSkClose">关闭</button>
     </footer>
   </div>
 </div>
@@ -2505,6 +2523,8 @@ $('btnAddModRoot').onclick = () => $('modRootsBody').appendChild(rootRow('mods')
 $('btnAddCardRoot').onclick = () => $('cardRootsBody').appendChild(rootRow('cards'));
 $('btnSortMtime').onclick = () => setCardSort('mtime');
 $('btnSortSize').onclick = () => setCardSort('size');
+$('btnSortFile').onclick = () => setCardSort('file');
+$('btnSortChara').onclick = () => setCardSort('chara');
 $('btnPickGameRoot').onclick = pickGameRoot;
 $('gameRoot').addEventListener('change', () => { syncMainRoots().catch(e => alert('刷新级别 1 路径失败：' + e.message)); });
 $('btnScanMain').onclick = () => startScan('main');
@@ -2880,6 +2900,49 @@ function pollSort(){
 async function loadSortPlan(){
   $('spBody').innerHTML = '<tr><td colspan="6" class="dim" style="padding:8px">读取中…</td></tr>';
   const r = await api('/api/sort/plan');
+  applySortView(r, false);
+}
+/* 计划窗阅读位置——记住视口顶部那一行（seq 为键）与相对偏移；重载后补回已渲染范围，再按同一行定位
+   （处理冲突后计划窗要一并更新，但不该把人正在读的位置甩走） */
+function spCaptureView(){
+  const body = $('ovSortPlan').querySelector('.body');
+  const rows = body.querySelectorAll('tr[data-seq]');
+  const bodyTop = body.getBoundingClientRect().top;
+  let hit = null;
+  for(let i = 0; i < rows.length; i++){
+    if(rows[i].getBoundingClientRect().bottom > bodyTop + 1){ hit = rows[i]; break; }
+  }
+  return {
+    shown: spShown,
+    scrollTop: body.scrollTop,
+    top: hit ? (hit.getBoundingClientRect().top - bodyTop) : 0,
+    seq: hit ? (hit.dataset.seq || '') : ''
+  };
+}
+function spRestoreView(view){
+  if(!view) return;
+  const body = $('ovSortPlan').querySelector('.body');
+  /* [段1] 先把已渲染范围补回——锚点行（正在读的那一行）可能还没渲染出来 */
+  let guard = 0;
+  while(spShown < view.shown && guard < 200){
+    const before = spShown;
+    renderSpRows();
+    if(spShown === before) break;
+    guard = guard + 1;
+  }
+  /* [段2] 按同一行重新定位；那一行没了就退到原像素 */
+  const rows = body.querySelectorAll('tr[data-seq]');
+  const bodyTop = body.getBoundingClientRect().top;
+  let hit = null;
+  for(let i = 0; i < rows.length; i++){
+    if(view.seq && rows[i].dataset.seq === view.seq){ hit = rows[i]; break; }
+  }
+  if(hit) body.scrollTop = body.scrollTop + ((hit.getBoundingClientRect().top - bodyTop) - view.top);
+  else body.scrollTop = view.scrollTop;
+}
+/* 套用计划视图（读表与渲染分开——处理冲突后直接套服务端返回的视图，不再多跑一次往返） */
+function applySortView(r, keepView){
+  const view = keepView ? spCaptureView() : null;
   if(!r || r.ok !== true){
     spPlan = null;
     spRows = [];
@@ -2906,23 +2969,43 @@ async function loadSortPlan(){
   spShown = 0;
   $('spBody').innerHTML = '';
   renderSpRows();
+  if(view) spRestoreView(view);
   updateSpExec();
 }
+/* 冲突分组——撞到同一目标路径的几份算一组（计划内撞车可挑保留份）；单条（目标已存在同名文件）仍走手动 */
+function spConflictGroups(){
+  const map = {};
+  const order = [];
+  spRows.filter(x => x.state === 'conflict').forEach(x => {
+    const key = (x.destPath || '').toLowerCase();
+    if(!map[key]){ map[key] = []; order.push(key); }
+    map[key].push(x);
+  });
+  return order.map(k => map[k]);
+}
 function renderSpConflicts(){
-  const list = spRows.filter(x => x.state === 'conflict');
-  if(!list.length){
+  const groups = spConflictGroups();
+  if(!groups.length){
     $('spConflict').classList.add('hidden');
     $('spConflict').innerHTML = '';
     return;
   }
+  const total = spRows.filter(x => x.state === 'conflict').length;
+  const multi = groups.filter(g => g.length > 1).length;
   let html = '<div style="border:1px solid var(--red);border-radius:6px;padding:8px;font-size:12px">'
-    + '<b style="color:var(--red)">冲突 ' + list.length + ' 条——必须解决才能执行</b>'
-    + '<div class="dim" style="margin:4px 0 6px">同名文件已在目标位置、或两条计划撞到同一目标路径。请改名 / 删掉多余的那份，然后点「重新核对」。</div>';
-  list.slice(0, 20).forEach(x => {
-    html += '<div style="margin:3px 0"><span class="mono">' + esc(x.srcPath) + '</span> ⇒ <span class="mono">' + esc(x.destPath) + '</span>'
-      + ' <span class="dim">（' + esc(x.note||'') + '）</span> <button class="spshow" data-path="' + esc(x.srcPath) + '">定位</button></div>';
+    + '<b style="color:var(--red)">冲突 ' + total + ' 条 / ' + groups.length + ' 组——必须解决才能执行</b>'
+    + '<div class="dim" style="margin:4px 0 6px">撞到同一目标路径的多份（' + multi + ' 组）点「选择保留哪一份」——保留的那份留在原位（整理时进 &lt;作者&gt; 文件夹），其余判为旧版进缓存库；单条冲突（目标已存在同名文件）请改名 / 删掉多余的那份，然后点「重新核对」。</div>';
+  groups.slice(0, 20).forEach(g => {
+    html += '<div style="margin:4px 0">';
+    if(g.length > 1) html += '<button class="spkeep" data-seq="' + g[0].seq + '">选择保留哪一份（' + g.length + ' 份）</button> ';
+    html += '<span class="mono">' + esc(g[0].destPath) + '</span> <span class="dim">（' + esc(g[0].note||'') + '）</span>';
+    g.slice(0, 6).forEach(x => {
+      html += '<div style="margin:2px 0 0 12px"><span class="dim mono" style="font-size:11px">' + esc(x.srcPath) + '</span> <button class="spshow" data-path="' + esc(x.srcPath) + '">定位</button></div>';
+    });
+    if(g.length > 6) html += '<div class="dim" style="margin-left:12px">…还有 ' + (g.length - 6) + ' 份</div>';
+    html += '</div>';
   });
-  if(list.length > 20) html += '<div class="dim">…还有 ' + (list.length - 20) + ' 条</div>';
+  if(groups.length > 20) html += '<div class="dim">…还有 ' + (groups.length - 20) + ' 组</div>';
   html += '</div>';
   $('spConflict').innerHTML = html;
   $('spConflict').classList.remove('hidden');
@@ -2941,7 +3024,7 @@ function renderSpRows(){
   for(let i = spShown; i < end; i++){
     const x = spRows[i];
     const st = sortStateLabel(x.state);
-    html += `<tr>
+    html += `<tr data-seq="${x.seq}" data-state="${esc(x.state || '')}">
       <td class="mono" style="${st.style}">${st.text}</td>
       <td class="dim" style="font-size:12px">${esc(x.author || '')}</td>
       <td class="mono" style="font-size:12px">${esc(x.folder || '')}</td>
@@ -2958,6 +3041,91 @@ function updateSpExec(){
   $('btnSpExec').disabled = !ok;
 }
 
+/* 冲突小窗——叠在计划窗之上（不关下层、不动阅读位置）：版本 / 作者 / MD5 实时读，点「保留这一份」定案 */
+let skView = null;
+async function openSortKeep(seq){
+  $('skInfo').textContent = '';
+  $('skDest').innerHTML = '';
+  $('skBody').innerHTML = '<tr><td colspan="8" class="dim" style="padding:8px">读取中（实时读 manifest 与 MD5）…</td></tr>';
+  $('skFoot').textContent = '';
+  $('ovSortKeep').classList.remove('hidden');
+  const planId = (spPlan && spPlan.planId) || 0;
+  const r = await api('/api/sort/conflict?planId=' + planId + '&seq=' + seq);
+  if(!r || r.ok !== true){
+    skView = null;
+    $('skBody').innerHTML = '<tr><td colspan="8" class="dim" style="padding:8px">' + esc((r && r.error) || '读不到这一处冲突') + '</td></tr>';
+    return;
+  }
+  skView = r;
+  renderSortKeep();
+}
+function renderSortKeep(){
+  const r = skView;
+  if(!r) return;
+  $('skInfo').textContent = r.guid ? ('guid ' + r.guid) : '';
+  $('skDest').innerHTML = '目标路径 <span class="mono">' + esc(r.destPath || '') + '</span>';
+  const items = r.items || [];
+  const seen = {};
+  let kinds = 0;
+  items.forEach(x => { if(x.md5 && !seen[x.md5]){ seen[x.md5] = 1; kinds = kinds + 1; } });
+  const md5Mixed = kinds > 1;
+  let html = '';
+  items.forEach(x => {
+    const size = x.size ? (x.size/1048576).toFixed(1) + ' MB' : '';
+    const ver = x.version ? esc(x.version) : '<span class="dim">—</span>';
+    const author = x.author ? esc(x.author) : '<span class="dim">—</span>';
+    const tierCell = x.tier === 1 ? '主库' : (x.tier === 2 ? '<span style="color:var(--yellow)">缓存库</span>' : '<span style="color:var(--gray)">冷冻库</span>');
+    const root = (x.rootPath||'').split('\\').pop() || '';
+    let md5Cell = '<span class="dim">—</span>';
+    if(x.md5){
+      const tip = 'MD5 ' + x.md5 + '（完整值）';
+      md5Cell = md5Mixed ? `<span class="mk r" title="${tip}">${esc(x.md5.slice(0,12))}</span>` : `<span class="mono cellsm" title="${tip}">${esc(x.md5.slice(0,12))}</span>`;
+    }else if(x.hashError){
+      md5Cell = '<span class="mk r" title="' + esc(x.hashError) + '">算不出</span>';
+    }
+    html += `<tr>
+      <td><button class="skkeep" data-seq="${x.seq}">保留这一份</button></td>
+      <td>${tierCell} <span class="dim cellsm">${esc(root)}</span></td>
+      <td class="mono" style="font-size:12px">${esc(x.fileName||'')}<div class="dim mono cellsm" style="max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.filePath||'')}">${esc(x.filePath||'')}</div></td>
+      <td class="dim">${size}</td>
+      <td class="dim cellsm">建 ${esc(x.ctime || '—')}<br>改 ${esc(dupStamp(x.mtime))}</td>
+      <td>${ver}</td><td>${author}</td><td>${md5Cell}</td>
+    </tr>`;
+  });
+  $('skBody').innerHTML = html || '<tr><td colspan="8" class="dim" style="padding:8px">没有候选</td></tr>';
+  $('skFoot').textContent = md5Mixed
+    ? ('共 ' + items.length + ' 份 · 各份内容不同（MD5 不一致）——看清再挑')
+    : ('共 ' + items.length + ' 份候选');
+}
+/* 保留这一份——服务端判旧其余副本（与重复副本同一实现）后返回更新过的计划视图，计划窗一并更新 */
+async function keepSortConflict(seq, btn){
+  if(!skView) return;
+  if(btn){ btn.disabled = true; btn.textContent = '处理中…'; }
+  $('skFoot').textContent = '处理中——判旧其余副本并搬移文件…';
+  let r = null;
+  try{
+    r = await api('/api/sort/conflict/keep', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({planId: skView.planId, seq: seq})});
+  }catch(err){
+    if(btn){ btn.disabled = false; btn.textContent = '保留这一份'; }
+    $('skFoot').textContent = '失败：' + err.message;
+    return;
+  }
+  if(!r || r.ok !== true){
+    if(btn){ btn.disabled = false; btn.textContent = '保留这一份'; }
+    $('skFoot').textContent = '失败：' + ((r && r.error) || '未知原因');
+    return;
+  }
+  $('ovSortKeep').classList.add('hidden');
+  applySortView(r.view, true);
+  $('spInfo').textContent = $('spInfo').textContent + ' · ' + (r.detail || '');
+}
+$('skBody').addEventListener('click', e => {
+  const b = e.target.closest ? e.target.closest('.skkeep') : null;
+  if(b) keepSortConflict(parseInt(b.dataset.seq, 10), b);
+});
+$('btnSkClose').onclick = () => $('ovSortKeep').classList.add('hidden');
+
 /* 按作者整理：按钮 / 范围框 / 计划窗 / 执行确认 */
 $('btnSortByAuthor').onclick = async () => {
   const r = await api('/api/sort/plan');
@@ -2973,10 +3141,11 @@ $('btnSsGen').onclick = () => startSortPlan();
 $('ssBody').addEventListener('change', e => { if(e.target.classList.contains('sschk')) updateSsSel(); });
 $('btnSpClose').onclick = () => {
   if(spBusy){ alert('任务还在跑——先点「停止」或等它跑完'); return; }
+  $('ovSortKeep').classList.add('hidden');
   $('ovSortPlan').classList.add('hidden');
 };
 $('btnSpRefresh').onclick = () => loadSortPlan();
-$('btnSpRegen').onclick = () => { $('ovSortPlan').classList.add('hidden'); openSortScope(); };
+$('btnSpRegen').onclick = () => { $('ovSortKeep').classList.add('hidden'); $('ovSortPlan').classList.add('hidden'); openSortScope(); };
 $('btnSpStop').onclick = () => api('/api/sort/stop', {method:'POST'}).catch(e => alert('停止失败：' + e.message));
 $('spConfirm').onchange = async () => {
   if(!spPlan) return;
@@ -3014,6 +3183,8 @@ $('spBody').addEventListener('click', e => {
   if(b) revealPath(b.dataset.path);
 });
 $('spConflict').addEventListener('click', e => {
+  const k = e.target.closest ? e.target.closest('.spkeep') : null;
+  if(k){ openSortKeep(parseInt(k.dataset.seq, 10)); return; }
   const b = e.target.closest ? e.target.closest('.spshow') : null;
   if(b) revealPath(b.dataset.path);
 });
