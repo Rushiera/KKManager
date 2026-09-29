@@ -146,7 +146,7 @@ namespace KKManager
             Console.WriteLine("  modinfo   <zipmod>                    解析单个 zipmod 的 manifest");
             Console.WriteLine("  cardinfo  <card.png>                  解析单张卡片的声明区");
             Console.WriteLine("  card-structure <card.png>             卡片文件结构（PNG 块表 + 图片区 / 数据区划分）");
-            Console.WriteLine("  card-timeline <card.png>              场景卡（sd）的 timeline 长度（Timeline 插件条目 duration / timeScale——与面板同一实现）");
+            Console.WriteLine("  card-timeline <card.png> [tracks]     场景卡（sd）的 timeline 长度（Timeline 插件条目 duration / timeScale——与面板同一实现）；tracks = 附轨道树（组 → 轨道 → 帧数）");
             Console.WriteLine("  card-scene <card.png>                 场景卡（sd）深度分析（插件数据条目 timeline / kkpe / vnge_* + 内嵌角色卡数据份数 + timeline 深度）");
             Console.WriteLine("  card-coord <card.png> [--all]         卡片服装 / 饰品（Coordinate 块七套槽位：服装 9 槽 + 饰品 20 槽 + 化妆）");
             Console.WriteLine("  thumb     <card.png> <out.jpg>        导出缩略图（离线核对）");
@@ -460,7 +460,7 @@ namespace KKManager
         /// <summary>场景卡 timeline 长度——Timeline 插件条目里的 duration / timeScale（只读；与面板同一实现）。</summary>
         private static int CardTimelineCommand(List<string> rest)
         {
-            RequireArgs(rest, "card-timeline <card.png>", 1);
+            RequireArgs(rest, "card-timeline <card.png> [tracks]", 1);
             CardStructure st = CardDocument.Parse(rest[0]);
             if (st.Error != null)
             {
@@ -468,6 +468,7 @@ namespace KKManager
                 return 3;
             }
             string path = st.FilePath == null ? rest[0] : st.FilePath;
+            bool tracks = rest.Count > 1 && rest[1] == "tracks";
             Console.WriteLine("文件       : " + path);
             Console.WriteLine("卡类型     : " + (st.CardType == null ? "<无>" : st.CardType)
                 + " · 数据标记 " + (st.DataVersion == null ? "<无>" : st.DataVersion));
@@ -486,7 +487,86 @@ namespace KKManager
                     + " · 最长关键帧 " + TimelineReader.FormatSeconds(t.MaxKeyframeTime)
                     + " · sceneInfo XML " + t.XmlLength.ToString("N0") + " 字节 · 命中阶段 " + (t.HitStage == null ? "<无>" : t.HitStage));
             }
+            if (tracks)
+            {
+                DumpTimelineTracks(path, st.ImageEnd);
+            }
             return 0;
+        }
+        /// <summary>一条轨道的关键帧帧数与首末时刻。</summary>
+        private static int TimelineTrackSpan(TimelineTrack track, out double first, out double last)
+        {
+            first = 0;
+            last = 0;
+            int frames = 0;
+            for (int i = 0; i < track.Keyframes.Count; i = i + 1)
+            {
+                if (frames == 0)
+                {
+                    first = track.Keyframes[i].Time;
+                }
+                last = track.Keyframes[i].Time;
+                frames = frames + 1;
+            }
+            return frames;
+        }
+        /// <summary>输出 timeline 轨道树（组 → 轨道 → 帧数）——完整模型旁证（只读）。</summary>
+        private static void DumpTimelineTracks(string path, long imageEnd)
+        {
+            TimelineScene scene = TimelineReader.ReadScene(path, imageEnd);
+            if (scene.Error != null)
+            {
+                Console.WriteLine("轨道模型   : 读取失败——" + scene.Error);
+                return;
+            }
+            if (!scene.HasEntry)
+            {
+                Console.WriteLine("轨道模型   : 无 timeline 条目");
+                return;
+            }
+            string cut = "";
+            if (scene.Truncated)
+            {
+                cut = "（超上限截断）";
+            }
+            Console.WriteLine("轨道模型   : 组 " + scene.Groups.Count + " · 轨道 " + scene.Tracks.Count
+                + " · XML " + scene.XmlLength.ToString("N0") + " 字节" + cut);
+            for (int i = 0; i < scene.Groups.Count; i = i + 1)
+            {
+                TimelineGroup g = scene.Groups[i];
+                string pad = new string(' ', g.Depth * 2);
+                Console.WriteLine("  " + pad + "- " + g.Name + "（轨道 " + g.TrackCount + "）");
+            }
+            for (int i = 0; i < scene.Tracks.Count; i = i + 1)
+            {
+                TimelineTrack tr = scene.Tracks[i];
+                string alias = tr.Alias;
+                if (alias == null || alias.Length == 0)
+                {
+                    alias = "<无别名>";
+                }
+                string id = tr.Id;
+                if (id == null)
+                {
+                    id = "<无类型>";
+                }
+                string owner = tr.Owner;
+                if (owner == null)
+                {
+                    owner = "";
+                }
+                string off = "";
+                if (!tr.Enabled)
+                {
+                    off = " · 未启用";
+                }
+                double first;
+                double last;
+                int frames = TimelineTrackSpan(tr, out first, out last);
+                Console.WriteLine("  #" + (i + 1) + " " + alias + " · " + id + " · " + owner
+                    + " · obj " + tr.ObjectIndex + " · 帧 " + frames
+                    + " [" + TimelineReader.SecondsText(first) + "," + TimelineReader.SecondsText(last) + "]" + off);
+            }
         }
         /// <summary>场景卡（sd）深度分析——插件数据条目（timeline / kkpe / vnge_*）+ 内嵌角色卡数据份数 + timeline 深度（只读；与面板同一实现）。</summary>
         private static int CardSceneCommand(List<string> rest)

@@ -997,6 +997,8 @@ function renderStructure(st, d, tl, co, sc, tlo){
       t += '<div class="dim" style="font-size:12px;margin-top:6px">轨道组名（' + gs.length + ' 个——被 Timeline 驱动的部位 / 对象）</div>' + chips;
     }
     html += secHtml('时间轴（timeline）', fmt(tlo.groups) + ' 组 · ' + fmt(tlo.keyframes) + ' 关键帧', t, false);
+    /* ⑥e 时间轴轨道视图（只读）——组树 + 轨道 + 关键帧打点；数据来自 /api/card/{id}/timeline */
+    html += secHtml('时间轴轨道（只读）', '轨道视图', '<div id="tlViewBox" class="dim">轨道视图加载中…</div>', false);
   }
 
   /* ⑦ PNG 块表 */
@@ -1019,7 +1021,209 @@ function renderStructure(st, d, tl, co, sc, tlo){
     html = '<div style="color:var(--red);margin-bottom:8px">' + esc(st.error) + '</div>' + html;
   }
   $('anSections').innerHTML = html;
+  if(st.cardType === 'sd' && tlo && tlo.hasEntry && !tlo.isEmpty){ loadTracksView(); }
 }
+
+/* ---------- 时间轴轨道视图（只读分析）——组树 + 轨道 + 关键帧打点；游标处列出该时刻被驱动的轨道 ---------- */
+let tlCtx = null;
+let tlRows = [];
+let tlShowAll = false;
+let tlDur = 1;
+let tlCursorT = -1;
+const TL_ROW_H = 22;
+const TL_PAD = 8;
+
+/* 组路径（对象 / 部位 / 子部位）——组树按 ParentIndex 回溯 */
+function tlGroupPath(groups, gi){
+  if(!groups || gi < 0 || gi >= groups.length){ return ''; }
+  const parts = [];
+  let g = groups[gi];
+  let guard = 0;
+  while(g && guard < 8){
+    parts.unshift(g.n || '');
+    g = (g.p >= 0 && g.p < groups.length) ? groups[g.p] : null;
+    guard = guard + 1;
+  }
+  return parts.join(' / ');
+}
+/* owner 色标（Timeline / KKPE / NodesConstraints 三族） */
+function tlOwnerColor(owner){
+  if(owner === 'KKPE'){ return 'var(--gold)'; }
+  if(owner === 'NodesConstraints'){ return '#c08cff'; }
+  return 'var(--accent)';
+}
+/* 网格步长——按总时长选 1 / 2 / 5 / 10 / 30 / 60 … 秒 */
+function tlGridStep(){
+  const cand = [1,2,5,10,30,60,120,300];
+  for(let i=0;i<cand.length;i=i+1){ if(tlDur / cand[i] <= 24){ return cand[i]; } }
+  return 600;
+}
+async function loadTracksView(){
+  const box = $('tlViewBox');
+  if(!box){ return; }
+  try{
+    const c = anCtx;
+    const r = await api(`/api/card/${c.cardId}/timeline?lib=${c.lib||0}`);
+    if(r.ok !== true){ box.innerHTML = '<span style="color:var(--red)">'+esc(r.error||'轨道模型读取失败')+'</span>'; return; }
+    tlCtx = r;
+    tlShowAll = false;
+    tlCursorT = -1;
+    renderTracksView();
+  }catch(e){
+    box.innerHTML = '<span style="color:var(--red)">轨道模型读取失败：'+esc(e.message)+'</span>';
+  }
+}
+/* 渲染轨道视图（默认只显有动画的轨道——静态轨道一键展开） */
+function renderTracksView(){
+  const box = $('tlViewBox');
+  if(!box || !tlCtx){ return; }
+  const tracks = tlCtx.tracks || [];
+  const groups = tlCtx.groups || [];
+  tlDur = tlCtx.duration > 0 ? tlCtx.duration : 1;
+  tlRows = [];
+  let staticCount = 0;
+  tracks.forEach(t => {
+    const frames = (t.kf||[]).length;
+    if(frames <= 1){
+      staticCount = staticCount + 1;
+      if(!tlShowAll){ return; }
+    }
+    tlRows.push({t: t, frames: frames, path: tlGroupPath(groups, t.g)});
+  });
+  const rowsH = Math.max(1, tlRows.length) * TL_ROW_H + TL_PAD*2;
+  let names = '';
+  tlRows.forEach(row => {
+    const alias = row.t.alias && row.t.alias.length ? row.t.alias : '(无别名)';
+    const tip = row.path + ' · ' + alias + ' · ' + (row.t.id||'') + ' · ' + (row.t.owner||'') + ' · ' + row.frames + ' 帧';
+    names += `<div title="${esc(tip)}" style="height:${TL_ROW_H}px;line-height:${TL_ROW_H}px;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${tlOwnerColor(row.t.owner)};margin-right:5px;vertical-align:1px"></span><span class="mono">${esc(alias)}</span><span class="dim" style="font-size:10px;margin-left:6px">${esc(row.t.id||'')}</span></div>`;
+  });
+  const animCount = tracks.length - staticCount;
+  const btnText = tlShowAll ? ('只看有动画的（' + animCount + ' 条）') : ('显示全部（含静态 ' + staticCount + ' 条）');
+  box.innerHTML = `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+      <button id="tlAllBtn">${btnText}</button>
+      <span class="dim" style="font-size:12px">轨道 ${tlRows.length} / ${tracks.length} 条 · 时长 ${secText(tlDur)} · 鼠标移到时间轴上：竖线处列出该时刻被驱动的轨道</span>
+      <span class="mono" id="tlCursor" style="font-size:12px"></span>
+    </div>
+    <div style="display:flex;overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:6px;background:#0b0d10">
+      <div id="tlNames" style="flex:0 0 240px;position:sticky;left:0;background:#0b0d10;border-right:1px solid var(--line);height:${rowsH}px;z-index:1">${names || '<div class="dim" style="padding:6px;font-size:12px">没有可显示的轨道</div>'}</div>
+      <canvas id="tlCanvas" style="display:block;flex:1 1 auto;min-width:420px;height:${rowsH}px;cursor:crosshair"></canvas>
+    </div>
+    <div id="tlHits" class="dim" style="font-size:12px;margin-top:6px;line-height:1.8">鼠标移到时间轴上：竖线处列出该时刻被驱动的轨道</div>`;
+  const cv = $('tlCanvas');
+  cv.addEventListener('mousemove', tlMove);
+  cv.addEventListener('mouseleave', tlLeave);
+  $('tlAllBtn').onclick = () => { tlShowAll = !tlShowAll; tlCursorT = -1; renderTracksView(); };
+  tlDraw();
+}
+/* 时间 → 画布 x（x = TL_PAD + t/dur*(w-2*TL_PAD)） */
+function tlXOf(t, w){
+  return TL_PAD + (t / tlDur) * (w - 2*TL_PAD);
+}
+/* 画布 x → 时刻 */
+function tlTimeAtX(x, w){
+  const t = (x - TL_PAD) / (w - 2*TL_PAD) * tlDur;
+  if(t < 0){ return 0; }
+  if(t > tlDur){ return tlDur; }
+  return t;
+}
+/* 重绘——网格 + 每轨道关键帧打点 + 游标 */
+function tlDraw(){
+  const cv = $('tlCanvas');
+  if(!cv){ return; }
+  const ctx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth;
+  const h = cv.clientHeight;
+  cv.width = Math.round(w*dpr);
+  cv.height = Math.round(h*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const step = tlGridStep();
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  for(let t=0;t<=tlDur+1e-9;t=t+step){
+    const x = tlXOf(t, w);
+    ctx.beginPath();
+    ctx.moveTo(x,0);
+    ctx.lineTo(x,h);
+    ctx.stroke();
+  }
+  tlRows.forEach((row, k) => {
+    const y0 = TL_PAD + k*TL_ROW_H;
+    if(k % 2 === 0){
+      ctx.fillStyle = 'rgba(255,255,255,0.025)';
+      ctx.fillRect(0,y0,w,TL_ROW_H);
+    }
+    const cy = y0 + TL_ROW_H/2;
+    ctx.fillStyle = row.t.en ? '#7fd4ff' : '#6a7480';
+    (row.t.kf||[]).forEach(kf => {
+      const x = tlXOf(kf[0], w);
+      ctx.fillRect(x-1, cy-4, 2, 8);
+    });
+  });
+  if(tlCursorT >= 0){
+    const x = tlXOf(tlCursorT, w);
+    ctx.strokeStyle = 'rgba(255,120,120,0.9)';
+    ctx.beginPath();
+    ctx.moveTo(x,0);
+    ctx.lineTo(x,h);
+    ctx.stroke();
+  }
+}
+/* 最近关键帧（二分——关键帧时刻按 XML 顺序升序） */
+function tlNearest(row, t){
+  const kfs = row.t.kf || [];
+  if(!kfs.length){ return -1; }
+  let lo = 0;
+  let hi = kfs.length - 1;
+  while(lo < hi){
+    const mid = Math.floor((lo + hi) / 2);
+    if(kfs[mid][0] < t){ lo = mid + 1; } else { hi = mid; }
+  }
+  let bi = lo;
+  if(lo > 0 && Math.abs(kfs[lo-1][0]-t) < Math.abs(kfs[lo][0]-t)){ bi = lo - 1; }
+  return bi;
+}
+function tlMove(e){
+  const cv = $('tlCanvas');
+  if(!cv){ return; }
+  const rect = cv.getBoundingClientRect();
+  const w = cv.clientWidth;
+  const t = tlTimeAtX(e.clientX - rect.left, w);
+  tlCursorT = t;
+  tlDraw();
+  const pxPerSec = (w - 2*TL_PAD) / tlDur;
+  const tol = Math.max(0.02, 3 / Math.max(pxPerSec, 0.001));
+  const hits = [];
+  tlRows.forEach(row => {
+    const bi = tlNearest(row, t);
+    if(bi < 0){ return; }
+    const kf = row.t.kf[bi];
+    if(Math.abs(kf[0]-t) <= tol){ hits.push({row: row, kf: kf}); }
+  });
+  $('tlCursor').textContent = secText(t);
+  const box = $('tlHits');
+  if(!hits.length){ box.innerHTML = '<span class="dim">该时刻附近没有关键帧</span>'; return; }
+  let out = `<b>${hits.length}</b> 条轨道在该时刻有关键帧：`;
+  hits.slice(0, 60).forEach(hh => {
+    const alias = hh.row.t.alias && hh.row.t.alias.length ? hh.row.t.alias : '(无别名)';
+    let v = '';
+    if(hh.kf.length >= 5){
+      v = '(' + hh.kf[1].toFixed(3) + ', ' + hh.kf[2].toFixed(3) + ', ' + hh.kf[3].toFixed(3) + ', ' + hh.kf[4].toFixed(3) + ')';
+    }else{
+      v = '值 ' + hh.kf[1];
+    }
+    out += `<div>· <b>${esc(alias)}</b> <span class="dim">${esc(hh.row.t.id||'')} · ${esc(hh.row.path||'')} · t ${secText(hh.kf[0])} · ${esc(v)}</span></div>`;
+  });
+  if(hits.length > 60){ out += `<div class="dim">…还有 ${hits.length-60} 条</div>`; }
+  box.innerHTML = out;
+}
+function tlLeave(){
+  tlCursorT = -1;
+  tlDraw();
+  $('tlCursor').textContent = '';
+  $('tlHits').innerHTML = '鼠标移到时间轴上：竖线处列出该时刻被驱动的轨道';
+}
+
 async function loadStructure(){
   const c = anCtx;
   $('anMsg').textContent = '读取中…（要扫一遍卡片，大卡需几秒）';

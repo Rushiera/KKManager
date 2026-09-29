@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -560,9 +561,97 @@ namespace KKManager.Web
                 + "（命中阶段 " + (t.HitStage == null ? "无条目" : t.HitStage) + " · XML " + t.XmlLength + " 字节）");
             return t;
         }
+        /// <summary>取一张场景卡的完整 timeline 模型——内存缓存优先（路径 + 大小 + 修改时间判失效），未命中现场解析。</summary>
+        private static TimelineScene ReadTimelineSceneCached(string path, long imageEnd)
+        {
+            FileInfo fi = new FileInfo(path);
+            string key = path + "|" + fi.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + Store.StampOf(fi);
+            TimelineScene hit;
+            if (SceneCache.TryGetValue(key, out hit))
+            {
+                Console.WriteLine("[timeline] 轨道模型命中内存缓存：" + fi.Name);
+                return hit;
+            }
+            TimelineScene scene = TimelineReader.ReadScene(path, imageEnd);
+            if (scene.Error == null && scene.HasEntry)
+            {
+                if (SceneCache.Count >= 4)
+                {
+                    SceneCache.Clear();
+                }
+                SceneCache[key] = scene;
+            }
+            Console.WriteLine("[timeline] 轨道模型 " + fi.Name + " → 组 " + scene.Groups.Count + " · 轨道 " + scene.Tracks.Count
+                + " · XML " + scene.XmlLength + " 字节" + (scene.Error == null ? "" : "（失败：" + scene.Error + "）"));
+            return scene;
+        }
+        /// <summary>timeline 模型 → 面板 JSON（精简视图；full = 附属性全集，供后续编辑 / 导出复用同一份格式）。</summary>
+        private static object TimelineSceneJson(TimelineScene scene, bool full)
+        {
+            List<object> groups = new List<object>();
+            for (int i = 0; i < scene.Groups.Count; i = i + 1)
+            {
+                TimelineGroup g = scene.Groups[i];
+                groups.Add(new { n = g.Name, p = g.ParentIndex, d = g.Depth, tc = g.TrackCount });
+            }
+            List<object> tracks = new List<object>();
+            int keyframeTotal = 0;
+            for (int i = 0; i < scene.Tracks.Count; i = i + 1)
+            {
+                TimelineTrack t = scene.Tracks[i];
+                List<object> kfs = new List<object>();
+                for (int k = 0; k < t.Keyframes.Count; k = k + 1)
+                {
+                    TimelineKeyframe kf = t.Keyframes[k];
+                    if (kf.HasXYZW)
+                    {
+                        kfs.Add(new object[] { kf.Time, kf.ValueX, kf.ValueY, kf.ValueZ, kf.ValueW });
+                    }
+                    else
+                    {
+                        kfs.Add(new object[] { kf.Time, kf.Value });
+                    }
+                }
+                keyframeTotal = keyframeTotal + t.Keyframes.Count;
+                if (full)
+                {
+                    tracks.Add(new { g = t.GroupIndex, id = t.Id, alias = t.Alias, owner = t.Owner, oi = t.ObjectIndex, path = t.GuideObjectPath, en = t.Enabled, attrs = t.Attributes, kf = kfs });
+                }
+                else
+                {
+                    tracks.Add(new { g = t.GroupIndex, id = t.Id, alias = t.Alias, owner = t.Owner, oi = t.ObjectIndex, path = t.GuideObjectPath, en = t.Enabled, kf = kfs });
+                }
+            }
+            object rootAttrs = null;
+            if (full)
+            {
+                rootAttrs = scene.RootAttributes;
+            }
+            return new
+            {
+                ok = scene.Error == null,
+                error = scene.Error,
+                hasEntry = scene.HasEntry,
+                isEmpty = scene.IsEmpty,
+                duration = scene.Duration,
+                timeScale = scene.TimeScale,
+                blockLength = scene.BlockLength,
+                divisions = scene.Divisions,
+                xmlLength = scene.XmlLength,
+                truncated = scene.Truncated,
+                keyframes = keyframeTotal,
+                groups = groups,
+                tracks = tracks,
+                rootAttrs = rootAttrs
+            };
+        }
 
         /// <summary>内嵌图片缩略图缓存（键 = 路径 + 偏移 + 长度 + 宽度）——同一张图重复请求直接命中。</summary>
         private static readonly Dictionary<string, byte[]> ThumbCache = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        /// <summary>timeline 完整模型的内存缓存（键 = 路径 + 大小 + 修改时间）——分析窗按需解析，避免反复读数 MB 的 XML。</summary>
+        private static readonly Dictionary<string, TimelineScene> SceneCache = new Dictionary<string, TimelineScene>(StringComparer.Ordinal);
+        /// <summary>timeline 端点的 JSON 选项——中文别名 / 路径不转义（默认编码器会把每个中文字符膨胀成 \uXXXX）。</summary>
+        private static readonly JsonSerializerOptions RelaxJson = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
         /// <summary>
         /// 取卡片内嵌图片并缩放为 JPEG（只读）——区间必须落在卡片文件内且以 PNG 签名开头。
         /// </summary>
@@ -1444,6 +1533,28 @@ namespace KKManager.Web
                     sceneFinal = scene;
                 }
                 return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detailFinal, timeline = timeline, timelineText = timelineText, coords = coordsFinal, scene = sceneFinal });
+            });
+
+            // 场景卡 timeline 完整模型（只读）——组树 + 轨道 + 关键帧（分析窗轨道视图）；full=1 附属性全集（后续编辑 / 导出复用同一份格式）
+            app.MapGet("/api/card/{id}/timeline", (long id, int lib, int full) =>
+            {
+                RootsConfig cfg = LoadConfig();
+                string path = CardPathOf(cfg, lib, id, out string why);
+                if (path == null)
+                {
+                    return Results.Json(new { ok = false, error = why });
+                }
+                CardStructure st = CardDocument.Parse(path);
+                if (st.Error != null)
+                {
+                    return Results.Json(new { ok = false, error = st.Error });
+                }
+                if (st.CardType != CardReader.SceneCardType)
+                {
+                    return Results.Json(new { ok = false, error = "不是场景卡——只有 Studio 场景卡带 timeline 数据" });
+                }
+                TimelineScene scene = ReadTimelineSceneCached(path, st.ImageEnd);
+                return Results.Json(TimelineSceneJson(scene, full != 0), RelaxJson);
             });
 
             // 卡片内嵌图片缩略图（只读）——按偏移 / 长度取数据区里的 PNG，缩放为 JPEG 返回

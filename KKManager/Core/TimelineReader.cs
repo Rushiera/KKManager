@@ -27,6 +27,9 @@ namespace KKManager.Core
         /// <summary>sceneInfo XML 的字节数。</summary>
         public long XmlLength { get; set; }
 
+        /// <summary>sceneInfo XML 在卡片文件里的起点偏移（0 = 未定位）。</summary>
+        public long XmlAt { get; set; }
+
         /// <summary>XML 内关键帧数（读前 4 MB 计数）。</summary>
         public int Keyframes { get; set; }
 
@@ -188,6 +191,7 @@ namespace KKManager.Core
                     return info;
                 }
                 info.XmlLength = xmlLen;
+                info.XmlAt = xmlAt;
                 ReadXml(fs, xmlAt, xmlLen, info);
             }
             finally
@@ -479,6 +483,88 @@ namespace KKManager.Core
                 text = text + " · 实际播放 " + FormatSeconds(t.RealSeconds) + "（timeScale " + SecondsText(t.TimeScale) + "）";
             }
             return text;
+        }
+        /// <summary>模型里的关键帧总数（判空用）。</summary>
+        private static int CountKeyframes(TimelineScene scene)
+        {
+            int total = 0;
+            for (int i = 0; i < scene.Tracks.Count; i = i + 1)
+            {
+                total = total + scene.Tracks[i].Keyframes.Count;
+            }
+            return total;
+        }
+        /// <summary>读完整 timeline 模型（会话版——复用段内已打开的句柄；session 为 null 时自行开文件）。</summary>
+        /// <param name="path">卡片文件绝对路径。</param>
+        /// <param name="imageEnd">图片区结束偏移。</param>
+        /// <param name="session">卡片文件会话（复用句柄；null = 自行开文件）。</param>
+        public static TimelineScene ReadScene(string path, long imageEnd, CardFileSession session)
+        {
+            TimelineScene scene = new TimelineScene { TimeScale = 1 };
+            if (!File.Exists(path))
+            {
+                scene.Error = "卡片文件不存在：" + path;
+                return scene;
+            }
+            bool own = session == null;
+            if (own)
+            {
+                session = CardFileSession.Open(path);
+            }
+            if (session == null)
+            {
+                scene.Error = "卡片文件打不开：" + path;
+                return scene;
+            }
+            try
+            {
+                TimelineInfo info = Read(path, imageEnd, session);
+                if (info.Error != null)
+                {
+                    scene.Error = info.Error;
+                    return scene;
+                }
+                if (!info.HasEntry)
+                {
+                    scene.HasEntry = false;
+                    return scene;
+                }
+                scene.HasEntry = true;
+                scene.XmlLength = info.XmlLength;
+                scene.Truncated = info.XmlLength > MaxXmlRead;
+                if (info.XmlLength <= 0 || info.XmlAt <= 0)
+                {
+                    scene.Error = "sceneInfo 区间不可用（偏移 " + info.XmlAt.ToString(CultureInfo.InvariantCulture) + "）";
+                    return scene;
+                }
+                long want = info.XmlLength > MaxXmlRead ? MaxXmlRead : info.XmlLength;
+                int take = (int)want;
+                byte[] xml = new byte[take];
+                session.Stream.Position = info.XmlAt;
+                int n = ReadFull(session.Stream, xml, take);
+                TimelineScene parsed = TimelineSceneParser.Parse(xml, n);
+                parsed.HasEntry = true;
+                parsed.XmlLength = info.XmlLength;
+                parsed.Truncated = scene.Truncated;
+                parsed.IsEmpty = CountKeyframes(parsed) == 0;
+                return parsed;
+            }
+            finally
+            {
+                if (own)
+                {
+                    session.Dispose();
+                }
+            }
+        }
+        /// <summary>
+        /// 读一张场景卡的完整 timeline 模型（组树 + 轨道 + 关键帧 + 无损属性）——分析窗与后续编辑 / 导出共用同一份格式。
+        /// </summary>
+        /// <param name="path">卡片文件绝对路径。</param>
+        /// <param name="imageEnd">图片区结束偏移。</param>
+        public static TimelineScene ReadScene(string path, long imageEnd)
+        {
+            return ReadScene(path, imageEnd, null);
         }
     }
 }

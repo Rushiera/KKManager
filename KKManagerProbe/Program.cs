@@ -85,7 +85,7 @@ namespace KKManager.Probe
         {
             if (args.Length < 3)
             {
-                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB]");
+                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB] | tlscan <card.png> <out.txt>");
                 return 2;
             }
 
@@ -152,6 +152,8 @@ namespace KKManager.Probe
                     return SdItems(args[1], args[2]);
                 case "sdscan":
                     return SdScanCommand(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 16);
+                case "tlscan":
+                    return TlScanCommand(args[1], args[2]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
