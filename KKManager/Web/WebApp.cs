@@ -1535,8 +1535,8 @@ namespace KKManager.Web
                 return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detailFinal, timeline = timeline, timelineText = timelineText, coords = coordsFinal, scene = sceneFinal });
             });
 
-            // 场景卡 timeline 完整模型（只读）——组树 + 轨道 + 关键帧（分析窗轨道视图）；full=1 附属性全集（后续编辑 / 导出复用同一份格式）
-            app.MapGet("/api/card/{id}/timeline", (long id, int lib, int full) =>
+            // 场景卡 timeline 完整模型（只读）——组树 + 轨道 + 关键帧（分析窗轨道视图）；full 缺省 = 精简视图，full=1 附属性全集（后续编辑 / 导出复用同一份格式）
+            app.MapGet("/api/card/{id}/timeline", (long id, int lib, int? full) =>
             {
                 RootsConfig cfg = LoadConfig();
                 string path = CardPathOf(cfg, lib, id, out string why);
@@ -1554,7 +1554,7 @@ namespace KKManager.Web
                     return Results.Json(new { ok = false, error = "不是场景卡——只有 Studio 场景卡带 timeline 数据" });
                 }
                 TimelineScene scene = ReadTimelineSceneCached(path, st.ImageEnd);
-                return Results.Json(TimelineSceneJson(scene, full != 0), RelaxJson);
+                return Results.Json(TimelineSceneJson(scene, full.HasValue && full.Value != 0), RelaxJson);
             });
 
             // 卡片内嵌图片缩略图（只读）——按偏移 / 长度取数据区里的 PNG，缩放为 JPEG 返回
