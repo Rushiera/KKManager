@@ -1,0 +1,56 @@
+KK Manager by Rushiera —— 命令行用法（发布版 1.0.9）
+======================================================================
+
+  面板是主要用法（双击 KMR.exe）。本文件列出命令行通道，供批量处理 / 排查使用。
+  命令在 KMR.exe 所在目录打开命令行执行，例如：KMR.exe roots-list
+
+  modinfo   <zipmod>                    解析单个 zipmod 的 manifest
+  cardinfo  <card.png>                  解析单张卡片的声明区
+  card-structure <card.png>             卡片文件结构（PNG 块表 + 图片区 / 数据区划分）
+  card-timeline <card.png>              场景卡（sd）的 timeline 长度（duration / timeScale——与面板同一实现）
+  card-scene <card.png>                 场景卡（sd）深度分析（插件数据条目 timeline / kkpe / vnge_* + 内嵌角色卡数据份数 + timeline 深度）
+  card-coord <card.png> [--all]         卡片服装 / 饰品（Coordinate 块七套槽位：服装 9 槽 + 饰品 20 槽 + 化妆）
+  card-detail <card.png>                卡片数据区明细（部件 / 声明区 / 内嵌贴图）
+  card-params <file|dir>                读人物卡的姓 / 名 / 爱称 / 性格 + 敏感带 + 五项是否接受
+  card-edit <file> --last --first --nick --personality [--weak-point N] [--denial 键=yes|no] [--archive]
+                                        编辑人物卡四项 + 敏感带 + 五项是否接受（需编辑授权）
+  thumb     <card.png> <out.jpg>        导出缩略图
+  scan-mods [目录...]                   扫描 mod 库（无目录则用已配置的库根）
+  scan-cards [目录...]                  扫描卡片库
+  scan-main                             扫描主要库（预置条目——mod 主库 + 缓存库 + female / coordinate / Studio）
+  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）
+  scan-plan [set <顺序> [勾选]]          看 / 设扫描步骤（顺序即执行顺序；同侧同档相邻步合并为一次读取）
+  stats                                 库统计：四色（绿 / 黄 / 红 / 灰）+ 就绪卡数
+  authors                               作者清单（按 mod 数量倒序）
+  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）
+  dup                                   重复副本组（同 guid 多份文件——含路径 / 创建与修改时间 / MD5 + 引用卡片数与前三张卡片名）
+  todos                                 待办清单（库已离线 / 卡片 / 手输三类分支——id 供 todo-close 用）
+  todo-add <文本>                       新建一条手输待办（--card <卡片路径> = 挂到卡片上）
+  todo-close <id>                       关闭一条待办
+  noncards [--moved]                    列出非卡 / 非 mod 文件（不是卡片也不是 mod 的文件：理由 / 体积 / 路径；--moved 含已搬走的）
+  noncard-move                          一键把非卡 / 非 mod 文件搬到 mod 缓存库（失败逐条出声）
+  composition <guid> [--force] [--text] 查看某 mod 的组成（条目清单 / 目录聚合 / 文本条目）
+  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图
+  u3d-db    <guid> <条目路径> [--force] 解析 unity3d 条目并落档
+  keep-version <guid> <文件路径>        指定这个版本（同 guid 其余副本判旧版入缓存库）
+  mark-old  <guid> <文件路径>           把该副本判为旧版
+  swap      <guid> <文件路径>           与主库当前版本完全互换
+  promote   <guid> <文件路径>           把旧版搬入主库并正名
+  sort plan [目录...]                   生成「按作者整理」计划（无目录 = 全部可整理的 mod 库根；平铺 + 作者文件夹 + 冲突检测）
+  sort show                             读整理计划表（做一次快照核对——已在快照位置的行标 √）
+  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）
+  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）
+  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置
+  plugins                               列出插件库里的插件（与面板「插件清单」同源）
+  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）
+  plugin-log                            解析 BepInEx 日志：加载 / 进程过滤跳过 / 错误
+  plugin-info <dll>                     解析单个插件 dll 的元数据（GUID / 名称 / 版本 / 进程过滤 / 依赖）
+  scan-plugins                          扫描插件库根（BepInEx）下的全部 dll 并落库（只读解析）
+  roots-list                            列出已配置的库根
+  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]
+  roots-clear <mods|cards|all>          清空库根配置
+  set-game-root <路径>                  设置游戏根
+  serve [--port 8539] [--open]          启动本地面板
+
+  通用: --db <路径>（默认 exe 目录下 data\kkmanager.db）· --force 全量重扫 · --steps a,b,c 只跑这些步骤
+  级别: 1=主库（游戏读取）· 2=缓存库（可一键搬入主库）· 3=冷冻库（只读）
