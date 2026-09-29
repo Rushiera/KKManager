@@ -1065,6 +1065,7 @@ namespace KKManager.Web
                     dupMods = snap.DupMods,
                     dupGroups = dupGroups,
                     dupPending = dupPending,
+                    nonCards = _hub.CountNonCards(cfg, false),
                     todos = _hub.Core.ListTodos().Count,
                     missing
                 });
@@ -1836,10 +1837,11 @@ namespace KKManager.Web
                     await context.Response.WriteAsync("{\"ok\":false,\"error\":\"缺少路径\"}");
                     return;
                 }
-                if (!StoreHub.IsUnderModRoot(LoadConfig(), dto.path) && !IsUnderArchive(dto.path))
+                RootsConfig revealCfg = LoadConfig();
+                if (!StoreHub.IsUnderModRoot(revealCfg, dto.path) && !StoreHub.IsUnderCardRoot(revealCfg, dto.path) && !IsUnderArchive(dto.path))
                 {
                     context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"路径不在受管的 mod 库根或编辑留档目录内\"}");
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"路径不在受管的 mod 库根、卡片库根或编辑留档目录内\"}");
                     return;
                 }
                 if (!File.Exists(dto.path))
@@ -2294,6 +2296,74 @@ namespace KKManager.Web
             app.MapGet("/api/thumb/{id}", (long id, int lib) =>
             {
                 byte[] data = _hub.LoadThumb(lib, id);
+                return data == null ? Results.NotFound() : Results.Bytes(data, "image/jpeg");
+            });
+
+            // 非卡 / 非 mod 清单——扫描判定为「不是卡片也不是 mod」的文件（含理由与缩略图）
+            app.MapGet("/api/noncards", (bool? moved) =>
+            {
+                RootsConfig cfg = LoadConfig();
+                bool includeMoved = moved.HasValue && moved.Value;
+                long pending = _hub.CountNonCards(cfg, false);
+                long all = _hub.CountNonCards(cfg, true);
+                List<object> items = new List<object>();
+                foreach (NonCardRow r in _hub.ListNonCards(cfg, includeMoved))
+                {
+                    items.Add(new
+                    {
+                        id = r.Id,
+                        lib = r.Lib,
+                        path = r.FilePath,
+                        root = r.RootPath,
+                        side = r.Side,
+                        reason = r.Reason,
+                        size = r.Size,
+                        mtime = r.Mtime,
+                        hasThumb = r.HasThumb,
+                        movedTo = r.MovedTo
+                    });
+                }
+                return Results.Json(new { items = items, total = items.Count, pending = pending, movedCount = all - pending });
+            });
+
+            // 一键把非卡 / 非 mod 文件搬到 mod 缓存库（游戏不读的那条库根）——逐条给出失败原因，失败项文件不动
+            app.MapPost("/api/noncard/move", async context =>
+            {
+                context.Response.ContentType = "application/json; charset=utf-8";
+                RootsConfig cfg = LoadConfig();
+                List<NonCardRow> rows = _hub.ListNonCards(cfg, false);
+                List<object> failures = new List<object>();
+                int movedCount = 0;
+                int skipped = 0;
+                foreach (NonCardRow r in rows)
+                {
+                    string detail;
+                    string dest = _hub.MoveNonCard(cfg, r.Lib, r.Id, out detail);
+                    if (dest == null)
+                    {
+                        skipped = skipped + 1;
+                        if (failures.Count < 50)
+                        {
+                            failures.Add(new { path = r.FilePath, error = detail });
+                        }
+                        continue;
+                    }
+                    movedCount = movedCount + 1;
+                }
+                await context.Response.WriteAsync(JsonSerializer.Serialize(new
+                {
+                    ok = true,
+                    moved = movedCount,
+                    skipped = skipped,
+                    failures = failures,
+                    pending = _hub.CountNonCards(cfg, false)
+                }));
+            });
+
+            // 非卡文件的缩略图（图片文件才有；非图片返回 404，界面显示占位）
+            app.MapGet("/api/noncard/thumb/{id}", (long id, int lib) =>
+            {
+                byte[] data = _hub.LoadNonCardThumb(lib, id);
                 return data == null ? Results.NotFound() : Results.Bytes(data, "image/jpeg");
             });
         }

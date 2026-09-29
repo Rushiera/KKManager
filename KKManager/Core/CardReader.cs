@@ -196,27 +196,19 @@ namespace KKManager.Core
             return dot;
         }
 
-        /// <summary>只读卡片头段与图片区终点——卡类型 / 数据版本 / IEND 偏移；不扫声明区、不读数据区内容（卡头段步的唯一实现）。</summary>
+        /// <summary>只读卡片头段与图片区终点——卡类型 / 数据版本 / IEND 偏移；不扫声明区、不读数据区内容（委托会话判定，与非会话版共用同一实现）。</summary>
         public static bool ReadHeadInfo(string path, out string cardType, out string dataVersion, out long imageEnd)
         {
             cardType = null;
             dataVersion = null;
             imageEnd = -1;
-            if (!File.Exists(path))
+            using (CardFileSession s = CardFileSession.Open(path))
             {
-                return false;
-            }
-            using (FileStream fs = File.OpenRead(path))
-            {
-                imageEnd = FindPngEnd(fs, fs.Length);
-                if (imageEnd <= 0 || fs.Length - imageEnd < 5)
+                if (s == null)
                 {
                     return false;
                 }
-                fs.Position = imageEnd;
-                BinaryReader br = new BinaryReader(fs);
-                ReadCardHead(br, out cardType, out dataVersion);
-                return cardType != null;
+                return ReadHeadInfo(s, out cardType, out dataVersion, out imageEnd);
             }
         }
 
@@ -234,6 +226,43 @@ namespace KKManager.Core
             dataVersion = s.DataVersion;
             imageEnd = s.ImageEnd;
             return cardType != null;
+        }
+
+        /// <summary>只读卡片头段判定（会话版）——返回判定状态与理由；Ok 之外的 NoSignature / NoIend / NoData / TypeUnknown 均为非卡文件，Io 表示读取失败。</summary>
+        public static CardHeadState ReadHeadState(CardFileSession s, out string cardType, out string dataVersion, out long imageEnd, out string reason)
+        {
+            cardType = null;
+            dataVersion = null;
+            imageEnd = -1;
+            reason = "";
+            if (s == null)
+            {
+                reason = "文件打不开";
+                return CardHeadState.Io;
+            }
+            cardType = s.CardType;
+            dataVersion = s.DataVersion;
+            imageEnd = s.ImageEnd;
+            reason = s.HeadReason;
+            return s.HeadState;
+        }
+
+        /// <summary>只读卡片头段判定（路径版——内部开会话，与会话版共用同一实现）。</summary>
+        public static CardHeadState ReadHeadState(string path, out string cardType, out string dataVersion, out long imageEnd, out string reason)
+        {
+            cardType = null;
+            dataVersion = null;
+            imageEnd = -1;
+            reason = "";
+            using (CardFileSession s = CardFileSession.Open(path))
+            {
+                if (s == null)
+                {
+                    reason = "文件打不开";
+                    return CardHeadState.Io;
+                }
+                return ReadHeadState(s, out cardType, out dataVersion, out imageEnd, out reason);
+            }
         }
 
         /// <summary>扫数据区取 mod 引用与 UAR 标记计数（会话版——复用段内已打开的句柄）。</summary>
@@ -282,6 +311,30 @@ namespace KKManager.Core
             return ReadHeadInfo(path, out cardType, out dataVersion, out imageEnd);
         }
 
+        /// <summary>PNG 签名判据（89 50 4E 47 0D 0A 1A 0A）——头段判定的第一段。</summary>
+        public static bool HasPngSignature(FileStream fs)
+        {
+            if (fs == null || fs.Length < 8)
+            {
+                return false;
+            }
+            byte[] sig = new byte[8];
+            fs.Position = 0;
+            if (ReadFull(fs, sig, 8) != 8)
+            {
+                return false;
+            }
+            if (sig[0] != 0x89 || sig[1] != 0x50 || sig[2] != 0x4E || sig[3] != 0x47)
+            {
+                return false;
+            }
+            if (sig[4] != 0x0D || sig[5] != 0x0A || sig[6] != 0x1A || sig[7] != 0x0A)
+            {
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>定位 PNG 的 IEND 结束偏移（图片区终点）；未找到返回 -1。</summary>
         public static long FindPngEnd(FileStream fs, long len)
         {
@@ -313,15 +366,29 @@ namespace KKManager.Core
         private static void CollectDeclaration(FileStream fs, CardInfo info)
         {
             long start = info.ImageEnd > 0 ? info.ImageEnd : 0;
-            const long HeadLimit = 2L * 1024 * 1024;
-            long head = Math.Min(fs.Length, start + HeadLimit);
-
-            ScanRegion(start, head);
-
-            if (info.ModRefs.Count == 0 && head < fs.Length)
+            // 窗口逐级扩大——声明区（UAR 块）实测恒定落在数据区起点后 200–400 KB
+            // （探针三档样本：171 MB @+185 KB · 26 MB @+383 KB · 612 KB @+225 KB），
+            // 故首窗取 1 MB（余量约 2.6 倍）；扫满首窗已命中即停（声明区每卡只有一处）；未命中扩到 16 MB；仍无则全扫回落（防漏检）。
+            long[] limits = new long[] { 1024L * 1024, 16L * 1024 * 1024 };
+            long scanned = start;
+            foreach (long limit in limits)
             {
-                // 前段未命中——退化为全扫（防漏检；每卡声明区实测只有一处）
-                ScanRegion(head, fs.Length);
+                long to = Math.Min(fs.Length, start + limit);
+                if (to <= scanned)
+                {
+                    continue;
+                }
+                ScanRegion(scanned, to);
+                scanned = to;
+                if (info.ModRefs.Count > 0)
+                {
+                    return;
+                }
+            }
+            if (scanned < fs.Length)
+            {
+                // 仍未命中——退化为全扫（防漏检；每卡声明区实测只有一处）
+                ScanRegion(scanned, fs.Length);
             }
 
             void ScanRegion(long from, long to)

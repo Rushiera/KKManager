@@ -123,6 +123,40 @@ namespace KKManager.Data
         public bool HasThumb { get; set; }
     }
 
+    /// <summary>非卡 / 非 mod 文件行（各库本地表 non_card）——扫描判定为「不是卡片也不是 mod」的文件，供面板清单与一键搬到缓存库。</summary>
+    public class NonCardRow
+    {
+        /// <summary>本库内自增 id（缩略图与搬运动作按它定位）。</summary>
+        public long Id { get; set; }
+
+        /// <summary>文件绝对路径。</summary>
+        public string FilePath { get; set; }
+
+        /// <summary>所属库根路径。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>来源侧——card（卡片库） / mod（mod 库）。</summary>
+        public string Side { get; set; }
+
+        /// <summary>判定理由（人读文案，如「无数据区（纯图片）」）。</summary>
+        public string Reason { get; set; }
+
+        /// <summary>文件字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>修改时间（ISO）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>是否有缩略图（图片文件才有）。</summary>
+        public bool HasThumb { get; set; }
+
+        /// <summary>已搬到缓存库后的新路径（空 = 尚未搬走）。</summary>
+        public string MovedTo { get; set; }
+
+        /// <summary>库位序号（跨库合并时填——0 = 主库文件；≥1 = 各附加库文件）。</summary>
+        public int Lib { get; set; }
+    }
+
     /// <summary>卡片 timeline 缓存行（卡片库表 card_timeline）——按卡片 id 存，size + mtime 变化即失效。</summary>
     public class CardTimelineRow
     {
@@ -808,6 +842,8 @@ namespace KKManager.Data
         private void EnsureSchema()
         {
             Exec("PRAGMA journal_mode=WAL");
+            // 并行扫描：多连接写同一库（WAL 单写者模型）——写锁等待而非立刻 SQLITE_BUSY
+            Exec("PRAGMA busy_timeout=15000");
             long version = Convert.ToInt64(ExecScalar("PRAGMA user_version"), CultureInfo.InvariantCulture);
             if (version != SchemaVersion)
             {
@@ -847,6 +883,11 @@ namespace KKManager.Data
                              card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
                              has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
                              keyframes INTEGER, xml_length INTEGER, hit_stage TEXT, read_at TEXT, error TEXT)");
+            Exec(@"CREATE TABLE IF NOT EXISTS non_card(
+                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                             file_path TEXT UNIQUE, root_path TEXT, side TEXT, reason TEXT,
+                             size INTEGER, mtime TEXT, thumb BLOB,
+                             moved_to TEXT, moved_at TEXT, scan_time TEXT)");
             Exec(@"CREATE TABLE IF NOT EXISTS scan_state(
                              file_path TEXT NOT NULL, step TEXT NOT NULL,
                              size INTEGER, mtime TEXT, done_at TEXT,
@@ -1912,6 +1953,190 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$id", id);
                 cmd.ExecuteNonQuery();
             }
+        }
+
+        /// <summary>登记一个非卡 / 非 mod 文件（已在表中则更新理由与体积，保留「已搬走」标记与缩略图）——卡片头段步 / mod 行步判定为非卡时用。</summary>
+        public void UpsertNonCard(string filePath, string rootPath, string side, string reason, long size, string mtime, byte[] thumb)
+        {
+            if (string.IsNullOrEmpty(filePath))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO non_card(file_path,root_path,side,reason,size,mtime,thumb,scan_time)
+                     VALUES($path,$root,$side,$reason,$size,$mtime,$thumb,$now)
+                     ON CONFLICT(file_path) DO UPDATE SET
+                       root_path=excluded.root_path, side=excluded.side, reason=excluded.reason,
+                       size=excluded.size, mtime=excluded.mtime, scan_time=excluded.scan_time,
+                       thumb=COALESCE(excluded.thumb, non_card.thumb)"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.Parameters.AddWithValue("$root", rootPath ?? "");
+                cmd.Parameters.AddWithValue("$side", side ?? "");
+                cmd.Parameters.AddWithValue("$reason", reason ?? "");
+                cmd.Parameters.AddWithValue("$size", size);
+                cmd.Parameters.AddWithValue("$mtime", mtime ?? "");
+                cmd.Parameters.AddWithValue("$thumb", (object)thumb ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>按路径删除非卡登记（文件变回卡片 / 变回 mod 时核销）。</summary>
+        public void DeleteNonCardByPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("DELETE FROM non_card WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>清扫某库根下已从磁盘消失的非卡登记（文件不存在即删）；返回删除条数。</summary>
+        public int DeleteNonCardsMissingUnderRoot(string rootPath)
+        {
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/');
+            if (prefix.Length == 0)
+            {
+                return 0;
+            }
+            List<long> gone = new List<long>();
+            using (SqliteCommand cmd = NewCommand("SELECT id, file_path FROM non_card WHERE root_path=$p"))
+            {
+                cmd.Parameters.AddWithValue("$p", rootPath);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        string path = r.IsDBNull(1) ? "" : r.GetString(1);
+                        if (path.Length == 0 || !File.Exists(path))
+                        {
+                            gone.Add(r.GetInt64(0));
+                        }
+                    }
+                }
+            }
+            if (gone.Count == 0)
+            {
+                return 0;
+            }
+            using (SqliteCommand del = NewCommand("DELETE FROM non_card WHERE id=$id"))
+            {
+                SqliteParameter p = del.Parameters.Add("$id", SqliteType.Integer);
+                foreach (long id in gone)
+                {
+                    p.Value = id;
+                    del.ExecuteNonQuery();
+                }
+            }
+            return gone.Count;
+        }
+
+        /// <summary>读本库的非卡清单（includeMoved 为假时只列尚未搬走的）；按体积降序。</summary>
+        public List<NonCardRow> ListNonCards(bool includeMoved)
+        {
+            List<NonCardRow> list = new List<NonCardRow>();
+            string sql = "SELECT id,file_path,root_path,side,reason,size,mtime,moved_to,(thumb IS NOT NULL) FROM non_card";
+            if (!includeMoved)
+            {
+                sql = sql + " WHERE moved_to IS NULL";
+            }
+            sql = sql + " ORDER BY size DESC";
+            using (SqliteCommand cmd = NewCommand(sql))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    list.Add(ReadNonCard(r));
+                }
+            }
+            return list;
+        }
+
+        /// <summary>读本库的非卡条数（includeMoved 为假时只数尚未搬走的）。</summary>
+        public long CountNonCards(bool includeMoved)
+        {
+            string sql = "SELECT COUNT(*) FROM non_card";
+            if (!includeMoved)
+            {
+                sql = sql + " WHERE moved_to IS NULL";
+            }
+            return Convert.ToInt64(ExecScalar(sql), CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>按 id 读一条非卡登记（搬运前定位用）；不存在返回 null。</summary>
+        public NonCardRow GetNonCard(long id)
+        {
+            using (SqliteCommand cmd = NewCommand("SELECT id,file_path,root_path,side,reason,size,mtime,moved_to,(thumb IS NOT NULL) FROM non_card WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (r.Read())
+                    {
+                        return ReadNonCard(r);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>读一条非卡登记的缩略图字节（无图返回 null）。</summary>
+        public byte[] LoadNonCardThumb(long id)
+        {
+            using (SqliteCommand cmd = NewCommand("SELECT thumb FROM non_card WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (r.Read() && !r.IsDBNull(0))
+                    {
+                        return (byte[])r.GetValue(0);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>把一条非卡登记改指搬走后的新路径（保留「已搬走」标记与缩略图；目标路径若已有登记先删掉）。</summary>
+        public void MarkNonCardMoved(long id, string dest)
+        {
+            if (id <= 0 || string.IsNullOrEmpty(dest))
+            {
+                return;
+            }
+            using (SqliteCommand del = NewCommand("DELETE FROM non_card WHERE file_path=$p AND id<>$id"))
+            {
+                del.Parameters.AddWithValue("$p", dest);
+                del.Parameters.AddWithValue("$id", id);
+                del.ExecuteNonQuery();
+            }
+            using (SqliteCommand cmd = NewCommand("UPDATE non_card SET file_path=$p, moved_to=$p, moved_at=$now WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$p", dest);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>把一行 non_card 读数转成行对象（列序固定：id / file_path / root_path / side / reason / size / mtime / moved_to / has_thumb）。</summary>
+        private static NonCardRow ReadNonCard(SqliteDataReader r)
+        {
+            NonCardRow row = new NonCardRow();
+            row.Id = r.GetInt64(0);
+            row.FilePath = r.IsDBNull(1) ? "" : r.GetString(1);
+            row.RootPath = r.IsDBNull(2) ? "" : r.GetString(2);
+            row.Side = r.IsDBNull(3) ? "" : r.GetString(3);
+            row.Reason = r.IsDBNull(4) ? "" : r.GetString(4);
+            row.Size = r.IsDBNull(5) ? 0 : r.GetInt64(5);
+            row.Mtime = r.IsDBNull(6) ? "" : r.GetString(6);
+            row.MovedTo = r.IsDBNull(7) ? "" : r.GetString(7);
+            row.HasThumb = !r.IsDBNull(8) && r.GetInt64(8) != 0;
+            return row;
         }
 
         /// <summary>落一份卡片分项分析（服装槽位 / 卡片分析 / 场景深度——kind 区分，data 为 JSON 文本）。</summary>

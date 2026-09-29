@@ -80,6 +80,10 @@ namespace KKManager
                     return CardsCommand(db, rest);
                 case "todos":
                     return TodosCommand(db);
+                case "noncards":
+                    return NonCardsCommand(db, rest);
+                case "noncard-move":
+                    return NonCardMoveCommand(db);
                 case "todo-add":
                     return TodoAddCommand(db, rest);
                 case "todo-close":
@@ -158,6 +162,8 @@ namespace KKManager
             Console.WriteLine("  todos                                 待办清单（库已离线 / 卡片 / 手输三类分支——id 供 todo-close 用）");
             Console.WriteLine("  todo-add <文本>                       新建一条手输待办（--card <卡片路径> = 挂到卡片上）");
             Console.WriteLine("  todo-close <id>                       关闭一条待办");
+            Console.WriteLine("  noncards [--moved]                    列出非卡 / 非 mod 文件（不是卡片也不是 mod 的文件：理由 / 体积 / 路径；--moved 含已搬走的）");
+            Console.WriteLine("  noncard-move                          一键把非卡 / 非 mod 文件搬到 mod 缓存库（游戏不读的那条库根；失败逐条出声）");
             Console.WriteLine("  composition <guid>                    查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容；--force 强制重读容器）");
             Console.WriteLine("  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图（--tex 导出缩小版 PNG · --max N 限张数）");
             Console.WriteLine("  u3d-db    <guid> <条目路径>           按库副本解析 unity3d 条目并落档（与面板端点共用同一实现；--force 强制重读）");
@@ -1649,6 +1655,67 @@ namespace KKManager
                         + (e.locked ? "  [预置·锁定]" : "")
                         + OfflineTag(e));
                 }
+            }
+            return 0;
+        }
+
+        /// <summary>列出非卡 / 非 mod 文件——扫描判定为「不是卡片也不是 mod」的文件（理由 / 体积 / 路径；--moved 含已搬走的）。</summary>
+        private static int NonCardsCommand(string db, List<string> rest)
+        {
+            bool includeMoved = rest.Remove("--moved");
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                long pending = hub.CountNonCards(cfg, false);
+                long all = hub.CountNonCards(cfg, true);
+                List<NonCardRow> rows = hub.ListNonCards(cfg, includeMoved);
+                Console.WriteLine("库: " + hub.CorePath);
+                Console.WriteLine("非卡 / 非 mod: " + pending + " 个待处置"
+                    + (all > pending ? " · 已搬走 " + (all - pending) + " 个" : "")
+                    + (includeMoved ? "（列出含已搬走）" : ""));
+                foreach (NonCardRow r in rows)
+                {
+                    string side = "卡片库";
+                    if (string.Equals(r.Side, "mod", StringComparison.Ordinal))
+                    {
+                        side = "mod 库";
+                    }
+                    Console.WriteLine("  #" + r.Id + " [" + r.Lib + "] " + side + " · " + r.Reason
+                        + " · " + r.Size.ToString("N0", CultureInfo.InvariantCulture) + " 字节"
+                        + (r.HasThumb ? " [有图]" : " [无图]") + " · " + r.FilePath
+                        + (string.IsNullOrEmpty(r.MovedTo) ? "" : "  已搬走 → " + r.MovedTo));
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>一键把非卡 / 非 mod 文件搬到 mod 缓存库（游戏不读的那条库根）——逐条出声，失败项文件不动。</summary>
+        private static int NonCardMoveCommand(string db)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                List<NonCardRow> rows = hub.ListNonCards(cfg, false);
+                int movedCount = 0;
+                int skipped = 0;
+                foreach (NonCardRow r in rows)
+                {
+                    string detail;
+                    string dest = hub.MoveNonCard(cfg, r.Lib, r.Id, out detail);
+                    if (dest == null)
+                    {
+                        skipped = skipped + 1;
+                        Console.WriteLine("  ! " + r.FilePath + " → " + detail);
+                        continue;
+                    }
+                    movedCount = movedCount + 1;
+                    Console.WriteLine("  " + r.FilePath + " → " + dest);
+                }
+                Console.WriteLine("搬运完成：成功 " + movedCount + " · 跳过/失败 " + skipped
+                    + " · 缓存库 " + RootsRules.ModCachePath(cfg));
+                Console.WriteLine("剩余待处置: " + hub.CountNonCards(cfg, false));
             }
             return 0;
         }

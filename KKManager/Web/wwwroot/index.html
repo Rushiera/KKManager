@@ -32,6 +32,7 @@
   .statSub.y{color:var(--yellow)}
   .stat[data-open]{cursor:pointer;transition:border-color .12s ease}
   .stat[data-open]:hover{border-color:var(--accent)}
+  .ncthumb{width:44px;height:auto;border-radius:3px;display:block}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px}
   .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
@@ -581,6 +582,23 @@
       <span class="grow"></span>
       <button id="btnOldReload">重新读取</button>
       <button id="btnOldClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovNonCard">
+  <div class="modal wide">
+    <header><b>非卡 / 非 mod 文件</b> <span class="dim" id="ncInfo"></span></header>
+    <div class="body">
+      <div class="dim" id="ncHint" style="font-size:12px;margin-bottom:6px">若争议请抄送卡片给 Rushiera</div>
+      <div class="dim" style="font-size:12px;margin-bottom:8px">扫描判定为<b>不是卡片也不是 mod</b> 的文件——卡片库里没有数据区的纯图片 / PNG 不完整 / 数据区头段读不出，mod 库里读不到 <span class="mono">manifest.xml</span> 的文件。按行列出<b>卡图</b>（图片文件才有）、<b>理由</b>、<b>文件位置</b>（点一下在资源管理器里选中该文件）。底栏「一键移到缓存库」把它们从所在库搬到库根设置里的<b>缓存库</b>（游戏不读的那条），搬走后不再出现在本清单——要找回就去缓存库目录。</div>
+      <div id="ncBody"></div>
+    </div>
+    <footer>
+      <span class="dim" id="ncFoot"></span>
+      <span class="grow"></span>
+      <button class="primary" id="btnNcMove">一键移到缓存库</button>
+      <button id="btnNcClose">关闭</button>
     </footer>
   </div>
 </div>
@@ -1456,11 +1474,13 @@ async function loadStats(){
     ['引用（去重）', fmt(s.refs), ''],
     ['mod 主库', fmt(s.modsTier1), ''], ['mod 缓存', fmt(s.modsTier2), ''], ['mod 冷冻', fmt(s.modsTier3), ''],
     ['重复副本', fmt(s.dupGroups), '', 'dup', (s.dupPending > 0 ? `<span class="statSub y">${fmt(s.dupPending)} 待确认</span>` : '<span class="statSub">全部已确认</span>')], ['未引用 mod', fmt(s.unusedMods), '', 'unused'],
+    ['非卡 / 非 mod', fmt(s.nonCards), (s.nonCards > 0 ? 'y' : ''), 'noncard'],
     ['待办', (s.todos > 0 ? fmt(s.todos) + ' 条消息' : '无'), (s.todos > 0 ? 'y' : ''), 'todo']
   ].map(([k,v,c,open,sub]) => {
     let tip = '';
     if(open === 'dup') tip = '点击查看同 guid 的多份副本（待确认的在上，已确认的沉底）';
     else if(open === 'unused') tip = '点击查看全部未被任何卡片引用的 mod';
+    else if(open === 'noncard') tip = '点击查看不是卡片也不是 mod 的文件（卡图 / 理由 / 文件位置；可一键移到缓存库）';
     else if(open === 'miss') tip = '点击查看缺失清单（全库皆无的 mod，按被引用卡片数排序）';
     else if(open === 'todo') tip = '点击查看待办清单（软件认为需要你处理的事 + 你自己记的）';
     return `<div class="stat ${c}"${open?` data-open="${open}" title="${tip}"`:''}><small>${k}</small><b>${v}</b>${sub||''}</div>`;
@@ -2833,6 +2853,7 @@ async function pollScan(){
       + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '')
       + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '')
       + ((s.timelineRead||0) > 0 ? ` · timeline 读 ${s.timelineRead}` : '')
+      + ((s.nonCard||0) > 0 ? ` · 非卡 ${s.nonCard}` : '')
       + ((s.nonMod||0) > 0 ? ` · 非 mod 文件 ${s.nonMod}` : '');
     $('scanStatus').textContent = s.running
       ? ((s.stepIndex||0) > 0 ? `步骤 ${s.stepIndex}/${s.stepCount} · ${s.stepName||''} ${s.stepDone||0} / ${s.stepTotal||0}` : `扫描中 ${done} / ${total}`)
@@ -3046,10 +3067,74 @@ $('stats').addEventListener('click', e => {
   const el = e.target.closest ? e.target.closest('.stat[data-open]') : null;
   if(!el) return;
   if(el.dataset.open === 'unused') openUnused();
+  else if(el.dataset.open === 'noncard') openNonCards();
   else if(el.dataset.open === 'dup') openDup();
   else if(el.dataset.open === 'miss') switchTab('missing');
   else if(el.dataset.open === 'todo') openTodos();
 });
+/* ---------- 非卡 / 非 mod 清单（统计卡点入 · 一键移到缓存库） ---------- */
+let ncState = { items: [] };
+async function openNonCards(){
+  $('ovNonCard').classList.remove('hidden');
+  await loadNonCards();
+}
+async function loadNonCards(){
+  $('ncBody').innerHTML = '<div class="dim" style="padding:6px">读取中…</div>';
+  try{
+    const r = await api('/api/noncards');
+    ncState.items = (r && r.items) ? r.items : [];
+    const pending = (r && typeof r.pending === 'number') ? r.pending : ncState.items.length;
+    const moved = (r && typeof r.movedCount === 'number') ? r.movedCount : 0;
+    $('ncInfo').textContent = pending + ' 个待处置' + (moved > 0 ? ' · 已搬走 ' + moved + ' 个' : '');
+    renderNonCards();
+  }catch(e){
+    $('ncBody').innerHTML = '<div class="dim" style="padding:6px;color:var(--red)">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+function renderNonCards(){
+  const rows = ncState.items;
+  if(rows.length === 0){
+    $('ncBody').innerHTML = '<div class="dim" style="padding:6px">没有待处置的非卡 / 非 mod 文件。</div>';
+    $('ncFoot').textContent = '';
+    return;
+  }
+  let html = '<table class="list"><thead><tr><th style="width:56px">卡图</th><th style="width:100px">来源</th><th style="width:180px">理由</th><th style="width:96px">大小</th><th>文件位置</th></tr></thead><tbody>';
+  rows.forEach(r => {
+    let thumb = '<span class="dim">—</span>';
+    if(r.hasThumb){ thumb = `<img class="ncthumb" src="/api/noncard/thumb/${r.id}?lib=${r.lib}" loading="lazy" alt="">`; }
+    const side = (r.side === 'mod') ? 'mod 库' : '卡片库';
+    html += `<tr><td>${thumb}</td><td class="dim">${esc(side)}</td><td>${esc(r.reason || '')}</td><td class="dim">${fmtSize(r.size)}</td>`
+      + `<td><span class="reveal" data-path="${esc(r.path)}" title="${esc(r.path)}">${esc(r.path)}</span></td></tr>`;
+  });
+  html += '</tbody></table>';
+  $('ncBody').innerHTML = html;
+  $('ncFoot').textContent = '共 ' + rows.length + ' 个';
+}
+$('btnNcClose').onclick = () => $('ovNonCard').classList.add('hidden');
+$('btnNcMove').onclick = async () => {
+  const btn = $('btnNcMove');
+  if(ncState.items.length === 0){ alert('没有待处置的文件。'); return; }
+  if(!confirm('把 ' + ncState.items.length + ' 个非卡 / 非 mod 文件搬到缓存库？\n\n搬走后不再出现在本清单；要找回去缓存库目录。')) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '搬运中…';
+  try{
+    const r = await api('/api/noncard/move', {method:'POST'});
+    let msg = '已搬走 ' + (r.moved||0) + ' 个';
+    if(r.skipped){ msg += '，跳过/失败 ' + r.skipped + ' 个'; }
+    if(r.failures && r.failures.length){
+      msg += '\n失败原因：\n' + r.failures.slice(0,10).map(f => '· ' + f.error).join('\n');
+    }
+    alert(msg);
+    await loadNonCards();
+  }catch(e){ alert('搬运失败：' + e.message); }
+  finally{ btn.disabled = false; btn.textContent = old; }
+};
+$('ncBody').addEventListener('click', e => {
+  const rev = e.target.closest ? e.target.closest('.reveal') : null;
+  if(rev){ revealPath(rev.dataset.path); }
+});
+
 /* ---------- 待办清单（统计卡点入 · 目前只有「离线库」一类） ---------- */
 let tdState = { items: [] };
 async function openTodos(){

@@ -401,6 +401,118 @@ namespace KKManager.Data
             return string.CompareOrdinal(a.Key, b.Key);
         }
 
+        /// <summary>非卡 / 非 mod 清单——跨库合并（includeMoved 为假时只列尚未搬走的）；按体积降序。</summary>
+        public List<NonCardRow> ListNonCards(RootsConfig cfg, bool includeMoved)
+        {
+            List<NonCardRow> list = new List<NonCardRow>();
+            foreach (Store s in AllStores(cfg))
+            {
+                int lib = LibOfStore(s);
+                foreach (NonCardRow r in s.ListNonCards(includeMoved))
+                {
+                    r.Lib = lib;
+                    list.Add(r);
+                }
+            }
+            list.Sort(delegate (NonCardRow a, NonCardRow b)
+            {
+                return b.Size.CompareTo(a.Size);
+            });
+            return list;
+        }
+
+        /// <summary>非卡 / 非 mod 条数——跨库合计（includeMoved 为假时只数尚未搬走的）。</summary>
+        public long CountNonCards(RootsConfig cfg, bool includeMoved)
+        {
+            long n = 0;
+            foreach (Store s in AllStores(cfg))
+            {
+                n = n + s.CountNonCards(includeMoved);
+            }
+            return n;
+        }
+
+        /// <summary>读一条非卡登记的缩略图（按库位 + id）；无图或库位无效返回 null。</summary>
+        public byte[] LoadNonCardThumb(int lib, long id)
+        {
+            Store s = StoreByLib(lib);
+            if (s == null)
+            {
+                return null;
+            }
+            return s.LoadNonCardThumb(id);
+        }
+
+        /// <summary>把一条非卡 / 非 mod 文件搬到 mod 缓存库（游戏不读的那条库根）——返回新路径；失败返回 null 并给出原因（文件不动）。</summary>
+        public string MoveNonCard(RootsConfig cfg, int lib, long id, out string detail)
+        {
+            detail = null;
+            Store s = StoreByLib(lib);
+            if (s == null)
+            {
+                detail = "找不到库 " + lib;
+                return null;
+            }
+            NonCardRow row = s.GetNonCard(id);
+            if (row == null)
+            {
+                detail = "登记不存在（可能已被搬走或已核销）";
+                return null;
+            }
+            string cache = RootsRules.ModCachePath(cfg);
+            if (string.IsNullOrWhiteSpace(cache))
+            {
+                detail = "未配置 mod 缓存库——先在「库根设置」里设好缓存库";
+                return null;
+            }
+            bool readOnly = false;
+            if (string.Equals(row.Side, "mod", StringComparison.Ordinal))
+            {
+                readOnly = RootsRules.IsReadOnlyRoot(cfg, row.RootPath);
+            }
+            else
+            {
+                readOnly = RootsRules.IsReadOnlyCardRoot(cfg, row.RootPath);
+            }
+            if (readOnly)
+            {
+                detail = "所在库根为只读，不能移动";
+                return null;
+            }
+            if (!File.Exists(row.FilePath))
+            {
+                detail = "文件不存在（已从磁盘消失）";
+                return null;
+            }
+            try
+            {
+                Directory.CreateDirectory(cache);
+            }
+            catch (Exception ex)
+            {
+                detail = "缓存库目录不可用：" + ex.Message;
+                return null;
+            }
+            string dest = Path.Combine(cache, Path.GetFileName(row.FilePath));
+            if (File.Exists(dest))
+            {
+                detail = "缓存库已有同名文件：" + Path.GetFileName(row.FilePath);
+                return null;
+            }
+            try
+            {
+                File.Move(row.FilePath, dest);
+            }
+            catch (Exception ex)
+            {
+                detail = "文件操作失败" + FileBusyHint(ex);
+                return null;
+            }
+            s.MarkNonCardMoved(id, dest);
+            detail = dest;
+            return dest;
+        }
+
         /// <summary>卡片列表——指定 root 时只查该库；否则跨库合并后排序分页（order：排序键 mtime / size / file / chara / timeline；desc：方向，只对可切向的键生效）。</summary>
         public List<CardRow> QueryCards(RootsConfig cfg, int page, int size, string filter, string q, string folder, string root, string order, bool desc)
         {

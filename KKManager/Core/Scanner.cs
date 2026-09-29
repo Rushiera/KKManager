@@ -153,6 +153,15 @@ namespace KKManager.Core
         /// <summary>本轮会话内头段读取失败（失败后不再重试——避免同段内多步各试一次）。</summary>
         public bool HeadFailed { get; set; }
 
+        /// <summary>本轮判定的非卡文件（不是 PNG / 无数据区 / 头段无法识别）——已登记 non_card 清单，后续读步一律跳过。</summary>
+        public bool NonCardFile { get; set; }
+
+        /// <summary>非卡判定理由（人读文案——登记清单时落库）。</summary>
+        public string NonCardReason { get; set; }
+
+        /// <summary>mod 侧判定的非 mod 文件（读不到 manifest.xml）——已登记 non_card 清单。</summary>
+        public bool NonModFile { get; set; }
+
         /// <summary>mod 副本的 guid（mod 行步写入或建索引时读得）。</summary>
         public string ModGuid { get; set; }
 
@@ -582,6 +591,11 @@ namespace KKManager.Core
         /// <summary>卡片侧单步执行——返回 true 表示该步对这一文件已完成（可落完成戳）。</summary>
         private static bool RunCardStep(Store store, RootEntry root, ScanFile f, CardFileSession session, ScanStepDef step, int thumbWidth, int thumbQuality, ScanResult result)
         {
+            // 非卡文件——头段步已登记进 non_card 清单，后续读步一律跳过（不建卡行 / 不读引用 / 不出图）
+            if (f.NonCardFile)
+            {
+                return true;
+            }
             if (step.Id == "row")
             {
                 f.CardId = store.UpsertCardRow(f.Path, Path.GetFileName(f.Path), f.Size, f.Mtime, root, f.Folder);
@@ -614,30 +628,35 @@ namespace KKManager.Core
             return false;
         }
 
-        /// <summary>卡头段步——写卡类型 / 数据版本 / 图片区终点；非卡文件删行并计数。</summary>
+        /// <summary>卡头段步——写卡类型 / 数据版本 / 图片区终点；非卡文件（不是 PNG / PNG 不完整 / 无数据区 / 头段无法识别）登记进非卡清单（理由 + 缩略图）并核销卡片行，不计失败（后续读步由 RunCardStep 跳过）。</summary>
         private static bool StepCardHead(Store store, ScanFile f, CardFileSession session, ScanResult result)
         {
             string type;
             string ver;
             long imageEnd;
-            bool ok;
+            string reason;
+            CardHeadState state;
             if (session != null)
             {
-                ok = CardReader.ReadHeadInfo(session, out type, out ver, out imageEnd);
+                state = CardReader.ReadHeadState(session, out type, out ver, out imageEnd, out reason);
             }
             else
             {
-                ok = CardReader.ReadHeadInfo(f.Path, out type, out ver, out imageEnd);
+                state = CardReader.ReadHeadState(f.Path, out type, out ver, out imageEnd, out reason);
             }
-            if (!ok)
+            if (state == CardHeadState.Io)
             {
                 f.HeadFailed = true;
                 AddError(result, Path.GetFileName(f.Path) + " 头段读取失败");
                 return false;
             }
-            if (string.IsNullOrEmpty(type))
+            if (state != CardHeadState.Ok)
             {
+                // 非卡文件——登记清单（理由 + 缩略图）、核销卡片行；不计失败，后续读步由 RunCardStep 跳过
+                f.NonCardFile = true;
+                f.NonCardReason = reason;
                 store.DeleteCardByPath(f.Path);
+                store.UpsertNonCard(f.Path, f.RootPath, "card", reason, f.Size, f.Mtime, BuildNonCardThumb(f.Path, f.Size));
                 result.NonCard = result.NonCard + 1;
                 return true;
             }
@@ -648,8 +667,46 @@ namespace KKManager.Core
             f.CardType = type;
             f.ImageEnd = imageEnd;
             f.HeadRead = true;
+            store.DeleteNonCardByPath(f.Path);
             store.UpdateCardHead(f.Path, type, ver, imageEnd);
             return true;
+        }
+
+        /// <summary>非卡文件缩略图体积上限（超过不出图——避免把大文件整读进内存）。</summary>
+        private const long NonCardThumbMaxBytes = 64L * 1024 * 1024;
+
+        /// <summary>非卡文件缩略图宽度（像素）。</summary>
+        private const int NonCardThumbWidth = 256;
+
+        /// <summary>非卡文件缩略图 JPEG 质量（1-100）。</summary>
+        private const int NonCardThumbQuality = 82;
+
+        /// <summary>非卡文件的缩略图——只对可解码图片（且体积在上限内）生成；失败或非图片返回 null（界面显示占位）。</summary>
+        private static byte[] BuildNonCardThumb(string path, long size)
+        {
+            if (string.IsNullOrEmpty(path) || size <= 0 || size > NonCardThumbMaxBytes)
+            {
+                return null;
+            }
+            string ext = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(ext))
+            {
+                return null;
+            }
+            string lower = ext.ToLowerInvariant();
+            if (lower != ".png" && lower != ".jpg" && lower != ".jpeg" && lower != ".bmp" && lower != ".gif" && lower != ".webp")
+            {
+                return null;
+            }
+            try
+            {
+                return Thumbnail.FromBytes(File.ReadAllBytes(path), NonCardThumbWidth, NonCardThumbQuality);
+            }
+            catch (Exception)
+            {
+                // 图片坏 / 解码不支持——无图（界面显示占位），不阻断扫描
+                return null;
+            }
         }
 
         /// <summary>声明区步——取 mod 引用 + UAR 块数并落库。</summary>
@@ -870,8 +927,15 @@ namespace KKManager.Core
                 ModInfo m = ZipModReader.Parse(f.Path);
                 if (m.ErrorKind == ModErrorKind.NotContainer || m.ErrorKind == ModErrorKind.NoManifest)
                 {
-                    // 读不到 manifest.xml 的文件——不是 mod，跳过（不算失败）
+                    // 读不到 manifest.xml 的文件——不是 mod：登记进非卡清单（跳过，不算失败）
                     skip = true;
+                    f.NonModFile = true;
+                    string skipReason = "不是 zip 容器";
+                    if (m.ErrorKind == ModErrorKind.NoManifest)
+                    {
+                        skipReason = "容器内无 manifest.xml";
+                    }
+                    store.UpsertNonCard(f.Path, f.RootPath, "mod", skipReason, f.Size, f.Mtime, BuildNonCardThumb(f.Path, f.Size));
                     return false;
                 }
                 if (!string.IsNullOrEmpty(m.Error) || string.IsNullOrEmpty(m.Guid))
@@ -882,6 +946,7 @@ namespace KKManager.Core
                 f.ModGuid = m.Guid;
                 store.UpsertModFile(m, st.Entry, f.Mtime);
                 store.FillModMeta(m);
+                store.DeleteNonCardByPath(f.Path);
                 return true;
             }
             if (step.Id == "composition")
@@ -932,13 +997,14 @@ namespace KKManager.Core
             {
                 int goneCards = st.Store.DeleteCardsMissingUnderRoot(st.Entry.path, present);
                 int goneSteps = st.Store.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
+                int goneNon = st.Store.DeleteNonCardsMissingUnderRoot(st.Entry.path);
                 st.Store.Commit();
-                if (goneCards > 0 || goneSteps > 0)
+                if (goneCards > 0 || goneSteps > 0 || goneNon > 0)
                 {
                     result.Removed += goneCards;
                     if (log != null)
                     {
-                        log("  已清理 " + goneCards + " 条已消失的卡片记录 · 步骤记录 " + goneSteps + " 条");
+                        log("  已清理 " + goneCards + " 条已消失的卡片记录 · 步骤记录 " + goneSteps + " 条 · 非卡登记 " + goneNon + " 条");
                     }
                 }
             }
@@ -965,11 +1031,13 @@ namespace KKManager.Core
             List<string> goneGuids;
             int goneOld;
             int goneSteps;
+            int goneNon;
             try
             {
                 goneGuids = st.Store.DeleteModFilesMissingUnderRoot(st.Entry.path, present);
                 goneOld = hub.Core.DeleteModOldMissingUnderRoot(st.Entry.path, present);
                 goneSteps = st.Store.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
+                goneNon = st.Store.DeleteNonCardsMissingUnderRoot(st.Entry.path);
                 st.Store.Commit();
             }
             catch
@@ -981,10 +1049,10 @@ namespace KKManager.Core
             {
                 hub.RecomputeMod(cfg, guid);
             }
-            if ((goneGuids.Count > 0 || goneOld > 0) && log != null)
+            if ((goneGuids.Count > 0 || goneOld > 0 || goneNon > 0) && log != null)
             {
                 result.Removed += goneGuids.Count + goneOld;
-                log("  已清理 " + goneGuids.Count + " 个 guid 的已消失副本记录 · 旧版登记 " + goneOld + " 条 · 步骤记录 " + goneSteps + " 条");
+                log("  已清理 " + goneGuids.Count + " 个 guid 的已消失副本记录 · 旧版登记 " + goneOld + " 条 · 步骤记录 " + goneSteps + " 条 · 非卡登记 " + goneNon + " 条");
             }
         }
 

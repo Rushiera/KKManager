@@ -202,6 +202,28 @@ namespace KKManager.Core
             return true;
         }
 
+        /// <summary>判断某个卡片库根是否只读（无记录时保守视为只读）——非卡文件搬运的源侧判定（卡片库根不在 mod 侧清单里，故单列）。</summary>
+        public static bool IsReadOnlyCardRoot(RootsConfig cfg, string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return true;
+            }
+            if (cfg == null || cfg.cardRoots == null)
+            {
+                return true;
+            }
+            string norm = path.TrimEnd('\\', '/');
+            foreach (RootEntry r in cfg.cardRoots)
+            {
+                if (string.Equals((r.path ?? "").TrimEnd('\\', '/'), norm, StringComparison.OrdinalIgnoreCase))
+                {
+                    return r.readOnly;
+                }
+            }
+            return true;
+        }
+
         /// <summary>规范化游戏根地址（去空白与尾部斜杠；空则回落默认地址）。</summary>
         public static string NormalizeGameRoot(string path)
         {
