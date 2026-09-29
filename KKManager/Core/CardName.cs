@@ -30,6 +30,33 @@ namespace KKManager.Core
             return last + " " + first;
         }
 
+        /// <summary>读一张人物卡的角色名（会话版——复用段内已打开的句柄，不重复定位 IEND / 不另开文件）。</summary>
+        public static string ReadCharacter(CardFileSession s)
+        {
+            if (s == null)
+            {
+                return null;
+            }
+            try
+            {
+                CardLayout layout = CardEdit.Parse(s.Path, s);
+                if (layout == null || layout.Error != null)
+                {
+                    return null;
+                }
+                CardParamInfo info = CardEdit.ReadParams(s.Path, layout, s);
+                if (info == null || info.Error != null)
+                {
+                    return null;
+                }
+                return Join(info.LastName, info.FirstName);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         /// <summary>读一张人物卡的角色名（数据区 Parameter 块）；布局或字段读不到一律返回 null（是否人物卡由调用方判定）。</summary>
         public static string ReadCharacter(string path)
         {

@@ -74,6 +74,39 @@ namespace KKManager.Core
                 return null;
             }
         }
+        /// <summary>截取卡片图片区并生成缩略图（会话版——复用段内已打开的句柄，不另开文件）。</summary>
+        /// <param name="s">已打开的卡片文件会话。</param>
+        /// <param name="imageEnd">图片区长度（IEND 结束偏移）。</param>
+        /// <param name="width">目标宽度（像素）。</param>
+        /// <param name="quality">JPEG 质量（1-100）。</param>
+        /// <returns>JPEG 字节；失败返回 null（诊断见 <see cref="LastError"/>）。</returns>
+        public static byte[] FromCard(CardFileSession s, long imageEnd, int width, int quality)
+        {
+            LastError = null;
+            if (s == null)
+            {
+                LastError = "会话未打开";
+                return null;
+            }
+            if (imageEnd <= 0)
+            {
+                LastError = "图片区长度非法: " + imageEnd;
+                return null;
+            }
+            if (imageEnd > int.MaxValue)
+            {
+                LastError = "图片区过大: " + imageEnd;
+                return null;
+            }
+            byte[] raw = s.Read(0, (int)imageEnd);
+            if (raw == null)
+            {
+                LastError = "图片区读取不足: " + imageEnd;
+                return null;
+            }
+            return FromBytes(raw, width, quality);
+        }
+
         /// <summary>
         /// 从内存里的图片字节生成缩略图。
         /// </summary>

@@ -596,7 +596,7 @@ namespace KKManager.Core
             }
             if (step.Id == "name")
             {
-                return StepCardName(store, f, result);
+                return StepCardName(store, f, session, result);
             }
             if (step.Id == "timeline")
             {
@@ -604,7 +604,7 @@ namespace KKManager.Core
             }
             if (step.Id == "thumb")
             {
-                return StepCardThumb(store, f, thumbWidth, thumbQuality, result);
+                return StepCardThumb(store, f, session, thumbWidth, thumbQuality, result);
             }
             if (step.Id == "coord" || step.Id == "detail" || step.Id == "scene")
             {
@@ -679,7 +679,7 @@ namespace KKManager.Core
         }
 
         /// <summary>角色名步——人物卡读 Parameter 的姓 / 名（其余卡型直接算完成）。</summary>
-        private static bool StepCardName(Store store, ScanFile f, ScanResult result)
+        private static bool StepCardName(Store store, ScanFile f, CardFileSession session, ScanResult result)
         {
             if (!EnsureHead(store, f, null, result))
             {
@@ -689,7 +689,15 @@ namespace KKManager.Core
             {
                 return true;
             }
-            string name = CardName.ReadCharacter(f.Path);
+            string name;
+            if (session != null)
+            {
+                name = CardName.ReadCharacter(session);
+            }
+            else
+            {
+                name = CardName.ReadCharacter(f.Path);
+            }
             store.UpdateCardName(f.Path, name);
             if (name != null)
             {
@@ -732,7 +740,7 @@ namespace KKManager.Core
         }
 
         /// <summary>缩略图步——图片区取图并缩为 JPEG。</summary>
-        private static bool StepCardThumb(Store store, ScanFile f, int thumbWidth, int thumbQuality, ScanResult result)
+        private static bool StepCardThumb(Store store, ScanFile f, CardFileSession session, int thumbWidth, int thumbQuality, ScanResult result)
         {
             if (!EnsureHead(store, f, null, result))
             {
@@ -742,7 +750,15 @@ namespace KKManager.Core
             {
                 return true;
             }
-            byte[] thumb = Thumbnail.FromCard(f.Path, f.ImageEnd, thumbWidth, thumbQuality);
+            byte[] thumb;
+            if (session != null)
+            {
+                thumb = Thumbnail.FromCard(session, f.ImageEnd, thumbWidth, thumbQuality);
+            }
+            else
+            {
+                thumb = Thumbnail.FromCard(f.Path, f.ImageEnd, thumbWidth, thumbQuality);
+            }
             if (thumb == null)
             {
                 AddError(result, Path.GetFileName(f.Path) + " 缩略图 → " + (Thumbnail.LastError ?? "未知原因"));

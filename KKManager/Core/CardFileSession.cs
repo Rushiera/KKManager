@@ -31,7 +31,7 @@ namespace KKManager.Core
             }
             try
             {
-                FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.RandomAccess);
+                FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.SequentialScan);
                 return new CardFileSession(fs);
             }
             catch (Exception)

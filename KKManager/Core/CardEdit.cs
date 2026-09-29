@@ -223,18 +223,36 @@ namespace KKManager.Core
         /// <summary>解析数据区布局——人物卡：头段 + 脸图 + 块表 + 8 字节尾 + 载荷。失败时 Error 说明原因。</summary>
         public static CardLayout Parse(string path)
         {
+            return Parse(path, null);
+        }
+
+        /// <summary>解析数据区布局（会话版——图片区终点 / 卡类型走会话缓存，不重复定位；session 为 null 时自行解析）。</summary>
+        public static CardLayout Parse(string path, CardFileSession session)
+        {
             CardLayout layout = new CardLayout();
             layout.FilePath = path;
-            if (!File.Exists(path))
+            CardStructure st;
+            if (session == null || !session.HeadOk)
             {
-                layout.Error = "卡片文件不存在：" + path;
-                return layout;
+                if (!File.Exists(path))
+                {
+                    layout.Error = "卡片文件不存在：" + path;
+                    return layout;
+                }
+                st = CardDocument.Parse(path);
+                if (st.Error != null)
+                {
+                    layout.Error = st.Error;
+                    return layout;
+                }
             }
-            CardStructure st = CardDocument.Parse(path);
-            if (st.Error != null)
+            else
             {
-                layout.Error = st.Error;
-                return layout;
+                st = new CardStructure();
+                st.Size = session.Length;
+                st.ImageEnd = session.ImageEnd;
+                st.CardType = session.CardType;
+                st.DataVersion = session.DataVersion;
             }
             layout.FileSize = st.Size;
             layout.ImageEnd = st.ImageEnd;
@@ -416,6 +434,12 @@ namespace KKManager.Core
         /// <summary>读 Parameter 块里的四个字段（含值在文件里的字节区间）。</summary>
         public static CardParamInfo ReadParams(string path, CardLayout layout)
         {
+            return ReadParams(path, layout, null);
+        }
+
+        /// <summary>读 Parameter 块里的字段（会话版——复用段内已打开的句柄）。</summary>
+        public static CardParamInfo ReadParams(string path, CardLayout layout, CardFileSession session)
+        {
             CardParamInfo info = new CardParamInfo();
             if (layout == null || layout.Error != null)
             {
@@ -431,7 +455,15 @@ namespace KKManager.Core
             info.BlockPos = block.Pos;
             info.BlockSize = block.Size;
             info.BlockStart = layout.PayloadStart + block.Pos;
-            byte[] buf = ReadRange(path, info.BlockStart, block.Size);
+            byte[] buf;
+            if (session != null)
+            {
+                buf = session.Read(info.BlockStart, (int)block.Size);
+            }
+            else
+            {
+                buf = ReadRange(path, info.BlockStart, block.Size);
+            }
             if (buf == null)
             {
                 info.Error = "Parameter 块读取失败";
