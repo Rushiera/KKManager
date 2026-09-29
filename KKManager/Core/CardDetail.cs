@@ -623,18 +623,18 @@ namespace KKManager.Core
                 ReadHead(fs, imageEnd, r);
                 ScanMarks(fs, imageEnd, size, pngHits, kkxHits, ref uarHit, ref lstHit, ref partsHit);
 
-                BuildImages(path, size, pngHits, r);
+                BuildImages(fs, size, pngHits, r);
                 if (uarHit > 0)
                 {
-                    ParseDeclaration(path, size, uarHit, r);
+                    ParseDeclaration(fs, size, uarHit, r);
                 }
                 if (lstHit > 0)
                 {
-                    ParseLstInfo(path, size, lstHit, r);
+                    ParseLstInfo(fs, size, lstHit, r);
                 }
                 if (partsHit > 0)
                 {
-                    ParseParts(path, size, partsHit, r);
+                    ParseParts(fs, size, partsHit, r);
                 }
                 for (int i = 0; i < kkxHits.Count; i = i + 1)
                 {
@@ -642,7 +642,7 @@ namespace KKManager.Core
                 }
                 if (uarHit > 0)
                 {
-                    ParsePlugins(path, size, uarHit, r);
+                    ParsePlugins(fs, size, uarHit, r);
                 }
             }
             catch (Exception ex)
@@ -813,59 +813,56 @@ namespace KKManager.Core
         }
 
         /// <summary>逐张解析内嵌 PNG（块表 → 宽高 / 位深 / 色型 / 字节数）。</summary>
-        private static void BuildImages(string path, long size, List<long> hits, CardDetailResult r)
+        private static void BuildImages(FileStream fs, long size, List<long> hits, CardDetailResult r)
         {
             byte[] hdr = new byte[8];
-            using (FileStream fs = File.OpenRead(path))
+            for (int k = 0; k < hits.Count; k = k + 1)
             {
-                for (int k = 0; k < hits.Count; k = k + 1)
+                long off = hits[k];
+                CardImageInfo img = new CardImageInfo();
+                img.Index = k + 1;
+                img.Offset = off;
+                long pos = off + PngSig.Length;
+                long bytes = PngSig.Length;
+                int chunks = 0;
+                while (chunks < 20000)
                 {
-                    long off = hits[k];
-                    CardImageInfo img = new CardImageInfo();
-                    img.Index = k + 1;
-                    img.Offset = off;
-                    long pos = off + PngSig.Length;
-                    long bytes = PngSig.Length;
-                    int chunks = 0;
-                    while (chunks < 20000)
+                    fs.Position = pos;
+                    if (ReadFull(fs, hdr, 8) != 8)
                     {
-                        fs.Position = pos;
-                        if (ReadFull(fs, hdr, 8) != 8)
-                        {
-                            break;
-                        }
-                        long clen = ((long)hdr[0] << 24) | ((long)hdr[1] << 16) | ((long)hdr[2] << 8) | hdr[3];
-                        string type = Encoding.ASCII.GetString(hdr, 4, 4);
-                        if (clen < 0 || pos + 12 + clen > size)
-                        {
-                            break;
-                        }
-                        if (type == "IHDR" && clen == 13)
-                        {
-                            byte[] ih = new byte[13];
-                            fs.Position = pos + 8;
-                            if (ReadFull(fs, ih, 13) == 13)
-                            {
-                                img.Width = (ih[0] << 24) | (ih[1] << 16) | (ih[2] << 8) | ih[3];
-                                img.Height = (ih[4] << 24) | (ih[5] << 16) | (ih[6] << 8) | ih[7];
-                                img.BitDepth = ih[8];
-                                img.ColorType = ih[9];
-                            }
-                        }
-                        chunks = chunks + 1;
-                        bytes = pos + 12 + clen - off;
-                        if (type == "IEND")
-                        {
-                            img.Ended = true;
-                            break;
-                        }
-                        pos = pos + 12 + clen;
+                        break;
                     }
-                    img.Chunks = chunks;
-                    img.Size = bytes;
-                    r.ImageBytesTotal = r.ImageBytesTotal + bytes;
-                    r.Images.Add(img);
+                    long clen = ((long)hdr[0] << 24) | ((long)hdr[1] << 16) | ((long)hdr[2] << 8) | hdr[3];
+                    string type = Encoding.ASCII.GetString(hdr, 4, 4);
+                    if (clen < 0 || pos + 12 + clen > size)
+                    {
+                        break;
+                    }
+                    if (type == "IHDR" && clen == 13)
+                    {
+                        byte[] ih = new byte[13];
+                        fs.Position = pos + 8;
+                        if (ReadFull(fs, ih, 13) == 13)
+                        {
+                            img.Width = (ih[0] << 24) | (ih[1] << 16) | (ih[2] << 8) | ih[3];
+                            img.Height = (ih[4] << 24) | (ih[5] << 16) | (ih[6] << 8) | ih[7];
+                            img.BitDepth = ih[8];
+                            img.ColorType = ih[9];
+                        }
+                    }
+                    chunks = chunks + 1;
+                    bytes = pos + 12 + clen - off;
+                    if (type == "IEND")
+                    {
+                        img.Ended = true;
+                        break;
+                    }
+                    pos = pos + 12 + clen;
                 }
+                img.Chunks = chunks;
+                img.Size = bytes;
+                r.ImageBytesTotal = r.ImageBytesTotal + bytes;
+                r.Images.Add(img);
             }
 
             if (r.FaceImageOffset > 0)
@@ -882,9 +879,9 @@ namespace KKManager.Core
         }
 
         /// <summary>解析声明区——Sideloader UAR 的 info 数组（部件级 mod 引用）。</summary>
-        private static void ParseDeclaration(string path, long size, long uarAt, CardDetailResult r)
+        private static void ParseDeclaration(FileStream fs, long size, long uarAt, CardDetailResult r)
         {
-            byte[] buf = ReadWindow(path, uarAt + UarMark.Length, size, LocalWindow);
+            byte[] buf = ReadWindow(fs, uarAt + UarMark.Length, size, LocalWindow);
             if (buf == null)
             {
                 r.Warnings.Add("声明区读取失败——mod 明细未解析");
@@ -1034,9 +1031,9 @@ namespace KKManager.Core
         }
 
         /// <summary>解析数据块目录（lstInfo）——块名 / 版本 / 位置 / 大小。</summary>
-        private static void ParseLstInfo(string path, long size, long lstAt, CardDetailResult r)
+        private static void ParseLstInfo(FileStream fs, long size, long lstAt, CardDetailResult r)
         {
-            byte[] buf = ReadWindow(path, lstAt + LstInfoMark.Length, size, LocalWindow);
+            byte[] buf = ReadWindow(fs, lstAt + LstInfoMark.Length, size, LocalWindow);
             if (buf == null)
             {
                 r.Warnings.Add("数据块目录读取失败——目录未解析");
@@ -1120,9 +1117,9 @@ namespace KKManager.Core
         }
 
         /// <summary>解析服装部件表（parts 数组）——件数 + 每件的 id 与键名。</summary>
-        private static void ParseParts(string path, long size, long partsAt, CardDetailResult r)
+        private static void ParseParts(FileStream fs, long size, long partsAt, CardDetailResult r)
         {
-            byte[] buf = ReadWindow(path, partsAt + PartsMark.Length, size, LocalWindow);
+            byte[] buf = ReadWindow(fs, partsAt + PartsMark.Length, size, LocalWindow);
             if (buf == null)
             {
                 r.Warnings.Add("服装部件表读取失败——部件未解析");
@@ -1183,7 +1180,7 @@ namespace KKManager.Core
         }
 
         /// <summary>解析插件块（KKEx）——取 map 键名（插件标识）。</summary>
-        private static void ParsePlugins(string path, long size, long uarAt, CardDetailResult r)
+        private static void ParsePlugins(FileStream fs, long size, long uarAt, CardDetailResult r)
         {
             if (uarAt <= 0)
             {
@@ -1194,7 +1191,7 @@ namespace KKManager.Core
             {
                 from = 0;
             }
-            byte[] buf = ReadWindow(path, from, size, LocalWindow);
+            byte[] buf = ReadWindow(fs, from, size, LocalWindow);
             if (buf == null)
             {
                 return;
@@ -1260,8 +1257,8 @@ namespace KKManager.Core
             }
         }
 
-        /// <summary>从指定偏移读入一个局部窗口（不足则按实际长度返回）。</summary>
-        private static byte[] ReadWindow(string path, long from, long size, int want)
+        /// <summary>从指定偏移读入一个局部窗口（会话流——不足则按实际长度返回；读失败返回 null）。</summary>
+        private static byte[] ReadWindow(FileStream fs, long from, long size, int want)
         {
             if (from < 0 || from >= size)
             {
@@ -1270,7 +1267,7 @@ namespace KKManager.Core
             long remain = size - from;
             int len = (int)Math.Min(want, remain);
             byte[] buf = new byte[len];
-            using (FileStream fs = File.OpenRead(path))
+            try
             {
                 fs.Position = from;
                 int n = ReadFull(fs, buf, len);
@@ -1284,6 +1281,10 @@ namespace KKManager.Core
                     Array.Copy(buf, trim, n);
                     return trim;
                 }
+            }
+            catch (IOException)
+            {
+                return null;
             }
             return buf;
         }

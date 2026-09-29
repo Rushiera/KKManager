@@ -161,15 +161,16 @@ namespace KKManager.Core
                 byte strHead = head[22];
                 int xmlLen;
                 long xmlAt;
+                // 条目形态：A8 "timeline" + 92 00 + 81 A9 "sceneInfo" = 22 字节，串头落在 hit+22
                 if (strHead == 0xD9)
                 {
                     xmlLen = head[23];
-                    xmlAt = hit + 25;
+                    xmlAt = hit + 24;
                 }
                 else if (strHead == 0xDA)
                 {
                     xmlLen = (head[23] << 8) | head[24];
-                    xmlAt = hit + 26;
+                    xmlAt = hit + 25;
                 }
                 else if (strHead == 0xDB)
                 {

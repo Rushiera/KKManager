@@ -321,7 +321,7 @@ namespace KKManager.Core
                         {
                             if (item.ValueAt > 0)
                             {
-                                item.Version = ReadVersion(path, item.ValueAt + item.ValueLen, size);
+                                item.Version = ReadVersion(fs, item.ValueAt + item.ValueLen, size);
                             }
                             r.Plugins.Add(item);
                         }
@@ -341,11 +341,11 @@ namespace KKManager.Core
                     }
                     if (it.Key == "kkpe" && r.KkpeItemCount < 0)
                     {
-                        ReadKkpe(path, it, r);
+                        ReadKkpe(fs, it, r);
                     }
                     else if (it.Key == "vnge_sssb" && r.SssbObjects < 0)
                     {
-                        ReadSssb(path, it, r);
+                        ReadSssb(fs, it, r);
                     }
                 }
 
@@ -360,7 +360,7 @@ namespace KKManager.Core
                         FaceOffset = r.CharaFaceOffsets[k],
                         FaceSize = r.CharaFaceSizes[k]
                     };
-                    List<CardBlockInfo> blocks = ReadBlockTable(path, r.CharaLstOffsets[k]);
+                    List<CardBlockInfo> blocks = ReadBlockTable(fs, r.CharaLstOffsets[k]);
                     if (blocks.Count == 0)
                     {
                         r.Warnings.Add("第 " + (k + 1) + " 份角色数据的块表未解析出条目（@" + r.CharaLstOffsets[k].ToString("N0") + "）");
@@ -393,10 +393,10 @@ namespace KKManager.Core
             return r;
         }
         /// <summary>读一份角色数据的数据块目录（lstInfo 数组——每项 map：name / version / pos / size）。</summary>
-        private static List<CardBlockInfo> ReadBlockTable(string path, long lstAt)
+        private static List<CardBlockInfo> ReadBlockTable(FileStream fs, long lstAt)
         {
             var list = new List<CardBlockInfo>();
-            byte[] buf = ReadValue(path, lstAt + LstInfoMark.Length, 64 * 1024, 64 * 1024);
+            byte[] buf = ReadValue(fs, lstAt + LstInfoMark.Length, 64 * 1024, 64 * 1024);
             if (buf == null)
             {
                 return list;
@@ -477,9 +477,9 @@ namespace KKManager.Core
         }
 
         /// <summary>读 kkpe 的 sceneInfo XML——itemInfo 条数与名字清单（按出现次数降序）。</summary>
-        private static void ReadKkpe(string path, ScenePluginItem item, SceneInfoResult r)
+        private static void ReadKkpe(FileStream fs, ScenePluginItem item, SceneInfoResult r)
         {
-            byte[] xml = ReadValue(path, item.ValueAt, item.ValueLen, ValueReadCap);
+            byte[] xml = ReadValue(fs, item.ValueAt, item.ValueLen, ValueReadCap);
             if (xml == null)
             {
                 r.KkpeItemCount = 0;
@@ -528,9 +528,9 @@ namespace KKManager.Core
         }
 
         /// <summary>读 vnge_sssb 的场景快照 JSON——对象数与相机数。</summary>
-        private static void ReadSssb(string path, ScenePluginItem item, SceneInfoResult r)
+        private static void ReadSssb(FileStream fs, ScenePluginItem item, SceneInfoResult r)
         {
-            byte[] json = ReadValue(path, item.ValueAt, item.ValueLen, ValueReadCap);
+            byte[] json = ReadValue(fs, item.ValueAt, item.ValueLen, ValueReadCap);
             if (json == null)
             {
                 r.SssbObjects = 0;
@@ -602,7 +602,7 @@ namespace KKManager.Core
         }
 
         /// <summary>读条目值之后紧跟的 version 串（`A7 "version" 串`）；无则空串。</summary>
-        private static string ReadVersion(string path, long at, long fileSize)
+        private static string ReadVersion(FileStream fs, long at, long fileSize)
         {
             if (at + 2 > fileSize)
             {
@@ -612,11 +612,8 @@ namespace KKManager.Core
             int n;
             try
             {
-                using (FileStream fs = File.OpenRead(path))
-                {
-                    fs.Position = at;
-                    n = ReadFull(fs, b, b.Length);
-                }
+                fs.Position = at;
+                n = ReadFull(fs, b, b.Length);
             }
             catch (IOException)
             {
@@ -643,7 +640,7 @@ namespace KKManager.Core
         }
 
         /// <summary>读文件的一段字节（上限 cap；读不到返回 null）。</summary>
-        private static byte[] ReadValue(string path, long at, long len, long cap)
+        private static byte[] ReadValue(FileStream fs, long at, long len, long cap)
         {
             if (at <= 0 || len <= 0)
             {
@@ -652,23 +649,20 @@ namespace KKManager.Core
             int take = (int)(len > cap ? cap : len);
             try
             {
-                using (FileStream fs = File.OpenRead(path))
+                if (at >= fs.Length)
                 {
-                    if (at >= fs.Length)
-                    {
-                        return null;
-                    }
-                    byte[] buf = new byte[take];
-                    fs.Position = at;
-                    int n = ReadFull(fs, buf, take);
-                    if (n == take)
-                    {
-                        return buf;
-                    }
-                    byte[] cut = new byte[n];
-                    Array.Copy(buf, cut, n);
-                    return cut;
+                    return null;
                 }
+                byte[] buf = new byte[take];
+                fs.Position = at;
+                int n = ReadFull(fs, buf, take);
+                if (n == take)
+                {
+                    return buf;
+                }
+                byte[] cut = new byte[n];
+                Array.Copy(buf, cut, n);
+                return cut;
             }
             catch (IOException)
             {

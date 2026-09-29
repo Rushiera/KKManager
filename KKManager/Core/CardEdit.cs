@@ -268,60 +268,67 @@ namespace KKManager.Core
                 layout.Error = "不是人物卡（卡类型 " + (st.CardType == null ? "<未识别>" : st.CardType) + "）——本轮编辑面只覆盖人物卡的姓 / 名 / 爱称 / 性格";
                 return layout;
             }
+            FileStream fs = null;
+            bool ownStream = !(session != null && session.HeadOk);
             try
             {
-                using (FileStream fs = File.OpenRead(path))
+                fs = ownStream ? File.OpenRead(path) : session.Stream;
+                fs.Position = st.ImageEnd;
+                BinaryReader br = new BinaryReader(fs);
+                br.ReadInt32();
+                CardReader.Read7BitString(br);
+                CardReader.Read7BitString(br);
+                layout.FaceSize = br.ReadInt32();
+                layout.FaceOffset = fs.Position;
+                if (layout.FaceSize <= 0 || layout.FaceOffset + layout.FaceSize > st.Size)
                 {
-                    fs.Position = st.ImageEnd;
-                    BinaryReader br = new BinaryReader(fs);
-                    br.ReadInt32();
-                    CardReader.Read7BitString(br);
-                    CardReader.Read7BitString(br);
-                    layout.FaceSize = br.ReadInt32();
-                    layout.FaceOffset = fs.Position;
-                    if (layout.FaceSize <= 0 || layout.FaceOffset + layout.FaceSize > st.Size)
-                    {
-                        layout.Error = "脸图长度异常（" + layout.FaceSize + " 字节）——不是预期的人物卡布局";
-                        return layout;
-                    }
-                    fs.Position = layout.FaceOffset + layout.FaceSize;
-                    layout.TableSizeAt = fs.Position;
-                    int tableSize = br.ReadInt32();
-                    if (tableSize <= 0 || tableSize > 1048576 || layout.TableSizeAt + 4 + tableSize > st.Size)
-                    {
-                        layout.Error = "块表长度异常（" + tableSize + " 字节）——不是预期的人物卡布局";
-                        return layout;
-                    }
-                    layout.TableSize = tableSize;
-                    layout.TableAt = fs.Position;
-                    byte[] table = new byte[tableSize];
-                    if (ReadExact(fs, table, tableSize) != tableSize)
-                    {
-                        layout.Error = "块表读取不完整";
-                        return layout;
-                    }
-                    if (!ParseTable(table, layout))
-                    {
-                        layout.Error = "块表不是预期的 lstInfo 结构（" + Hex(table, 24) + "）";
-                        return layout;
-                    }
-                    layout.TailAt = layout.TableAt + tableSize;
-                    fs.Position = layout.TailAt;
-                    layout.TailRaw = br.ReadInt32();
-                    layout.TailSecond = br.ReadInt32();
-                    layout.PayloadStart = layout.TailAt + 8;
-                    layout.PayloadSize = st.Size - layout.PayloadStart;
-                    layout.TailConst = layout.TailRaw - layout.PayloadSize;
-                    if (layout.PayloadSize <= 0)
-                    {
-                        layout.Error = "载荷长度为 0——不是预期的人物卡布局";
-                        return layout;
-                    }
+                    layout.Error = "脸图长度异常（" + layout.FaceSize + " 字节）——不是预期的人物卡布局";
+                    return layout;
+                }
+                fs.Position = layout.FaceOffset + layout.FaceSize;
+                layout.TableSizeAt = fs.Position;
+                int tableSize = br.ReadInt32();
+                if (tableSize <= 0 || tableSize > 1048576 || layout.TableSizeAt + 4 + tableSize > st.Size)
+                {
+                    layout.Error = "块表长度异常（" + tableSize + " 字节）——不是预期的人物卡布局";
+                    return layout;
+                }
+                layout.TableSize = tableSize;
+                layout.TableAt = fs.Position;
+                byte[] table = new byte[tableSize];
+                if (ReadExact(fs, table, tableSize) != tableSize)
+                {
+                    layout.Error = "块表读取不完整";
+                    return layout;
+                }
+                if (!ParseTable(table, layout))
+                {
+                    layout.Error = "块表不是预期的 lstInfo 结构（" + Hex(table, 24) + "）";
+                    return layout;
+                }
+                layout.TailAt = layout.TableAt + tableSize;
+                fs.Position = layout.TailAt;
+                layout.TailRaw = br.ReadInt32();
+                layout.TailSecond = br.ReadInt32();
+                layout.PayloadStart = layout.TailAt + 8;
+                layout.PayloadSize = st.Size - layout.PayloadStart;
+                layout.TailConst = layout.TailRaw - layout.PayloadSize;
+                if (layout.PayloadSize <= 0)
+                {
+                    layout.Error = "载荷长度为 0——不是预期的人物卡布局";
+                    return layout;
                 }
             }
             catch (Exception ex)
             {
                 layout.Error = "数据区布局解析异常：" + ex.GetType().Name + " " + ex.Message;
+            }
+            finally
+            {
+                if (ownStream && fs != null)
+                {
+                    fs.Dispose();
+                }
             }
             return layout;
         }

@@ -434,6 +434,43 @@ namespace KKManager.Data
         public string HashedAt { get; set; }
     }
 
+    /// <summary>一行插件记录（plugin_file 表）——一个 dll 可含多项插件（file_path + guid 唯一）。</summary>
+    public class PluginRow
+    {
+        /// <summary>dll 绝对路径。</summary>
+        public string FilePath { get; set; } = "";
+
+        /// <summary>插件 GUID（空 = 该 dll 未解析出插件特性）。</summary>
+        public string Guid { get; set; } = "";
+
+        /// <summary>所属插件库根路径。</summary>
+        public string RootPath { get; set; } = "";
+
+        /// <summary>文件名（含扩展名）。</summary>
+        public string FileName { get; set; } = "";
+
+        /// <summary>插件显示名。</summary>
+        public string Name { get; set; } = "";
+
+        /// <summary>插件版本。</summary>
+        public string Version { get; set; } = "";
+
+        /// <summary>进程过滤（逗号分隔；空 = 所有进程都加载）。</summary>
+        public string Processes { get; set; } = "";
+
+        /// <summary>依赖的插件 GUID（逗号分隔）。</summary>
+        public string Dependencies { get; set; } = "";
+
+        /// <summary>是否 IPA 插件（旧框架）。</summary>
+        public bool IsIpa { get; set; }
+
+        /// <summary>文件字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>修改时间戳文本（UTC）。</summary>
+        public string Mtime { get; set; } = "";
+    }
+
     /// <summary>卡片编辑留档——原版留在软件内部，与卡片的对应关系落库（「寻找旧版」读它）。</summary>
     public class CardEditRecord
     {
@@ -588,17 +625,26 @@ namespace KKManager.Data
         public long Live { get; set; }
     }
 
-    /// <summary>待办条目——软件认为需要使用者处理的一件事（目前只有「离线库」一类）。</summary>
+    /// <summary>待办条目——需要使用者处理的一件事（软件登记的 `offline` / 使用者手输的 `manual` / 卡片上挂的 `card`）。</summary>
     public class TodoRow
     {
         /// <summary>条目 id（关闭用）。</summary>
         public long Id { get; set; }
 
-        /// <summary>类型——`offline` = 库根被判为离线（库根路径失效或为空）。</summary>
+        /// <summary>类型——`offline` = 库根被判为离线（库根路径失效或为空）· `manual` = 使用者在待办清单里手输 · `card` = 使用者在卡片引用明细里挂的待办。</summary>
         public string Kind { get; set; }
 
-        /// <summary>关联键——离线库类型下是库根路径（小写归一）。</summary>
+        /// <summary>关联键——离线库类型下是库根路径（小写归一）· 手输类型下是正文（去首尾空白）· 卡片类型下是卡片文件绝对路径（小写归一）。</summary>
         public string Key { get; set; }
+
+        /// <summary>待办正文（手输 / 卡片两类；离线库类型为空——正文由库根备注承担）。</summary>
+        public string Text { get; set; }
+
+        /// <summary>关联对象路径（卡片待办 = 卡片文件绝对路径；其余为空）。</summary>
+        public string RefPath { get; set; }
+
+        /// <summary>关联对象显示名（卡片待办 = 卡片文件名；其余为空）。</summary>
+        public string RefName { get; set; }
 
         /// <summary>登记时刻。</summary>
         public string CreatedAt { get; set; }
@@ -725,6 +771,9 @@ namespace KKManager.Data
         /// <summary>单条目文本入库上限（字符）——超长截断并留标记，避免档案表膨胀。</summary>
         private const int TextEntryLimit = 20000;
 
+        /// <summary>待办正文长度上限（字符）——手输与卡片待办共用；超限在入口拒绝，不静默截断。</summary>
+        public const int TodoTextLimit = 200;
+
         /// <summary>一条条目是否可读文本类（按扩展名判）。</summary>
         public static bool IsTextEntry(string path)
         {
@@ -828,6 +877,13 @@ namespace KKManager.Data
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                                  kind TEXT, key TEXT, created_at TEXT,
                                  UNIQUE(kind, key))");
+                // 增量迁移（v0.20.2）：手动待办要正文 / 关联对象，且卡片待办允许一卡多条——
+                // 旧表带表级 UNIQUE(kind, key)（SQLite 删不掉表级约束），故建新表搬运后重建，
+                // 唯一性只在 offline 上保留（部分唯一索引）；manual 的重复由应用层出声拒绝
+                if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('todo') WHERE name='text'"), CultureInfo.InvariantCulture) == 0)
+                {
+                    MigrateTodoTable();
+                }
                 Exec(@"CREATE TABLE IF NOT EXISTS mod_u3d(
                                  guid TEXT, entry_path TEXT,
                                  file_path TEXT, size INTEGER, mtime TEXT,
@@ -837,6 +893,13 @@ namespace KKManager.Data
                 Exec(@"CREATE TABLE IF NOT EXISTS mod_hash(
                                  file_path TEXT PRIMARY KEY, size INTEGER, mtime TEXT,
                                  md5 TEXT, hashed_at TEXT)");
+                Exec(@"CREATE TABLE IF NOT EXISTS plugin_file(
+                                 file_path TEXT NOT NULL, guid TEXT NOT NULL,
+                                 root_path TEXT, file_name TEXT, name TEXT, version TEXT,
+                                 processes TEXT, dependencies TEXT, is_ipa INTEGER,
+                                 size INTEGER, mtime TEXT, scan_time TEXT,
+                                 PRIMARY KEY(file_path, guid))");
+                Exec("CREATE INDEX IF NOT EXISTS ix_plugin_guid ON plugin_file(guid)");
                 Exec(@"CREATE TABLE IF NOT EXISTS card_edit(
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                                  card_path TEXT, card_name TEXT, lib INTEGER,
@@ -857,6 +920,34 @@ namespace KKManager.Data
             }
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mtime ON card(mtime)");
             Exec("PRAGMA user_version=" + SchemaVersion);
+        }
+
+        /// <summary>把 todo 表迁到 v0.20.2 结构——补 text / ref_path / ref_name 三列，并把「同类型同键只留一条」的唯一性缩到只对 offline 生效（卡片待办允许一卡多条）。行数不一致即抛——失败可见，不静默丢待办。</summary>
+        private void MigrateTodoTable()
+        {
+            long before = Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM todo"), CultureInfo.InvariantCulture);
+            Begin();
+            try
+            {
+                Exec(@"CREATE TABLE todo_new(
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 kind TEXT, key TEXT, text TEXT, ref_path TEXT, ref_name TEXT, created_at TEXT)");
+                Exec("INSERT INTO todo_new(id, kind, key, created_at) SELECT id, kind, key, created_at FROM todo");
+                long after = Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM todo_new"), CultureInfo.InvariantCulture);
+                if (after != before)
+                {
+                    throw new InvalidOperationException("todo 表迁移行数不一致：" + before + " → " + after);
+                }
+                Exec("DROP TABLE todo");
+                Exec("ALTER TABLE todo_new RENAME TO todo");
+                Exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_todo_offline ON todo(kind, key) WHERE kind = 'offline'");
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
         }
 
         private void DropAll()
@@ -974,11 +1065,72 @@ namespace KKManager.Data
             }
         }
 
+        /// <summary>登记一条手输待办（正文去首尾空白后即关联键）——同内容已存在则回错误文本、不落盘（重复出声，不静默吞）。</summary>
+        public string AddManualTodo(string text, string createdAt)
+        {
+            string body = (text ?? "").Trim();
+            if (body.Length == 0)
+            {
+                return "待办内容不能为空";
+            }
+            if (body.Length > TodoTextLimit)
+            {
+                return "待办内容太长（上限 " + TodoTextLimit + " 字）";
+            }
+            long dup;
+            using (SqliteCommand cmd = NewCommand("SELECT COUNT(*) FROM todo WHERE kind='manual' AND key=$k"))
+            {
+                cmd.Parameters.AddWithValue("$k", body);
+                dup = Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+            if (dup > 0)
+            {
+                return "已经有一条一样的手输待办：" + body;
+            }
+            using (SqliteCommand cmd = NewCommand("INSERT INTO todo(kind,key,text,created_at) VALUES('manual',$k,$t,$c)"))
+            {
+                cmd.Parameters.AddWithValue("$k", body);
+                cmd.Parameters.AddWithValue("$t", body);
+                cmd.Parameters.AddWithValue("$c", createdAt ?? "");
+                cmd.ExecuteNonQuery();
+            }
+            return null;
+        }
+
+        /// <summary>登记一条卡片待办（卡片路径归一后作关联键——一卡可多条，靠 id 区分）——正文为空 / 超长回错误文本。</summary>
+        public string AddCardTodo(string cardPath, string cardName, string text, string createdAt)
+        {
+            string path = (cardPath ?? "").Trim();
+            string body = (text ?? "").Trim();
+            if (path.Length == 0)
+            {
+                return "缺少卡片路径";
+            }
+            if (body.Length == 0)
+            {
+                return "待办内容不能为空";
+            }
+            if (body.Length > TodoTextLimit)
+            {
+                return "待办内容太长（上限 " + TodoTextLimit + " 字）";
+            }
+            using (SqliteCommand cmd = NewCommand("INSERT INTO todo(kind,key,text,ref_path,ref_name,created_at) VALUES('card',$k,$t,$p,$n,$c)"))
+            {
+                cmd.Parameters.AddWithValue("$k", path.ToLowerInvariant());
+                cmd.Parameters.AddWithValue("$t", body);
+                cmd.Parameters.AddWithValue("$p", path);
+                cmd.Parameters.AddWithValue("$n", cardName ?? "");
+                cmd.Parameters.AddWithValue("$c", createdAt ?? "");
+                cmd.ExecuteNonQuery();
+            }
+            return null;
+        }
+
         /// <summary>全部待办（按登记顺序）。</summary>
         public List<TodoRow> ListTodos()
         {
             List<TodoRow> list = new List<TodoRow>();
-            using (SqliteCommand cmd = NewCommand("SELECT id, kind, key, created_at FROM todo ORDER BY id"))
+            using (SqliteCommand cmd = NewCommand("SELECT id, kind, key, text, ref_path, ref_name, created_at FROM todo ORDER BY id"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
@@ -987,7 +1139,10 @@ namespace KKManager.Data
                     t.Id = r.GetInt64(0);
                     t.Kind = r.IsDBNull(1) ? "" : r.GetString(1);
                     t.Key = r.IsDBNull(2) ? "" : r.GetString(2);
-                    t.CreatedAt = r.IsDBNull(3) ? "" : r.GetString(3);
+                    t.Text = r.IsDBNull(3) ? "" : r.GetString(3);
+                    t.RefPath = r.IsDBNull(4) ? "" : r.GetString(4);
+                    t.RefName = r.IsDBNull(5) ? "" : r.GetString(5);
+                    t.CreatedAt = r.IsDBNull(6) ? "" : r.GetString(6);
                     list.Add(t);
                 }
             }
@@ -1988,7 +2143,7 @@ namespace KKManager.Data
                             RootPath = r.IsDBNull(5) ? null : r.GetString(5),
                             Tier = r.GetInt32(6),
                             Folder = r.IsDBNull(7) ? "" : r.GetString(7),
-                            ModCount = r.GetInt64(8),
+                            ModCount = r.IsDBNull(8) ? 0 : r.GetInt64(8),
                             Green = r.GetInt64(9),
                             Yellow = r.GetInt64(10),
                             Red = r.GetInt64(11),
@@ -2423,7 +2578,7 @@ namespace KKManager.Data
                         RootPath = r.IsDBNull(5) ? null : r.GetString(5),
                         Tier = r.GetInt32(6),
                         Folder = r.IsDBNull(7) ? "" : r.GetString(7),
-                        ModCount = r.GetInt64(8),
+                        ModCount = r.IsDBNull(8) ? 0 : r.GetInt64(8),
                         Green = r.GetInt64(9),
                         Yellow = r.GetInt64(10),
                         Red = r.GetInt64(11),
@@ -2465,7 +2620,7 @@ namespace KKManager.Data
                             RootPath = r.IsDBNull(5) ? null : r.GetString(5),
                             Tier = r.GetInt32(6),
                             Folder = r.IsDBNull(7) ? "" : r.GetString(7),
-                            ModCount = r.GetInt64(8),
+                            ModCount = r.IsDBNull(8) ? 0 : r.GetInt64(8),
                             Green = r.GetInt64(9),
                             Yellow = r.GetInt64(10),
                             Red = r.GetInt64(11),
@@ -3359,6 +3514,77 @@ namespace KKManager.Data
             {
                 cmd.Parameters.AddWithValue("$s", size);
                 cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>清掉某个插件库根下的全部插件行（重扫前先清——同一 dll 的插件项可能变少）。</summary>
+        /// <param name="rootPath">插件库根绝对路径。</param>
+        public void DeletePluginsUnderRoot(string rootPath)
+        {
+            using (SqliteCommand cmd = NewCommand("DELETE FROM plugin_file WHERE root_path=$p"))
+            {
+                cmd.Parameters.AddWithValue("$p", rootPath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>写入一项插件（file_path + guid 唯一——一个 dll 可含多项；guid 为空表示该 dll 未解析出插件特性）。</summary>
+        /// <param name="row">插件行。</param>
+        public void SavePlugin(PluginRow row)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT OR REPLACE INTO plugin_file(
+                        file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime, scan_time)
+                        VALUES($f, $g, $r, $n, $nm, $v, $p, $d, $i, $s, $m, $t)"))
+            {
+                cmd.Parameters.AddWithValue("$f", row.FilePath);
+                cmd.Parameters.AddWithValue("$g", row.Guid);
+                cmd.Parameters.AddWithValue("$r", row.RootPath);
+                cmd.Parameters.AddWithValue("$n", row.FileName);
+                cmd.Parameters.AddWithValue("$nm", row.Name);
+                cmd.Parameters.AddWithValue("$v", row.Version);
+                cmd.Parameters.AddWithValue("$p", row.Processes);
+                cmd.Parameters.AddWithValue("$d", row.Dependencies);
+                cmd.Parameters.AddWithValue("$i", row.IsIpa ? 1 : 0);
+                cmd.Parameters.AddWithValue("$s", row.Size);
+                cmd.Parameters.AddWithValue("$m", row.Mtime);
+                cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>全部插件行（有 guid 的在前按 guid / 文件名排序；空 guid 的非插件 dll 排在最后）。</summary>
+        /// <returns>插件行清单。</returns>
+        public List<PluginRow> LoadPlugins()
+        {
+            List<PluginRow> list = new List<PluginRow>();
+            using (SqliteCommand cmd = NewCommand(@"SELECT file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime
+                        FROM plugin_file ORDER BY CASE WHEN guid='' THEN 1 ELSE 0 END, guid, file_name"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    PluginRow row = new PluginRow();
+                    row.FilePath = r.IsDBNull(0) ? "" : r.GetString(0);
+                    row.Guid = r.IsDBNull(1) ? "" : r.GetString(1);
+                    row.RootPath = r.IsDBNull(2) ? "" : r.GetString(2);
+                    row.FileName = r.IsDBNull(3) ? "" : r.GetString(3);
+                    row.Name = r.IsDBNull(4) ? "" : r.GetString(4);
+                    row.Version = r.IsDBNull(5) ? "" : r.GetString(5);
+                    row.Processes = r.IsDBNull(6) ? "" : r.GetString(6);
+                    row.Dependencies = r.IsDBNull(7) ? "" : r.GetString(7);
+                    row.IsIpa = !r.IsDBNull(8) && r.GetInt64(8) != 0;
+                    row.Size = r.IsDBNull(9) ? 0 : r.GetInt64(9);
+                    row.Mtime = r.IsDBNull(10) ? "" : r.GetString(10);
+                    list.Add(row);
+                }
+            }
+            return list;
+        }
+        /// <summary>删掉某个 dll 的全部插件行（重解析前先清——同一 dll 的插件项可能变少）。</summary>
+        /// <param name="filePath">dll 绝对路径。</param>
+        public void DeletePluginFile(string filePath)
+        {
+            using (SqliteCommand cmd = NewCommand("DELETE FROM plugin_file WHERE file_path=$p"))
+            {
+                cmd.Parameters.AddWithValue("$p", filePath);
                 cmd.ExecuteNonQuery();
             }
         }
