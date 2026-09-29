@@ -580,6 +580,12 @@ namespace KKManager.Core
         /// <summary>解析数据区内容（path = 卡片文件；imageEnd = 图片区结束偏移）。</summary>
         public static CardDetailResult Parse(string path, long imageEnd)
         {
+            return Parse(path, imageEnd, null);
+        }
+
+        /// <summary>解析数据区内容（会话版——主扫描复用段内已打开的句柄，不另开文件；session 为 null 时自行开文件）。</summary>
+        public static CardDetailResult Parse(string path, long imageEnd, CardFileSession session)
+        {
             CardDetailResult r = new CardDetailResult();
             if (!File.Exists(path))
             {
@@ -599,14 +605,23 @@ namespace KKManager.Core
             long partsHit = -1;
             long size = 0;
 
+            bool own = session == null;
+            if (own)
+            {
+                session = CardFileSession.Open(path);
+            }
+            if (session == null)
+            {
+                r.Warnings.Add("卡片文件打不开——跳过数据区解析");
+                return r;
+            }
+
             try
             {
-                using (FileStream fs = File.OpenRead(path))
-                {
-                    size = fs.Length;
-                    ReadHead(fs, imageEnd, r);
-                    ScanMarks(fs, imageEnd, size, pngHits, kkxHits, ref uarHit, ref lstHit, ref partsHit);
-                }
+                FileStream fs = session.Stream;
+                size = session.Length;
+                ReadHead(fs, imageEnd, r);
+                ScanMarks(fs, imageEnd, size, pngHits, kkxHits, ref uarHit, ref lstHit, ref partsHit);
 
                 BuildImages(path, size, pngHits, r);
                 if (uarHit > 0)
@@ -633,6 +648,13 @@ namespace KKManager.Core
             catch (Exception ex)
             {
                 r.Warnings.Add("数据区解析异常：" + ex.GetType().Name + " " + ex.Message);
+            }
+            finally
+            {
+                if (own)
+                {
+                    session.Dispose();
+                }
             }
 
             return r;

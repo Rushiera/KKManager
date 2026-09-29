@@ -260,6 +260,11 @@ namespace KKManager.Core
         /// <summary>读取人物卡的服装 / 饰品（Coordinate 块）。只读；失败具名返回。</summary>
         public static CardCoordinateResult Read(string path)
         {
+            return Read(path, null);
+        }
+        /// <summary>读取人物卡的服装 / 饰品（会话版——复用段内已打开的句柄，不另开文件；session 为 null 时自行开文件）。只读；失败具名返回。</summary>
+        public static CardCoordinateResult Read(string path, CardFileSession session)
+        {
             CardCoordinateResult result = new CardCoordinateResult();
             result.FilePath = path;
             if (!File.Exists(path))
@@ -267,49 +272,69 @@ namespace KKManager.Core
                 result.Error = "卡片文件不存在：" + path;
                 return result;
             }
-            CardLayout layout = CardEdit.Parse(path);
-            if (layout.Error != null)
+            bool own = session == null;
+            if (own)
             {
-                // 复用编辑面的布局解析——非人物卡时换成服装语境的说法（别把「编辑面只覆盖…」这类话抛给调用方）
-                if (layout.CardType != null && layout.CardType.IndexOf("Chara", StringComparison.Ordinal) < 0)
-                {
-                    result.Error = "不是人物卡（卡类型 " + layout.CardType + "）——服装 / 饰品只在人物卡的 Coordinate 块里";
-                }
-                else
-                {
-                    result.Error = layout.Error;
-                }
+                session = CardFileSession.Open(path);
+            }
+            if (session == null)
+            {
+                result.Error = "卡片文件打不开：" + path;
                 return result;
             }
-            CardEditBlock block = FindBlock(layout);
-            if (block == null)
-            {
-                result.Error = "卡片里没有 " + BlockName + " 块（现有块：" + BlockNames(layout) + "）";
-                return result;
-            }
-            result.BlockVersion = block.Version;
-            result.BlockSize = block.Size;
-            if (block.Size <= 0 || block.Size > MaxBlockBytes)
-            {
-                result.Error = BlockName + " 块大小异常（" + block.Size.ToString("N0") + " 字节）";
-                return result;
-            }
-            byte[] buf;
             try
             {
-                buf = ReadRange(path, layout.PayloadStart + block.Pos, (int)block.Size);
+                CardLayout layout = CardEdit.Parse(path, session);
+                if (layout.Error != null)
+                {
+                    // 复用编辑面的布局解析——非人物卡时换成服装语境的说法（别把「编辑面只覆盖…」这类话抛给调用方）
+                    if (layout.CardType != null && layout.CardType.IndexOf("Chara", StringComparison.Ordinal) < 0)
+                    {
+                        result.Error = "不是人物卡（卡类型 " + layout.CardType + "）——服装 / 饰品只在人物卡的 Coordinate 块里";
+                    }
+                    else
+                    {
+                        result.Error = layout.Error;
+                    }
+                    return result;
+                }
+                CardEditBlock block = FindBlock(layout);
+                if (block == null)
+                {
+                    result.Error = "卡片里没有 " + BlockName + " 块（现有块：" + BlockNames(layout) + "）";
+                    return result;
+                }
+                result.BlockVersion = block.Version;
+                result.BlockSize = block.Size;
+                if (block.Size <= 0 || block.Size > MaxBlockBytes)
+                {
+                    result.Error = BlockName + " 块大小异常（" + block.Size.ToString("N0") + " 字节）";
+                    return result;
+                }
+                byte[] buf;
+                try
+                {
+                    buf = ReadRange(session, layout.PayloadStart + block.Pos, (int)block.Size);
+                }
+                catch (Exception ex)
+                {
+                    result.Error = "读取 " + BlockName + " 块失败：" + ex.GetType().Name + " " + ex.Message;
+                    return result;
+                }
+                if (buf == null || buf.Length != block.Size)
+                {
+                    result.Error = BlockName + " 块读取不完整（应 " + block.Size.ToString("N0") + " 字节）";
+                    return result;
+                }
+                ParseOutfits(buf, result);
             }
-            catch (Exception ex)
+            finally
             {
-                result.Error = "读取 " + BlockName + " 块失败：" + ex.GetType().Name + " " + ex.Message;
-                return result;
+                if (own)
+                {
+                    session.Dispose();
+                }
             }
-            if (buf == null || buf.Length != block.Size)
-            {
-                result.Error = BlockName + " 块读取不完整（应 " + block.Size.ToString("N0") + " 字节）";
-                return result;
-            }
-            ParseOutfits(buf, result);
             return result;
         }
 
@@ -1083,29 +1108,14 @@ namespace KKManager.Core
             return false;
         }
 
-        /// <summary>读文件的一段（失败抛异常——由调用方出声）。</summary>
-        private static byte[] ReadRange(string path, long at, int count)
+
+        /// <summary>读会话流的一段（会话版——复用段内已打开的句柄；越界或短读抛异常，由调用方出声）。</summary>
+        private static byte[] ReadRange(CardFileSession session, long at, int count)
         {
-            byte[] data = new byte[count];
-            using (FileStream fs = File.OpenRead(path))
+            byte[] data = session.Read(at, count);
+            if (data == null)
             {
-                fs.Position = at;
-                int total = 0;
-                while (total < count)
-                {
-                    int read = fs.Read(data, total, count - total);
-                    if (read <= 0)
-                    {
-                        break;
-                    }
-                    total = total + read;
-                }
-                if (total != count)
-                {
-                    byte[] partial = new byte[total];
-                    Array.Copy(data, partial, total);
-                    return partial;
-                }
+                throw new IOException("读取区间失败（偏移 " + at + " · " + count + " 字节）");
             }
             return data;
         }

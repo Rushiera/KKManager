@@ -195,14 +195,29 @@ namespace KKManager.Core
         /// <summary>读一张场景卡的插件条目、内嵌角色数据份数、kkpe 道具名与 vnge_sssb 对象数（path = 卡片文件；imageEnd = 图片区结束偏移）。</summary>
         public static SceneInfoResult Read(string path, long imageEnd)
         {
+            return Read(path, imageEnd, null);
+        }
+
+        /// <summary>读一张场景卡的插件条目、内嵌角色数据份数、kkpe 道具名与 vnge_sssb 对象数（会话版——主扫描复用段内已打开的句柄，不另开文件；session 为 null 时自行开文件）。</summary>
+        public static SceneInfoResult Read(string path, long imageEnd, CardFileSession session)
+        {
             SceneInfoResult r = new SceneInfoResult { Scanned = true };
             if (!File.Exists(path))
             {
                 r.Error = "卡片文件不存在：" + path;
                 return r;
             }
-            var fi = new FileInfo(path);
-            long size = fi.Length;
+            bool own = session == null;
+            if (own)
+            {
+                session = CardFileSession.Open(path);
+            }
+            if (session == null)
+            {
+                r.Error = "卡片文件打不开：" + path;
+                return r;
+            }
+            long size = session.Length;
             long from = imageEnd > 0 ? imageEnd : 0;
             if (from >= size)
             {
@@ -215,108 +230,106 @@ namespace KKManager.Core
             var faceSeen = new HashSet<long>();
             try
             {
-                using (FileStream fs = File.OpenRead(path))
+                FileStream fs = session.Stream;
+                byte[] buf = new byte[BufSize + 256];
+                long pos = from;
+                long consumed = from;
+                int carry = 0;
+                while (pos < size)
                 {
-                    byte[] buf = new byte[BufSize + 256];
-                    long pos = from;
-                    long consumed = from;
-                    int carry = 0;
-                    while (pos < size)
+                    long want = size - pos;
+                    if (want > BufSize)
                     {
-                        long want = size - pos;
-                        if (want > BufSize)
-                        {
-                            want = BufSize;
-                        }
-                        fs.Position = pos;
-                        int read = fs.Read(buf, carry, (int)want);
-                        if (read <= 0)
-                        {
-                            break;
-                        }
-                        pos = pos + read;
-                        long baseOff = consumed - carry;
-                        consumed = consumed + read;
-                        int total = carry + read;
-                        r.ScannedBytes = r.ScannedBytes + read;
-
-                        for (int i = 0; i <= total - LstInfoMark.Length; i = i + 1)
-                        {
-                            if (buf[i] == LstInfoMark[0] && MatchAt(buf, i, LstInfoMark))
-                            {
-                                long lstAt = baseOff + i;
-                                if (lstSeen.Add(lstAt))
-                                {
-                                    r.CharaDataCount = r.CharaDataCount + 1;
-                                    r.CharaLstOffsets.Add(lstAt);
-                                }
-                            }
-                        }
-
-                        // 份头段锚点（内嵌角色卡数据头：int32 100 + 卡类型串 + 数据版本串 + int32 脸图长度 + PNG 签名）——记卡面图偏移
-                        for (int i = 0; i <= total - 45; i = i + 1)
-                        {
-                            if (buf[i] != 0x64 || buf[i + 1] != 0x00 || buf[i + 2] != 0x00 || buf[i + 3] != 0x00)
-                            {
-                                continue;
-                            }
-                            int p = i + 4;
-                            string cardType = Read7BitInBuf(buf, ref p, total);
-                            string dataVer = Read7BitInBuf(buf, ref p, total);
-                            if (cardType == null || dataVer == null || cardType.IndexOf("KoiKatu", StringComparison.Ordinal) < 0)
-                            {
-                                continue;
-                            }
-                            if (p + 12 > total)
-                            {
-                                continue;
-                            }
-                            long faceLen = (long)buf[p] | ((long)buf[p + 1] << 8) | ((long)buf[p + 2] << 16) | ((long)buf[p + 3] << 24);
-                            int faceAt = p + 4;
-                            if (faceLen <= 0 || buf[faceAt] != 0x89 || buf[faceAt + 1] != 0x50 || buf[faceAt + 2] != 0x4E || buf[faceAt + 3] != 0x47)
-                            {
-                                continue;
-                            }
-                            long faceOff = baseOff + faceAt;
-                            if (faceSeen.Add(faceOff))
-                            {
-                                r.CharaFaceOffsets.Add(faceOff);
-                                r.CharaFaceSizes.Add(faceLen);
-                                r.CharaVersions.Add(dataVer);
-                            }
-                        }
-
-                        for (int i = 0; i <= total - 96; i = i + 1)
-                        {
-                            if (buf[i] != 0x92 || buf[i + 1] != 0x00)
-                            {
-                                continue;
-                            }
-                            long at = baseOff + i;
-                            if (!seen.Add(at))
-                            {
-                                continue;
-                            }
-                            string key = ReadKeyAt(buf, i);
-                            if (key == null)
-                            {
-                                continue;
-                            }
-                            ScenePluginItem item = ParseItem(buf, i, at, key, r);
-                            if (item != null)
-                            {
-                                if (item.ValueAt > 0)
-                                {
-                                    item.Version = ReadVersion(path, item.ValueAt + item.ValueLen, size);
-                                }
-                                r.Plugins.Add(item);
-                            }
-                        }
-
-                        int newCarry = total < CarrySize ? total : CarrySize;
-                        Array.Copy(buf, total - newCarry, buf, 0, newCarry);
-                        carry = newCarry;
+                        want = BufSize;
                     }
+                    fs.Position = pos;
+                    int read = fs.Read(buf, carry, (int)want);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+                    pos = pos + read;
+                    long baseOff = consumed - carry;
+                    consumed = consumed + read;
+                    int total = carry + read;
+                    r.ScannedBytes = r.ScannedBytes + read;
+
+                    for (int i = 0; i <= total - LstInfoMark.Length; i = i + 1)
+                    {
+                        if (buf[i] == LstInfoMark[0] && MatchAt(buf, i, LstInfoMark))
+                        {
+                            long lstAt = baseOff + i;
+                            if (lstSeen.Add(lstAt))
+                            {
+                                r.CharaDataCount = r.CharaDataCount + 1;
+                                r.CharaLstOffsets.Add(lstAt);
+                            }
+                        }
+                    }
+
+                    // 份头段锚点（内嵌角色卡数据头：int32 100 + 卡类型串 + 数据版本串 + int32 脸图长度 + PNG 签名）——记卡面图偏移
+                    for (int i = 0; i <= total - 45; i = i + 1)
+                    {
+                        if (buf[i] != 0x64 || buf[i + 1] != 0x00 || buf[i + 2] != 0x00 || buf[i + 3] != 0x00)
+                        {
+                            continue;
+                        }
+                        int p = i + 4;
+                        string cardType = Read7BitInBuf(buf, ref p, total);
+                        string dataVer = Read7BitInBuf(buf, ref p, total);
+                        if (cardType == null || dataVer == null || cardType.IndexOf("KoiKatu", StringComparison.Ordinal) < 0)
+                        {
+                            continue;
+                        }
+                        if (p + 12 > total)
+                        {
+                            continue;
+                        }
+                        long faceLen = (long)buf[p] | ((long)buf[p + 1] << 8) | ((long)buf[p + 2] << 16) | ((long)buf[p + 3] << 24);
+                        int faceAt = p + 4;
+                        if (faceLen <= 0 || buf[faceAt] != 0x89 || buf[faceAt + 1] != 0x50 || buf[faceAt + 2] != 0x4E || buf[faceAt + 3] != 0x47)
+                        {
+                            continue;
+                        }
+                        long faceOff = baseOff + faceAt;
+                        if (faceSeen.Add(faceOff))
+                        {
+                            r.CharaFaceOffsets.Add(faceOff);
+                            r.CharaFaceSizes.Add(faceLen);
+                            r.CharaVersions.Add(dataVer);
+                        }
+                    }
+
+                    for (int i = 0; i <= total - 96; i = i + 1)
+                    {
+                        if (buf[i] != 0x92 || buf[i + 1] != 0x00)
+                        {
+                            continue;
+                        }
+                        long at = baseOff + i;
+                        if (!seen.Add(at))
+                        {
+                            continue;
+                        }
+                        string key = ReadKeyAt(buf, i);
+                        if (key == null)
+                        {
+                            continue;
+                        }
+                        ScenePluginItem item = ParseItem(buf, i, at, key, r);
+                        if (item != null)
+                        {
+                            if (item.ValueAt > 0)
+                            {
+                                item.Version = ReadVersion(path, item.ValueAt + item.ValueLen, size);
+                            }
+                            r.Plugins.Add(item);
+                        }
+                    }
+
+                    int newCarry = total < CarrySize ? total : CarrySize;
+                    Array.Copy(buf, total - newCarry, buf, 0, newCarry);
+                    carry = newCarry;
                 }
 
                 // 按条目语义补摘要与明细（kkpe 的道具名 / vnge_sssb 的对象数）
@@ -365,6 +378,13 @@ namespace KKManager.Core
             {
                 r.Error = "读取失败：" + ex.Message;
                 return r;
+            }
+            finally
+            {
+                if (own)
+                {
+                    session.Dispose();
+                }
             }
             if (r.Plugins.Count == 0)
             {

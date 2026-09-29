@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading.Tasks;
 using KKManager.Data;
 
 namespace KKManager.Core
@@ -600,7 +601,7 @@ namespace KKManager.Core
             }
             if (step.Id == "timeline")
             {
-                return StepCardTimeline(store, f, result);
+                return StepCardTimeline(store, f, session, result);
             }
             if (step.Id == "thumb")
             {
@@ -608,7 +609,7 @@ namespace KKManager.Core
             }
             if (step.Id == "coord" || step.Id == "detail" || step.Id == "scene")
             {
-                return StepCardAnalysis(store, f, step.Id, result);
+                return StepCardAnalysis(store, f, step.Id, session, result);
             }
             return false;
         }
@@ -681,7 +682,7 @@ namespace KKManager.Core
         /// <summary>角色名步——人物卡读 Parameter 的姓 / 名（其余卡型直接算完成）。</summary>
         private static bool StepCardName(Store store, ScanFile f, CardFileSession session, ScanResult result)
         {
-            if (!EnsureHead(store, f, null, result))
+            if (!EnsureHead(store, f, session, result))
             {
                 return false;
             }
@@ -714,9 +715,9 @@ namespace KKManager.Core
         }
 
         /// <summary>时间轴步——场景卡读 Timeline 条目（其余卡型直接算完成）。</summary>
-        private static bool StepCardTimeline(Store store, ScanFile f, ScanResult result)
+        private static bool StepCardTimeline(Store store, ScanFile f, CardFileSession session, ScanResult result)
         {
-            if (!EnsureHead(store, f, null, result))
+            if (!EnsureHead(store, f, session, result))
             {
                 return false;
             }
@@ -728,7 +729,7 @@ namespace KKManager.Core
             {
                 f.CardId = store.CardIdOf(f.Path);
             }
-            TimelineInfo tl = TimelineReader.Read(f.Path, f.ImageEnd);
+            TimelineInfo tl = TimelineReader.Read(f.Path, f.ImageEnd, session);
             if (tl.Error != null)
             {
                 AddError(result, Path.GetFileName(f.Path) + " timeline → " + tl.Error);
@@ -742,7 +743,7 @@ namespace KKManager.Core
         /// <summary>缩略图步——图片区取图并缩为 JPEG。</summary>
         private static bool StepCardThumb(Store store, ScanFile f, CardFileSession session, int thumbWidth, int thumbQuality, ScanResult result)
         {
-            if (!EnsureHead(store, f, null, result))
+            if (!EnsureHead(store, f, session, result))
             {
                 return false;
             }
@@ -770,13 +771,13 @@ namespace KKManager.Core
         }
 
         /// <summary>分项步（服装槽位 / 卡片分析 / 场景深度）——落库（兑现见阶段 3）。</summary>
-        private static bool StepCardAnalysis(Store store, ScanFile f, string stepId, ScanResult result)
+        private static bool StepCardAnalysis(Store store, ScanFile f, string stepId, CardFileSession session, ScanResult result)
         {
-            if (!EnsureHead(store, f, null, result))
+            if (!EnsureHead(store, f, session, result))
             {
                 return false;
             }
-            return CardAnalysis.Run(store, f, stepId, result);
+            return CardAnalysis.Run(store, f, stepId, result, session);
         }
 
         /// <summary>按需前置——本步需要图片区终点时，若本轮尚未解析则就地读头段（顺序自由的关键）。</summary>
@@ -1166,6 +1167,112 @@ namespace KKManager.Core
                 }
             }
             return new List<string>(set);
+        }
+        /// <summary>扫描插件库根下的全部 dll 并落库（全量重扫——预置只读一条，dll 数量有限，无需步级增量）。</summary>
+        /// <param name="store">主库（插件库数据落主库）。</param>
+        /// <param name="cfg">库根配置。</param>
+        /// <param name="errors">解析失败 / 枚举失败清单（出声用）。</param>
+        /// <returns>落库的 dll 项数（含未解析出插件特性的非插件 dll）。</returns>
+        public static int ScanPlugins(Store store, RootsConfig cfg, List<string> errors)
+        {
+            int total = 0;
+            List<PluginRow> old = store.LoadPlugins();
+            foreach (RootEntry root in cfg.pluginRoots)
+            {
+                if (string.IsNullOrWhiteSpace(root.path) || !Directory.Exists(root.path))
+                {
+                    errors.Add("插件库根不存在：" + root.path);
+                    continue;
+                }
+                List<string> files = new List<string>();
+                SearchOption option = root.recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+                try
+                {
+                    files.AddRange(Directory.GetFiles(root.path, "*.dll", option));
+                }
+                catch (Exception ex)
+                {
+                    errors.Add("插件库枚举失败（" + root.path + "）：" + ex.Message);
+                    continue;
+                }
+                total = total + files.Count;
+                // [段1] 建本次清单与旧戳索引——未变的 dll 跳过解析（增量判据 = size + mtime 双等）
+                HashSet<string> keep = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, long> oldSize = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, string> oldMtime = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (PluginRow row in old)
+                {
+                    if (!string.Equals(row.RootPath, root.path, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    if (!oldSize.ContainsKey(row.FilePath))
+                    {
+                        oldSize[row.FilePath] = row.Size;
+                        oldMtime[row.FilePath] = row.Mtime;
+                    }
+                }
+                // [段2] 清理已消失的 dll——本次清单里没有的旧行直接删
+                foreach (string oldPath in oldSize.Keys)
+                {
+                    if (!keep.Contains(oldPath))
+                    {
+                        store.DeletePluginFile(oldPath);
+                    }
+                }
+                // [段3] 并行解析（每文件独立只读）——未变的跳过；落库串行（SQLite 单写，锁保护）
+                object gate = new object();
+                Parallel.ForEach(files, file =>
+                {
+                    FileInfo fi = new FileInfo(file);
+                    long size = fi.Exists ? fi.Length : 0;
+                    string mtime = fi.Exists ? fi.LastWriteTimeUtc.ToString("o") : "";
+                    long prevSize;
+                    string prevMtime;
+                    if (oldSize.TryGetValue(file, out prevSize) && oldMtime.TryGetValue(file, out prevMtime)
+                        && prevSize == size && string.Equals(prevMtime, mtime, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                    string error;
+                    List<PluginInfo> plugins = PluginReader.ReadAll(file, out error);
+                    lock (gate)
+                    {
+                        store.DeletePluginFile(file);
+                        if (plugins.Count == 0)
+                        {
+                            // 未解析出插件特性（原生 dll / 无特性）——仍落一行（guid 空），让「装了但不是插件」可见
+                            PluginRow bad = new PluginRow();
+                            bad.FilePath = file;
+                            bad.RootPath = root.path;
+                            bad.FileName = Path.GetFileName(file);
+                            bad.Size = size;
+                            bad.Mtime = mtime;
+                            store.SavePlugin(bad);
+                        }
+                        else
+                        {
+                            foreach (PluginInfo info in plugins)
+                            {
+                                PluginRow row = new PluginRow();
+                                row.FilePath = file;
+                                row.Guid = info.guid;
+                                row.RootPath = root.path;
+                                row.FileName = info.fileName;
+                                row.Name = info.name;
+                                row.Version = info.version;
+                                row.Processes = string.Join(",", info.processes);
+                                row.Dependencies = string.Join(",", info.dependencies);
+                                row.IsIpa = info.isIpa;
+                                row.Size = size;
+                                row.Mtime = mtime;
+                                store.SavePlugin(row);
+                            }
+                        }
+                    }
+                });
+            }
+            return total;
         }
     }
 }

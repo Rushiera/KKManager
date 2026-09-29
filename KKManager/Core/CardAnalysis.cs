@@ -22,7 +22,7 @@ namespace KKManager.Core
         }
 
         /// <summary>执行一个分项步——返回 true 表示该文件该步已完成（可落完成戳）。</summary>
-        public static bool Run(Store store, ScanFile f, string stepId, ScanResult result)
+        public static bool Run(Store store, ScanFile f, string stepId, ScanResult result, CardFileSession session)
         {
             if (f.CardId <= 0)
             {
@@ -38,7 +38,7 @@ namespace KKManager.Core
                 {
                     return true;
                 }
-                CardCoordinateResult co = CardCoordinate.Read(f.Path);
+                CardCoordinateResult co = CardCoordinate.Read(f.Path, session);
                 if (co == null)
                 {
                     return false;
@@ -47,7 +47,7 @@ namespace KKManager.Core
             }
             if (stepId == "detail")
             {
-                CardDetailResult det = CardDetail.Parse(f.Path, f.ImageEnd);
+                CardDetailResult det = CardDetail.Parse(f.Path, f.ImageEnd, session);
                 if (det == null)
                 {
                     return false;
@@ -60,13 +60,13 @@ namespace KKManager.Core
                 {
                     return true;
                 }
-                SceneInfoResult scene = SceneReader.Read(f.Path, f.ImageEnd);
+                SceneInfoResult scene = SceneReader.Read(f.Path, f.ImageEnd, session);
                 if (scene == null)
                 {
                     return false;
                 }
                 // 逐份内嵌角色卡面图——与数据区图片清单对宽高 / 字节（同一遍 detail 扫描供图；对不上由 Attach 出声）
-                CardDetailResult det = CardDetail.Parse(f.Path, f.ImageEnd);
+                CardDetailResult det = CardDetail.Parse(f.Path, f.ImageEnd, session);
                 if (det != null)
                 {
                     scene.AttachCharaFaces(det.Images);

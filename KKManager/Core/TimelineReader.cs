@@ -83,23 +83,37 @@ namespace KKManager.Core
         /// <summary>读一张场景卡的 timeline 数据（path = 卡片文件；imageEnd = 图片区结束偏移）。</summary>
         public static TimelineInfo Read(string path, long imageEnd)
         {
+            return Read(path, imageEnd, null);
+        }
+        /// <summary>读一张场景卡的 timeline 数据（会话版——复用段内已打开的句柄，不另开文件；session 为 null 时自行开文件）。</summary>
+        public static TimelineInfo Read(string path, long imageEnd, CardFileSession session)
+        {
             var info = new TimelineInfo { Scanned = true, TimeScale = 1 };
             if (!File.Exists(path))
             {
                 info.Error = "卡片文件不存在：" + path;
                 return info;
             }
-            var fi = new FileInfo(path);
-            long size = fi.Length;
-            long from = imageEnd > 0 ? imageEnd : 0;
-            if (from >= size)
+            bool own = session == null;
+            if (own)
             {
-                info.Error = "数据区为空（图片区到文件尾没有字节）";
+                session = CardFileSession.Open(path);
+            }
+            if (session == null)
+            {
+                info.Error = "卡片文件打不开：" + path;
                 return info;
             }
-
-            using (FileStream fs = File.OpenRead(path))
+            try
             {
+                long size = session.Length;
+                long from = imageEnd > 0 ? imageEnd : 0;
+                if (from >= size)
+                {
+                    info.Error = "数据区为空（图片区到文件尾没有字节）";
+                    return info;
+                }
+                FileStream fs = session.Stream;
                 long near = size - TailNear > from ? size - TailNear : from;
                 long far = size - TailFar > from ? size - TailFar : from;
                 long hit = -1;
@@ -174,6 +188,13 @@ namespace KKManager.Core
                 }
                 info.XmlLength = xmlLen;
                 ReadXml(fs, xmlAt, xmlLen, info);
+            }
+            finally
+            {
+                if (own)
+                {
+                    session.Dispose();
+                }
             }
             return info;
         }
