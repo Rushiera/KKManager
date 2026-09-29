@@ -77,7 +77,7 @@
   .dim{color:var(--dim)}
   .hidden{display:none !important}
   .overlay{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:50}
-  /* 弹窗层级：基础 50 · 叠加层（整理冲突小窗 54 · 在重复副本 / 计划窗之上打开 mod）55 · 引用明细 58 · 卡片分析 / 编辑卡片 59 · 编辑授权 / 寻找旧版 60 · 悬停浮层 61 / 70 */
+  /* 弹窗层级：基础 50 · 叠加层（整理冲突小窗 54 · 在重复副本 / 计划窗之上打开 mod）55 · 引用明细 58 · 卡片分析 / 编辑卡片 59 · 编辑授权 / 寻找旧版 60 · 加待办 62 · 悬停浮层 61 / 70 */
   #ovModCards{z-index:55}
   #ovSortKeep{z-index:54}
   #overlay{z-index:58}
@@ -86,6 +86,8 @@
   #ovEdit{z-index:59}
   #ovAuth{z-index:60}
   #ovOld{z-index:60}
+  /* 卡片侧「加待办」小窗——压在引用明细（58）之上 */
+  #ovTodoAdd{z-index:62}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
   .modal.wide{width:min(1120px,96vw)}
   .modal header{position:static;border:0;background:transparent;padding:12px 14px 6px}
@@ -211,6 +213,7 @@
   <button class="primary" id="btnScanMain" title="扫描主要库——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio（预置条目）">扫描主要</button>
   <button class="primary" id="btnScanExtra" title="扫描追加库——使用者自己添加的库根（mod 冷冻库 + 卡片附加库）；离线库跳过">追加库扫描</button>
   <button id="btnSettings">库根设置</button>
+  <button id="btnPlugins">插件清单</button>
   <label class="authbox" id="authBox" title="默认不授权——勾选后须确认声明才授权，随时可撤销"><input type="checkbox" id="chkAuth">编辑授权</label>
   <span class="grow"></span>
   <span id="verInfo" class="dim" style="margin-left:12px"></span>
@@ -226,6 +229,13 @@
       <input id="gameRoot" class="mono" style="flex:1;min-width:420px" placeholder="D:\SteamLibrary\GameGeneral\Koikatu">
       <button id="btnPickGameRoot">浏览…</button>
       <span class="dim">选定游戏根后自动填入 4 条级别 1：游戏根\mods · UserData 下 female / coordinate / Studio</span>
+    </div>
+
+    <h2>库根设置 — 插件库（预置条目锁定不可改 · BepInEx 目录 · 只读 · 含子目录）</h2>
+    <table class="list"><thead><tr><th style="width:82px">更新</th><th style="width:88px">离线</th><th style="width:96px">级别</th><th>路径 / 备注</th><th style="width:72px">含子目录</th><th style="width:52px">只读</th><th style="width:170px"></th></tr></thead>
+      <tbody id="pluginRootsBody"></tbody></table>
+    <div style="margin:8px 0 16px">
+      <span class="dim">插件库 = 游戏根\BepInEx（BepInEx 插件 / 配置 / 缓存所在）——预置锁定只读一条，不可增删改；扫描只读元数据，不改动任何文件</span>
     </div>
 
     <h2>库根设置 — mod 库（预置条目锁定不可改 · 新增库根一律冷冻库 · 扫描不覆盖未添加的文件夹）</h2>
@@ -579,7 +589,11 @@
   <div class="modal wide">
     <header><b>待办清单</b> <span class="dim" id="tdInfo"></span></header>
     <div class="body">
-      <div class="dim" id="tdHint" style="font-size:12px;margin-bottom:8px">软件认为需要你处理的事。库被判为<b>离线</b>（地址不存在，或库里一个东西都没有）时这里会出现一条——把它的路径改成<b>备注</b>写清东西放哪了，也可以直接上线或彻底删除数据。手动设为离线的库不在这里出现。</div>
+      <div class="dim" id="tdHint" style="font-size:12px;margin-bottom:8px">软件认为需要你处理的事 + 你自己记的事，分三支。库被判为<b>离线</b>（地址不存在，或库里一个东西都没有）时这里会出现一条——把它的路径改成<b>备注</b>写清东西放哪了，也可以直接上线或彻底删除数据（手动设为离线的库不在这里出现）。下面输入框可以<b>自己新建一条</b>（纯文本）；在卡片的「引用明细」里点<b>加待办</b>，可以给那张卡挂一条。</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+        <input id="tdNew" style="flex:1;min-width:220px;background:#0b0d10;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit" placeholder="新建待办：写点要处理的事（≤200 字）…">
+        <button class="primary" id="btnTdAdd">添加待办</button>
+      </div>
       <div id="tdBody"></div>
     </div>
     <footer>
@@ -587,6 +601,39 @@
       <span class="grow"></span>
       <button id="btnTdReload">重新读取</button>
       <button id="btnTdClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovPlugins">
+  <div class="modal wide">
+    <header><b>插件清单</b> <span class="dim" id="plInfo"></span></header>
+    <div class="body">
+      <div class="dim" id="plHint" style="font-size:12px;margin-bottom:8px">插件库（<b>BepInEx</b>）下解析出的插件——GUID / 名称 / 版本 / 文件 / 进程过滤 / 依赖，全部<b>只读自 dll 元数据</b>，不改动任何文件。一个 dll 可含多项插件（如 <span class="mono">KKAPI.dll</span> 三项）。</div>
+      <div id="plLog" style="margin-bottom:10px"></div>
+      <div id="plBody" style="max-height:52vh;overflow:auto"></div>
+    </div>
+    <footer>
+      <span class="dim" id="plFoot"></span>
+      <span class="grow"></span>
+      <button id="btnPlReload">重新读取</button>
+      <button id="btnPlClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovTodoAdd">
+  <div class="modal">
+    <header><b>加待办</b> <span class="dim" id="taTitle"></span></header>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:8px">给这张卡挂一条待办——登记后在「待办清单」的<b>卡片</b>分支里能看到，处理完就地关闭。</div>
+      <input id="taText" style="width:100%;box-sizing:border-box;background:#0b0d10;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit" placeholder="要处理什么（≤200 字）…">
+    </div>
+    <footer>
+      <span class="dim" id="taHint"></span>
+      <span class="grow"></span>
+      <button class="primary" id="btnTaOk">加待办</button>
+      <button id="btnTaCancel">取消</button>
     </footer>
   </div>
 </div>
@@ -1162,6 +1209,7 @@ function restoreUi(){
 
 /* ---------- 库根配置 ---------- */
 function tierLabel(kind, tier){
+  if(kind === 'plugins') return '1 主库';
   const pairs = (kind === 'mods') ? [[1,'1 主库'],[2,'2 缓存库'],[3,'3 冷冻库']] : [[1,'1 主库'],[2,'2 附加库']];
   for(let i=0;i<pairs.length;i++){ if(pairs[i][0] === tier) return pairs[i][1]; }
   return '级别' + tier;
@@ -1200,6 +1248,18 @@ function rootRow(kind, e){
   /* 更新本库——只扫这一条库根（离线库按钮已禁用） */
   const updBtn = tr.querySelector('button.upd');
   if(updBtn) updBtn.onclick = async () => {
+    /* 插件库：走专用端点（只读解析 dll 元数据，增量后很快）——不走扫描进度窗 */
+    if(kind === 'plugins'){
+      const old = updBtn.textContent;
+      updBtn.disabled = true; updBtn.textContent = '扫描中…';
+      try{
+        const r = await api('/api/plugins/scan', {method:'POST'});
+        if(!r || !r.ok){ alert((r && r.error) || '扫描失败'); return; }
+        alert('插件库扫描完成\n\n' + r.dllTotal + ' 个 dll · ' + r.seconds + ' 秒\n插件 ' + r.plugins + ' 项 · 非插件 dll ' + r.nonPlugin + ' 个');
+      }catch(e){ alert('扫描失败：' + e.message); }
+      finally{ updBtn.disabled = false; updBtn.textContent = old; }
+      return;
+    }
     const target = (kind === 'mods') ? 'mods' : 'cards';
     const pathInput = tr.querySelector('.path');
     /* 这一行当前的地址——离线行显示备注框，路径仍从 dataset 取（库身份键） */
@@ -1256,6 +1316,8 @@ function rootRow(kind, e){
 function renderRoots(){
   const roots = state.roots || {};
   $('gameRoot').value = roots.gameRoot || '';
+  $('pluginRootsBody').innerHTML = '';
+  (roots.pluginRoots||[]).forEach(e => $('pluginRootsBody').appendChild(rootRow('plugins', e)));
   $('modRootsBody').innerHTML = '';
   (roots.modRoots||[]).forEach(e => $('modRootsBody').appendChild(rootRow('mods', e)));
   $('cardRootsBody').innerHTML = '';
@@ -1351,6 +1413,7 @@ function updateSettingsHint(){
 async function syncMainRoots(gameRoot){
   const raw = (gameRoot === undefined || gameRoot === null) ? $('gameRoot').value : String(gameRoot);
   const r = await api('/api/roots/recommend?gameRoot=' + encodeURIComponent(raw.trim()));
+  applyPresetRows('pluginRootsBody', 'plugins', r.pluginRoots);
   applyPresetRows('modRootsBody', 'mods', r.modRoots);
   applyPresetRows('cardRootsBody', 'cards', r.cardRoots);
 }
@@ -1399,7 +1462,7 @@ async function loadStats(){
     if(open === 'dup') tip = '点击查看同 guid 的多份副本（待确认的在上，已确认的沉底）';
     else if(open === 'unused') tip = '点击查看全部未被任何卡片引用的 mod';
     else if(open === 'miss') tip = '点击查看缺失清单（全库皆无的 mod，按被引用卡片数排序）';
-    else if(open === 'todo') tip = '点击查看待办清单（软件认为需要你处理的事）';
+    else if(open === 'todo') tip = '点击查看待办清单（软件认为需要你处理的事 + 你自己记的）';
     return `<div class="stat ${c}"${open?` data-open="${open}" title="${tip}"`:''}><small>${k}</small><b>${v}</b>${sub||''}</div>`;
   }).join('');
 }
@@ -1802,11 +1865,12 @@ async function renderCardInfo(cardId, lib){
       <div style="white-space:nowrap">
         <span class="mk g">绿 ${c.green}</span> <span class="mk y">黄 ${c.yellow}</span> <span class="mk k">灰 ${c.red}</span> <span class="mk r">红 ${c.black}</span>
       </div>
-      <div><button id="btnAnalyzeCard">卡片分析</button> <button id="btnEditCard">编辑卡片</button> <button id="btnCardOld">寻找旧版</button></div>
+      <div><button id="btnAnalyzeCard">卡片分析</button> <button id="btnEditCard">编辑卡片</button> <button id="btnCardOld">寻找旧版</button> <button id="btnCardTodo">加待办</button></div>
     </div>`;
     $('btnAnalyzeCard').onclick = () => openAnalyze(cardId, lib);
     $('btnEditCard').onclick = () => requestEdit(cardId, lib, c.fileName);
     $('btnCardOld').onclick = () => openOld(cardId, lib);
+    $('btnCardTodo').onclick = () => openTodoAdd(cardId, lib, c.fileName);
   }catch(e){
     box.innerHTML = '<span class="dim">卡片信息加载失败：' + esc(e.message) + '</span>';
   }
@@ -3015,6 +3079,49 @@ function tdIsMods(key){
   }
   return false;
 }
+/* 待办三支渲染——库已离线（软件登记，路径与备注从库根配置取：配置是唯一真相源，不双写）· 卡片（使用者挂的）· 手输（使用者写的） */
+function tdGroupHtml(title, rows){
+  if(!rows.length) return '';
+  return `<div class="dim" style="font-size:12px;margin:10px 0 6px"><b style="color:var(--fg)">${title}</b> · ${rows.length} 条</div>` + rows.join('');
+}
+function tdOfflineHtml(t){
+  const e = tdRootOf(t.key);
+  const path = e ? e.path : t.key;
+  const note = e ? (e.note||'') : '';
+  return `<div class="tditem" data-id="${t.id}" data-kind="offline" data-lib="${tdIsMods(t.key)?'mods':'cards'}" data-path="${esc(path)}">
+    <div><b style="color:var(--yellow)">库已离线</b> <span class="mono dim" style="font-size:12px">${esc(path)}</span></div>
+    <div class="dim" style="font-size:12px;margin:4px 0 6px">这个地址不存在了，或者库里一个东西都没有。写一条备注说明东西放哪了——库内容仍能从数据库正常读取；也可以直接上线或彻底删除数据。</div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input class="tdnote mono" style="flex:1;min-width:220px" value="${esc(note)}" placeholder="备注：这东西你放哪了…">
+      <button class="tdsave primary">保存备注</button>
+      <button class="tdon">点击上线</button>
+      <button class="tdpurge danger">彻底删除数据</button>
+      <button class="tdclose">关闭这条</button>
+    </div>
+  </div>`;
+}
+function tdCardHtml(t){
+  return `<div class="tditem" data-id="${t.id}" data-kind="card">
+    <div><b style="color:var(--accent)">卡片待办</b> <span class="dim" style="font-size:12px">${esc(t.refName||'')}</span></div>
+    <div style="margin:4px 0 3px">${esc(t.text||'')}</div>
+    <div class="mono dim" style="font-size:11px;word-break:break-all">${esc(t.refPath||'')}</div>
+    <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+      <span class="dim" style="font-size:11px">登记于 ${esc(t.createdAt||'')}</span>
+      <span class="grow"></span>
+      <button class="tdclose">关闭这条</button>
+    </div>
+  </div>`;
+}
+function tdManualHtml(t){
+  return `<div class="tditem" data-id="${t.id}" data-kind="manual">
+    <div>${esc(t.text||'')}</div>
+    <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+      <span class="dim" style="font-size:11px">登记于 ${esc(t.createdAt||'')}</span>
+      <span class="grow"></span>
+      <button class="tdclose">关闭这条</button>
+    </div>
+  </div>`;
+}
 function renderTodos(){
   const items = tdState.items || [];
   $('tdFoot').textContent = items.length ? (items.length + ' 条待办') : '';
@@ -3022,29 +3129,18 @@ function renderTodos(){
     $('tdBody').innerHTML = '<div class="dim" style="padding:10px">没有待办。</div>';
     return;
   }
-  $('tdBody').innerHTML = items.map(t => {
-    const e = tdRootOf(t.key);
-    const path = e ? e.path : t.key;
-    const note = e ? (e.note||'') : '';
-    const kindTxt = (t.kind === 'offline') ? '库已离线' : t.kind;
-    return `<div class="tditem" data-id="${t.id}" data-kind="${esc(t.kind)}" data-path="${esc(path)}" data-mods="${tdIsMods(t.key)?'1':'0'}">
-      <div><b style="color:var(--yellow)">${esc(kindTxt)}</b> <span class="mono dim" style="font-size:12px">${esc(path)}</span></div>
-      <div class="dim" style="font-size:12px;margin:4px 0 6px">这个地址不存在了，或者库里一个东西都没有。写一条备注说明东西放哪了——库内容仍能从数据库正常读取；也可以直接上线或彻底删除数据。</div>
-      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <input class="tdnote mono" style="flex:1;min-width:220px" value="${esc(note)}" placeholder="备注：这东西你放哪了…">
-        <button class="tdsave primary">保存备注</button>
-        <button class="tdon">点击上线</button>
-        <button class="tdpurge danger">彻底删除数据</button>
-        <button class="tdclose">关闭这条</button>
-      </div>
-    </div>`;
-  }).join('');
+  let html = '';
+  html += tdGroupHtml('库已离线', items.filter(t => t.kind === 'offline').map(tdOfflineHtml));
+  html += tdGroupHtml('卡片', items.filter(t => t.kind === 'card').map(tdCardHtml));
+  html += tdGroupHtml('手输', items.filter(t => t.kind === 'manual').map(tdManualHtml));
+  $('tdBody').innerHTML = html;
 }
 $('ovTodo').addEventListener('click', async e => {
   const box = e.target.closest ? e.target.closest('.tditem') : null;
   if(!box) return;
   const id = parseInt(box.dataset.id,10);
-  const kind = box.dataset.mods === '1' ? 'mods' : 'cards';
+  /* 库别（mods / cards）——只对「库已离线」分支有意义 */
+  const lib = box.dataset.lib || 'cards';
   const path = box.dataset.path;
   const t = e.target;
   if(t.classList.contains('tdclose')){
@@ -3052,13 +3148,13 @@ $('ovTodo').addEventListener('click', async e => {
     await loadTodos(); await loadStats(); return;
   }
   if(t.classList.contains('tdon')){
-    const r = await api('/api/roots/offline', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind, path, offline:false})});
+    const r = await api('/api/roots/offline', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind:lib, path, offline:false})});
     if(!r || !r.ok){ alert((r && r.error) || '上线失败'); return; }
     await loadSettings(); await loadTodos(); await loadFolders(); await loadStats(); return;
   }
   if(t.classList.contains('tdpurge')){
     if(!confirm('彻底删除数据？\n\n该库的数据库文件将被删除，这条库根也会从列表里移除——内容就此消失。\n磁盘上的原始文件不会被删除。')) return;
-    const r = await api('/api/roots/purge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind, path})});
+    const r = await api('/api/roots/purge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({kind:lib, path})});
     if(!r || !r.ok){ alert((r && r.error) || '删除失败'); return; }
     await loadSettings(); await loadTodos(); await loadFolders(); await loadStats(); return;
   }
@@ -3068,7 +3164,7 @@ $('ovTodo').addEventListener('click', async e => {
     const body = { gameRoot: roots.gameRoot || '', modRoots: [], cardRoots: [] };
     (roots.modRoots||[]).forEach(r => body.modRoots.push({ tier:r.tier, path:r.path, recurse:r.recurse, readOnly:r.readOnly, locked:r.locked, offline:r.offline, note:r.note }));
     (roots.cardRoots||[]).forEach(r => body.cardRoots.push({ tier:r.tier, path:r.path, recurse:r.recurse, readOnly:r.readOnly, locked:r.locked, offline:r.offline, note:r.note }));
-    const target = kind === 'mods' ? body.modRoots : body.cardRoots;
+    const target = lib === 'mods' ? body.modRoots : body.cardRoots;
     target.forEach(r => { if((r.path||'').trim().toLowerCase() === path.toLowerCase()) r.note = note; });
     const rr = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     if(!rr || !rr.ok){ alert('保存备注失败'); return; }
@@ -3081,6 +3177,83 @@ $('ovTodo').addEventListener('click', async e => {
 });
 $('btnTdClose').onclick = () => $('ovTodo').classList.add('hidden');
 $('btnTdReload').onclick = () => loadTodos();
+/* ---------- 插件清单（插件库只读视图——数据面 /api/plugins） ---------- */
+let plState = { items: [] };
+$('btnPlugins').onclick = async () => { $('ovPlugins').classList.remove('hidden'); await loadPlugins(); };
+$('btnPlClose').onclick = () => $('ovPlugins').classList.add('hidden');
+$('btnPlReload').onclick = () => loadPlugins();
+async function loadPlugins(){
+  $('plBody').innerHTML = '<div class="dim" style="padding:6px">读取中…</div>';
+  const r = await api('/api/plugins');
+  plState.items = (r && r.items) ? r.items : [];
+  $('plInfo').textContent = ((r && r.plugins) || 0) + ' 项';
+  $('plFoot').textContent = '插件 ' + ((r && r.plugins) || 0) + ' 项 · 非插件 dll ' + ((r && r.nonPlugin) || 0) + ' 个 · 同 GUID 多份 ' + ((r && r.dupGuids) || 0) + ' 组';
+  renderPlugins();
+  loadPluginLog();
+}
+/* 上次启动实况——BepInEx 日志只读解析（待加载 / 已加载 / 进程过滤跳过 / 错误） */
+async function loadPluginLog(){
+  $('plLog').innerHTML = '<div class="dim" style="font-size:12px">读日志…</div>';
+  const r = await api('/api/plugins/log');
+  if(!r || r.error){ $('plLog').innerHTML = '<div class="dim" style="font-size:12px">' + esc((r && r.error) || '读取失败') + '</div>'; return; }
+  const ok = (r.errorLines || 0) === 0;
+  let h = '<div style="font-size:12px;border:1px solid var(--line);border-radius:6px;padding:8px">';
+  h += '<b>上次启动实况</b> <span class="dim">' + esc(r.fileTime || '') + ' · ' + Math.round(((r.fileSize) || 0) / 1024 / 1024) + ' MB</span><br>';
+  h += '待加载 <b>' + (r.toLoad || 0) + '</b> · 已加载 <b style="color:var(--accent)">' + (r.loaded || 0) + '</b> · 进程过滤跳过 <b style="color:var(--yellow)">' + (r.skipped || 0) + '</b> · 错误 <b style="color:' + (ok ? 'var(--accent)' : 'var(--red)') + '">' + (r.errorLines || 0) + '</b>';
+  if(r.errors && r.errors.length){
+    h += '<div class="mono" style="margin-top:6px;font-size:11px;color:var(--red);max-height:120px;overflow:auto">';
+    r.errors.slice(0, 20).forEach(e => { h += esc(e) + '<br>'; });
+    h += '</div>';
+  }
+  h += '<div class="dim" style="margin-top:6px;font-size:11px">进程过滤跳过 = 该插件声明只在别的进程加载（<b>非故障</b>）；待加载 = 已加载 + 跳过</div>';
+  h += '</div>';
+  $('plLog').innerHTML = h;
+}
+function renderPlugins(){
+  const list = plState.items || [];
+  if(!list.length){ $('plBody').innerHTML = '<div class="dim" style="padding:6px">还没有插件数据——先在「库根设置」的插件库行点「更新本库」跑一次扫描。</div>'; return; }
+  let h = '<table class="list"><thead><tr><th>GUID</th><th>名称</th><th style="width:90px">版本</th><th>文件</th><th>进程过滤</th><th>依赖</th></tr></thead><tbody>';
+  list.forEach(p => {
+    h += '<tr>'
+      + '<td class="mono" style="font-size:11px">' + esc(p.guid) + (p.isIpa ? ' <span class="dim">[IPA]</span>' : '') + '</td>'
+      + '<td>' + esc(p.name) + '</td>'
+      + '<td class="dim">' + esc(p.version) + '</td>'
+      + '<td class="mono" style="font-size:11px">' + esc(p.fileName) + '</td>'
+      + '<td class="dim" style="font-size:11px">' + esc(p.processes || '（全部进程）') + '</td>'
+      + '<td class="dim" style="font-size:11px">' + esc(p.dependencies || '') + '</td>'
+      + '</tr>';
+  });
+  h += '</tbody></table>';
+  $('plBody').innerHTML = h;
+}
+/* 新建待办——手输（cardId 缺省）与卡片侧共用同一端点；卡片路径由服务端按 cardId 取，前端不拼路径 */
+async function addTodo(text, cardId, lib){
+  const r = await api('/api/todos/add', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ text: text, cardId: cardId || 0, lib: lib || 0 })});
+  if(!r || !r.ok){ alert((r && r.error) || '添加失败'); return false; }
+  return true;
+}
+$('btnTdAdd').onclick = async () => {
+  if(!await addTodo($('tdNew').value, 0, 0)) return;
+  $('tdNew').value = '';
+  await loadTodos(); await loadStats();
+};
+$('tdNew').onkeydown = e => { if(e.key === 'Enter') $('btnTdAdd').click(); };
+/* 卡片侧「加待办」——小窗压在引用明细（58）之上；登记后进待办清单的「卡片」分支 */
+let taCtx = { cardId:0, lib:0 };
+function openTodoAdd(cardId, lib, cardName){
+  taCtx = { cardId: cardId, lib: lib || 0 };
+  $('taTitle').textContent = cardName || '';
+  $('taHint').textContent = '';
+  $('taText').value = '';
+  $('ovTodoAdd').classList.remove('hidden');
+  $('taText').focus();
+}
+$('btnTaCancel').onclick = () => $('ovTodoAdd').classList.add('hidden');
+$('btnTaOk').onclick = async () => {
+  if(!await addTodo($('taText').value, taCtx.cardId, taCtx.lib)) return;
+  $('ovTodoAdd').classList.add('hidden');
+};
 
 $('btnUvClose').onclick = () => $('ovUnused').classList.add('hidden');
 $('btnUvMove').onclick = startMoveUnused;

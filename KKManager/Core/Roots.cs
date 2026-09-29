@@ -43,6 +43,9 @@ namespace KKManager.Core
 
         /// <summary>卡片库根（级别 1 三条派生 · 级别 2 及以后为使用者添加的附加库）。</summary>
         public List<RootEntry> cardRoots { get; set; } = new List<RootEntry>();
+
+        /// <summary>插件库根（BepInEx 目录）——只有预置锁定只读一条，位于 mod 主库之上。</summary>
+        public List<RootEntry> pluginRoots { get; set; } = new List<RootEntry>();
         /// <summary>是否已预置过推荐库根——首次规范化填入推荐值，之后一律以使用者的列表为准（清空即不再回填）。</summary>
         public bool seeded { get; set; }
 
@@ -80,6 +83,10 @@ namespace KKManager.Core
                 if (cfg.cardRoots == null)
                 {
                     cfg.cardRoots = new List<RootEntry>();
+                }
+                if (cfg.pluginRoots == null)
+                {
+                    cfg.pluginRoots = new List<RootEntry>();
                 }
                 return cfg;
             }
@@ -169,6 +176,9 @@ namespace KKManager.Core
 
         /// <summary>场景卡主库相对子路径（含子目录）。</summary>
         public const string CardStudioSub = "UserData\\Studio";
+
+        /// <summary>插件库相对子路径（BepInEx 目录——插件 / 配置 / 缓存所在）。</summary>
+        public const string PluginSub = "BepInEx";
 
         /// <summary>判断某个 mod 库根是否只读（无记录时保守视为只读，避免误删源文件）——搬运 / 互换 / 正名的源侧判定唯一实现。</summary>
         public static bool IsReadOnlyRoot(RootsConfig cfg, string path)
@@ -296,6 +306,14 @@ namespace KKManager.Core
             list.Add(new RootEntry { tier = Tier.Main, path = UnderGameRoot(gameRoot, CardStudioSub), recurse = true, locked = true });
             return list;
         }
+
+        /// <summary>推荐插件库根——游戏根\BepInEx（级别 1 · 含子目录 · 只读 · 预置锁定，不可增删改）。</summary>
+        public static List<RootEntry> RecommendPluginRoots(string gameRoot)
+        {
+            List<RootEntry> list = new List<RootEntry>();
+            list.Add(new RootEntry { tier = Tier.Main, path = UnderGameRoot(gameRoot, PluginSub), recurse = true, readOnly = true, locked = true });
+            return list;
+        }
         /// <summary>清洗使用者列表——去空路径、级别夹在合法区间、同路径去重（保留首条，其余设置原样不动）。</summary>
         private static List<RootEntry> Clean(List<RootEntry> source, int minTier, int maxTier)
         {
@@ -348,6 +366,10 @@ namespace KKManager.Core
             {
                 cfg.cardRoots = new List<RootEntry>();
             }
+            if (cfg.pluginRoots == null)
+            {
+                cfg.pluginRoots = new List<RootEntry>();
+            }
 
             // 库根由使用者自行添加（不做全库盲扫）——首次（从未预置过）填推荐值；之后一律以使用者的列表为准，清空不回填
             if (!cfg.seeded)
@@ -363,12 +385,20 @@ namespace KKManager.Core
                 cfg.seeded = true;
             }
 
+            // 插件库：只有预置条目（不可增删）——空列表一律补齐（存量配置同样适用）
+            if (cfg.pluginRoots.Count == 0)
+            {
+                cfg.pluginRoots = RecommendPluginRoots(cfg.gameRoot);
+            }
+
             cfg.modRoots = Clean(cfg.modRoots, Tier.Main, Tier.Cold);
             cfg.cardRoots = Clean(cfg.cardRoots, Tier.Main, Tier.Cache);
+            cfg.pluginRoots = Clean(cfg.pluginRoots, Tier.Main, Tier.Main);
 
             // 预置条目锁定：路径与预置一致的条目认定并压回规范形态（主库 = mods / female / coordinate / Studio，缓存库 = mods_cache）——不可改、不可删
             LockPresets(cfg.modRoots, RecommendModRoots(cfg.gameRoot));
             LockPresets(cfg.cardRoots, RecommendCardRoots(cfg.gameRoot));
+            LockPresets(cfg.pluginRoots, RecommendPluginRoots(cfg.gameRoot));
         }
         /// <summary>按预置值认定并压回锁定条目——路径与预置一致者锁定（存量迁移 + 防篡改），形态一律取预置值（主库 1 / 缓存库 2 · 均含子目录 · 非只读）。</summary>
         private static void LockPresets(List<RootEntry> list, List<RootEntry> recommended)
@@ -414,9 +444,14 @@ namespace KKManager.Core
             {
                 cfg.cardRoots = new List<RootEntry>();
             }
+            if (cfg.pluginRoots == null)
+            {
+                cfg.pluginRoots = new List<RootEntry>();
+            }
             // [段1] 锁定条目按新根重派生——先清旧根的，再补新根的（只补锁定条目；缓存库槽位另行处置）
             cfg.modRoots.RemoveAll(e => e.locked);
             cfg.cardRoots.RemoveAll(e => e.locked);
+            cfg.pluginRoots.RemoveAll(e => e.locked);
             foreach (RootEntry r in RecommendModRoots(cfg.gameRoot))
             {
                 if (r.locked)
@@ -425,6 +460,7 @@ namespace KKManager.Core
                 }
             }
             cfg.cardRoots.AddRange(RecommendCardRoots(cfg.gameRoot));
+            cfg.pluginRoots.AddRange(RecommendPluginRoots(cfg.gameRoot));
             // [段2] 缓存库槽位跟随——路径仍等于旧根派生值即「从未被改过」（首次设置时旧根为空，派生值即默认根）
             string oldCache = UnderGameRoot(previousGameRoot, ModCacheSub);
             string newCache = UnderGameRoot(cfg.gameRoot, ModCacheSub);
@@ -503,6 +539,7 @@ namespace KKManager.Core
             }
             ClearLockList(cfg.modRoots);
             ClearLockList(cfg.cardRoots);
+            ClearLockList(cfg.pluginRoots);
         }
         /// <summary>还原一组列表里的锁定条目——以磁盘现状为准（不可删、不可改），被拒的改动出声。</summary>
         private static void RestoreMainList(List<RootEntry> previous, List<RootEntry> current, string label, List<string> warnings)
@@ -572,6 +609,7 @@ namespace KKManager.Core
             }
             RestoreMainList(previous.modRoots, current.modRoots, "mod 预置库根", warnings);
             RestoreMainList(previous.cardRoots, current.cardRoots, "卡片预置库根", warnings);
+            RestoreMainList(previous.pluginRoots, current.pluginRoots, "插件预置库根", warnings);
             EnsureCacheSlot(previous.modRoots, current.modRoots, "mod 缓存库", warnings);
             return warnings;
         }

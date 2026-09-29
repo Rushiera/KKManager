@@ -1096,8 +1096,143 @@ namespace KKManager.Web
                 return Results.Json(new
                 {
                     gameRoot = RootsRules.NormalizeGameRoot(root),
+                    pluginRoots = RootsRules.RecommendPluginRoots(root),
                     modRoots = RootsRules.RecommendModRoots(root),
                     cardRoots = RootsRules.RecommendCardRoots(root)
+                });
+            });
+
+            // 插件清单——插件库（BepInEx）下解析出的插件（只读元数据；非插件 dll 只计数不列出）
+            app.MapGet("/api/plugins", () =>
+            {
+                List<PluginRow> rows = _hub.Core.LoadPlugins();
+                List<object> items = new List<object>();
+                Dictionary<string, int> guidCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int withGuid = 0;
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length == 0)
+                    {
+                        continue;
+                    }
+                    withGuid = withGuid + 1;
+                    if (guidCount.ContainsKey(row.Guid))
+                    {
+                        guidCount[row.Guid] = guidCount[row.Guid] + 1;
+                    }
+                    else
+                    {
+                        guidCount[row.Guid] = 1;
+                    }
+                    items.Add(new
+                    {
+                        guid = row.Guid,
+                        name = row.Name,
+                        version = row.Version,
+                        fileName = row.FileName,
+                        filePath = row.FilePath,
+                        processes = row.Processes,
+                        dependencies = row.Dependencies,
+                        isIpa = row.IsIpa,
+                        size = row.Size,
+                        mtime = row.Mtime
+                    });
+                }
+                int dupGuids = 0;
+                foreach (KeyValuePair<string, int> kv in guidCount)
+                {
+                    if (kv.Value > 1)
+                    {
+                        dupGuids = dupGuids + 1;
+                    }
+                }
+                return Results.Json(new
+                {
+                    dllTotal = rows.Count,
+                    plugins = withGuid,
+                    nonPlugin = rows.Count - withGuid,
+                    dupGuids = dupGuids,
+                    items = items
+                });
+            });
+
+            // 扫描插件库（只读解析 dll 元数据，不改动任何文件）——增量：未变的 dll 跳过（size + mtime 双等）
+            app.MapPost("/api/plugins/scan", () =>
+            {
+                RootsConfig cfg = LoadConfig();
+                List<string> errors = new List<string>();
+                DateTime started = DateTime.Now;
+                int count = Scanner.ScanPlugins(_hub.Core, cfg, errors);
+                double seconds = (DateTime.Now - started).TotalSeconds;
+                List<PluginRow> rows = _hub.Core.LoadPlugins();
+                int withGuid = 0;
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length > 0)
+                    {
+                        withGuid = withGuid + 1;
+                    }
+                }
+                Console.WriteLine("[插件] 扫描完成——" + count + " 个 dll · " + seconds.ToString("F1") + " 秒 · 插件 " + withGuid + " 项");
+                foreach (string e in errors)
+                {
+                    Console.WriteLine("  ! " + e);
+                }
+                return Results.Json(new
+                {
+                    ok = true,
+                    dllTotal = count,
+                    seconds = Math.Round(seconds, 1),
+                    plugins = withGuid,
+                    nonPlugin = rows.Count - withGuid,
+                    errors = errors
+                });
+            });
+
+            // 场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，插件来自插件库扫描）
+            app.MapGet("/api/plugins/match", (string keys) =>
+            {
+                List<PluginRow> plugins = _hub.Core.LoadPlugins();
+                List<object> items = new List<object>();
+                if (!string.IsNullOrWhiteSpace(keys))
+                {
+                    string[] parts = keys.Split(',');
+                    foreach (string raw in parts)
+                    {
+                        string key = raw.Trim();
+                        if (key.Length == 0)
+                        {
+                            continue;
+                        }
+                        List<PluginRow> hits = PluginMatcher.Match(plugins, key);
+                        List<object> found = new List<object>();
+                        foreach (PluginRow p in hits)
+                        {
+                            found.Add(new { guid = p.Guid, name = p.Name, version = p.Version, fileName = p.FileName });
+                        }
+                        items.Add(new { key = key, installed = hits.Count > 0, hits = found });
+                    }
+                }
+                return Results.Json(new { items = items });
+            });
+
+            // BepInEx 日志实况（加载 / 进程过滤跳过 / 错误）——只读解析，不入库（日志每次启动重写）
+            app.MapGet("/api/plugins/log", () =>
+            {
+                RootsConfig cfg = LoadConfig();
+                PluginLogSummary s = PluginLogReader.Read(PluginLogReader.LogPathOf(cfg));
+                return Results.Json(new
+                {
+                    filePath = s.filePath,
+                    fileTime = s.fileTime,
+                    fileSize = s.fileSize,
+                    toLoad = s.toLoad,
+                    loaded = s.loaded.Count,
+                    skipped = s.skipped.Count,
+                    errorLines = s.errors.Count,
+                    error = s.error,
+                    errors = s.errors,
+                    skips = s.skipped
                 });
             });
 
@@ -1121,6 +1256,49 @@ namespace KKManager.Web
                     return;
                 }
                 _hub.Core.CloseTodo(dto.id);
+                await context.Response.WriteAsync("{\"ok\":true}");
+            });
+
+            // 新建待办——手输纯文本（无 cardId）或卡片待办（带 cardId / lib——卡片路径由服务端按 id 取，前端不拼路径）
+            app.MapPost("/api/todos/add", async context =>
+            {
+                TodoAddDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<TodoAddDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                context.Response.ContentType = "application/json; charset=utf-8";
+                if (dto == null)
+                {
+                    // 失败走 200 + ok:false（与离线 / 彻底删除同类口径——前端只读 error 文本，不解析 HTTP 码）
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"请求体解析失败\"}");
+                    return;
+                }
+                string error;
+                if (dto.cardId > 0)
+                {
+                    CardRow row = _hub.GetCard(dto.lib, dto.cardId);
+                    if (row == null)
+                    {
+                        await context.Response.WriteAsync("{\"ok\":false,\"error\":\"卡片不存在\"}");
+                        return;
+                    }
+                    error = _hub.Core.AddCardTodo(Path.Combine(row.RootPath ?? "", row.Folder ?? "", row.FileName ?? ""), row.FileName, dto.text, Store.Now());
+                }
+                else
+                {
+                    error = _hub.Core.AddManualTodo(dto.text, Store.Now());
+                }
+                if (error != null)
+                {
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(error) + "\"}");
+                    return;
+                }
                 await context.Response.WriteAsync("{\"ok\":true}");
             });
 
@@ -3162,6 +3340,19 @@ namespace KKManager.Web
     {
         /// <summary>待办条目 id。</summary>
         public long id { get; set; }
+    }
+
+    /// <summary>新建待办的请求体——cardId ≤ 0 时按手输待办落盘（纯文本）。</summary>
+    public class TodoAddDto
+    {
+        /// <summary>待办正文（手输与卡片待办共用；去首尾空白后落盘，空 / 超长在服务端拒绝）。</summary>
+        public string text { get; set; }
+
+        /// <summary>卡片 id（> 0 = 建卡片待办——卡片路径由服务端按 id 取，前端不拼路径）。</summary>
+        public long cardId { get; set; }
+
+        /// <summary>卡片所在库位（与 cardId 同用；0 = 主库文件）。</summary>
+        public int lib { get; set; }
     }
 
     /// <summary>手动设离线 / 点击上线的请求体。</summary>

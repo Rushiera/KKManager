@@ -80,6 +80,10 @@ namespace KKManager
                     return CardsCommand(db, rest);
                 case "todos":
                     return TodosCommand(db);
+                case "todo-add":
+                    return TodoAddCommand(db, rest);
+                case "todo-close":
+                    return TodoCloseCommand(db, rest);
                 case "dup":
                     return DupCommand(db);
                 case "composition":
@@ -98,6 +102,16 @@ namespace KKManager
                     return OldOpCommand(db, rest, "promote");
                 case "sort":
                     return SortCommand(db, rest);
+                case "plugin-info":
+                    return PluginInfoCommand(rest);
+                case "scan-plugins":
+                    return ScanPluginsCommand(db);
+                case "plugins":
+                    return PluginsCommand(db);
+                case "plugin-log":
+                    return PluginLogCommand(db);
+                case "plugin-match":
+                    return PluginMatchCommand(db, rest);
                 case "roots-list":
                     return RootsListCommand(db);
                 case "roots-add":
@@ -141,6 +155,9 @@ namespace KKManager
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
             Console.WriteLine("  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）");
             Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者 / 创建时间 / MD5 + 引用卡片数与前三个卡片名——MD5 只算冲突文件，算过就忽略）");
+            Console.WriteLine("  todos                                 待办清单（库已离线 / 卡片 / 手输三类分支——id 供 todo-close 用）");
+            Console.WriteLine("  todo-add <文本>                       新建一条手输待办（--card <卡片路径> = 挂到卡片上）");
+            Console.WriteLine("  todo-close <id>                       关闭一条待办");
             Console.WriteLine("  composition <guid>                    查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容；--force 强制重读容器）");
             Console.WriteLine("  u3d       <zipmod> [--tex <目录>]     列出容器内 unity3d 包中的贴图（--tex 导出缩小版 PNG · --max N 限张数）");
             Console.WriteLine("  u3d-db    <guid> <条目路径>           按库副本解析 unity3d 条目并落档（与面板端点共用同一实现；--force 强制重读）");
@@ -153,7 +170,12 @@ namespace KKManager
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
             Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
-            Console.WriteLine("  roots-list                            列出已配置的库根");
+            Console.WriteLine("  plugins                               列出插件库里的插件（与面板「插件清单」同源）");
+            Console.WriteLine("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）");
+            Console.WriteLine("  plugin-log                            解析 BepInEx 日志：加载 / 进程过滤跳过 / 错误");
+            Console.WriteLine("  plugin-info <dll>                     解析单个插件 dll 的元数据（GUID / 名称 / 版本 / 进程过滤 / 依赖）");
+            Console.WriteLine("  scan-plugins                          扫描插件库根（BepInEx）下的全部 dll 并落库（只读解析）");
+            Console.WriteLine("  roots-list                            列出已配置的库根（插件库 / mod / 卡片三段）");
             Console.WriteLine("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]");
             Console.WriteLine("  roots-clear <mods|cards|all>          清空库根配置");
             Console.WriteLine("  set-game-root <路径>                  设置游戏根（预置主库条目路径随它重派生）");
@@ -161,7 +183,7 @@ namespace KKManager
             Console.WriteLine();
             Console.WriteLine("  通用: --db <路径>（默认 exe 目录下 data/kkmanager.db）· --force 全量重扫 · --steps a,b,c 只跑这些步骤");
             Console.WriteLine("  级别: 1=主库（游戏读取）· 2=缓存库（可一键搬入主库）· 3=冷冻库（只读）");
-            Console.WriteLine("  规则: 预置主库（mods / female / coordinate / Studio）锁定——不可改不可删 · 缓存库槽位不可删（路径与勾选归使用者）· 新增 mod 库根固定冷冻库、卡片库根固定附加库");
+            Console.WriteLine("  规则: 预置主库（mods / female / coordinate / Studio）锁定——不可改不可删 · 插件库（BepInEx）预置锁定只读——不可增删改 · 缓存库槽位不可删（路径与勾选归使用者）· 新增 mod 库根固定冷冻库、卡片库根固定附加库");
         }
 
         private static string Take(List<string> rest, string name)
@@ -1379,6 +1401,218 @@ namespace KKManager
             }
         }
 
+        /// <summary>场景卡插件键 ↔ 已装插件对照（键是卡片数据区的简名，插件来自插件库扫描）。</summary>
+        private static int PluginMatchCommand(string db, List<string> rest)
+        {
+            RequireArgs(rest, "plugin-match <键...>", 1);
+            using (StoreHub hub = new StoreHub(db))
+            {
+                List<PluginRow> plugins = hub.Core.LoadPlugins();
+                foreach (string key in rest)
+                {
+                    List<PluginRow> hits = PluginMatcher.Match(plugins, key);
+                    if (hits.Count == 0)
+                    {
+                        Console.WriteLine(key + "  →  未装（插件库里没有匹配的插件）");
+                        continue;
+                    }
+                    Console.WriteLine(key + "  →  " + hits.Count + " 项");
+                    foreach (PluginRow p in hits)
+                    {
+                        Console.WriteLine("      " + p.Guid + "  |  " + p.Name + " " + p.Version + "  |  " + p.FileName);
+                    }
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>日志条目（「名 版本」）取名称部分——去掉最后一个空格段（BepInEx 会规范化版本号，故不按版本比）。</summary>
+        private static string NameOfLogItem(string item)
+        {
+            if (string.IsNullOrEmpty(item))
+            {
+                return "";
+            }
+            int at = item.LastIndexOf(' ');
+            return at > 0 ? item.Substring(0, at) : item;
+        }
+
+        /// <summary>解析 BepInEx 日志（LogOutput.log）——插件加载 / 进程过滤跳过 / 错误三类实况。</summary>
+        private static int PluginLogCommand(string db)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                string path = PluginLogReader.LogPathOf(cfg);
+                PluginLogSummary s = PluginLogReader.Read(path);
+                Console.WriteLine("日志: " + s.filePath);
+                if (s.error.Length > 0)
+                {
+                    Console.Error.WriteLine("解析失败: " + s.error);
+                    return 1;
+                }
+                Console.WriteLine("时刻: " + s.fileTime + " · " + (s.fileSize / 1024 / 1024) + " MB");
+                Console.WriteLine("待加载 " + s.toLoad + " · 已加载 " + s.loaded.Count + " · 进程过滤跳过 " + s.skipped.Count + " · 错误行 " + s.errors.Count);
+                if (s.errors.Count > 0)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("## 错误（" + s.errors.Count + "）");
+                    foreach (string e in s.errors)
+                    {
+                        Console.WriteLine("  " + e);
+                    }
+                }
+                if (s.skipped.Count > 0)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("## 进程过滤跳过（" + s.skipped.Count + "）");
+                    foreach (string k in s.skipped)
+                    {
+                        Console.WriteLine("  " + k);
+                    }
+                }
+                // 装了但日志里完全没提（仅 plugins 目录下的插件——core / patchers 不在插件加载面）
+                List<PluginRow> rows = hub.Core.LoadPlugins();
+                List<string> unmentioned = new List<string>();
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length == 0 || row.FilePath.IndexOf("\\plugins\\", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+                    string tag = row.Name + " " + row.Version;
+                    bool mentioned = false;
+                    foreach (string item in s.loaded)
+                    {
+                        if (string.Equals(NameOfLogItem(item), row.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            mentioned = true;
+                            break;
+                        }
+                    }
+                    if (!mentioned)
+                    {
+                        foreach (string item in s.skipped)
+                        {
+                            // 跳过条目形态「名 版本  →  原因」——先切掉「→」之后，再取名称
+                            string head = item;
+                            int arrow = item.IndexOf("  →  ", StringComparison.Ordinal);
+                            if (arrow > 0)
+                            {
+                                head = item.Substring(0, arrow);
+                            }
+                            if (string.Equals(NameOfLogItem(head), row.Name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                mentioned = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!mentioned)
+                    {
+                        unmentioned.Add(row.Guid + "  |  " + tag + "  |  " + row.FileName);
+                    }
+                }
+                Console.WriteLine();
+                Console.WriteLine("## 装了但本次日志没提（" + unmentioned.Count + "）——可疑：可能没被 BepInEx 扫到");
+                foreach (string u in unmentioned)
+                {
+                    Console.WriteLine("  " + u);
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>列出插件库里的插件（与面板「插件清单」同一数据源——非插件 dll 只计数不列出）。</summary>
+        private static int PluginsCommand(string db)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                List<PluginRow> rows = hub.Core.LoadPlugins();
+                int withGuid = 0;
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length > 0)
+                    {
+                        withGuid = withGuid + 1;
+                    }
+                }
+                // 结论前置——统计行先出（列表可能很长被截断，统计不能丢）
+                Console.WriteLine("—— 插件 " + withGuid + " 项 · 非插件 dll " + (rows.Count - withGuid) + " 个");
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length == 0)
+                    {
+                        continue;
+                    }
+                    Console.WriteLine(row.Guid + "  |  " + row.Name + " " + row.Version + "  |  " + row.FileName
+                        + (row.Processes.Length > 0 ? "  |  进程 " + row.Processes : "")
+                        + (row.IsIpa ? "  |  [IPA]" : ""));
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>扫描插件库根下的全部 dll 并落库（BepInEx 插件元数据——只读解析，不改动任何文件）。</summary>
+        private static int ScanPluginsCommand(string db)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                List<string> errors = new List<string>();
+                DateTime started = DateTime.Now;
+                int count = Scanner.ScanPlugins(hub.Core, cfg, errors);
+                TimeSpan span = DateTime.Now - started;
+                Console.WriteLine("插件库扫描完成：" + count + " 个 dll · 耗时 " + span.TotalSeconds.ToString("F1") + " 秒");
+                foreach (string e in errors)
+                {
+                    Console.Error.WriteLine("  ! " + e);
+                }
+                List<PluginRow> rows = hub.Core.LoadPlugins();
+                int withGuid = 0;
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length > 0)
+                    {
+                        withGuid = withGuid + 1;
+                    }
+                }
+                Console.WriteLine("插件项 " + withGuid + " 条 · 非插件 dll " + (rows.Count - withGuid) + " 个");
+            }
+            return 0;
+        }
+
+        /// <summary>解析单个插件 dll 的元数据（一个 dll 可含多个插件）——与插件库扫描同一实现。</summary>
+        private static int PluginInfoCommand(List<string> rest)
+        {
+            RequireArgs(rest, "plugin-info <dll>", 1);
+            string error;
+            List<PluginInfo> list = PluginReader.ReadAll(rest[0], out error);
+            Console.WriteLine("文件: " + rest[0]);
+            if (list.Count == 0)
+            {
+                Console.Error.WriteLine("解析失败: " + error);
+                return 1;
+            }
+            Console.WriteLine("插件 " + list.Count + " 项：");
+            foreach (PluginInfo info in list)
+            {
+                Console.WriteLine("  [" + (info.isIpa ? "IPA" : "BepInEx") + "] " + info.name + " " + info.version);
+                Console.WriteLine("      GUID: " + info.guid);
+                if (info.processes.Count > 0)
+                {
+                    Console.WriteLine("      进程过滤: " + string.Join(", ", info.processes));
+                }
+                if (info.dependencies.Count > 0)
+                {
+                    Console.WriteLine("      依赖: " + string.Join(", ", info.dependencies));
+                }
+            }
+            return 0;
+        }
+
         private static int RootsListCommand(string db)
         {
             using (StoreHub hub = new StoreHub(db))
@@ -1388,6 +1622,14 @@ namespace KKManager
                 Console.WriteLine("库: " + hub.CorePath);
                 Console.WriteLine("游戏根: " + cfg.gameRoot);
                 Console.WriteLine();
+                Console.WriteLine("## 插件库根");
+                foreach (RootEntry e in cfg.pluginRoots)
+                {
+                    Console.WriteLine("  级别 " + e.tier + "（" + Tier.Name(e.tier) + "）  " + e.path
+                        + (e.recurse ? "  [含子目录]" : "  [仅本目录]")
+                        + (e.readOnly ? "  [只读]" : "")
+                        + (e.locked ? "  [预置·锁定]" : ""));
+                }
                 Console.WriteLine("## mod 库根");
                 foreach (RootEntry e in cfg.ModRootsOrdered())
                 {
@@ -1411,7 +1653,7 @@ namespace KKManager
             return 0;
         }
 
-        /// <summary>列出待办（软件认为需要使用者处理的事）——目前只有「离线库」一类。</summary>
+        /// <summary>列出待办——按分支输出（库已离线 / 卡片 / 手输三类，id 供 todo-close 用）。</summary>
         private static int TodosCommand(string db)
         {
             using (StoreHub hub = new StoreHub(db))
@@ -1419,14 +1661,42 @@ namespace KKManager
                 RootsConfig cfg = hub.Core.LoadRoots();
                 RootsRules.Normalize(cfg);
                 List<TodoRow> rows = hub.Core.ListTodos();
+                /* [段1] 库根配置——离线库条目要把路径与备注还原出来（配置是唯一真相源） */
+                List<RootEntry> all = new List<RootEntry>(cfg.ModRootsOrdered());
+                all.AddRange(cfg.CardRootsOrdered());
                 Console.WriteLine("库: " + hub.CorePath);
                 Console.WriteLine("待办: " + rows.Count + " 条");
-                foreach (TodoRow t in rows)
+                /* [段2] 按分支打印（库已离线 / 卡片 / 手输） */
+                PrintTodoGroup("库已离线", "offline", rows, all);
+                PrintTodoGroup("卡片", "card", rows, all);
+                PrintTodoGroup("手输", "manual", rows, all);
+            }
+            return 0;
+        }
+
+        /// <summary>按分支打印一组待办——离线库条目的路径与备注从库根配置还原（配置是唯一真相源，不双写）。</summary>
+        private static void PrintTodoGroup(string title, string kind, List<TodoRow> rows, List<RootEntry> all)
+        {
+            List<TodoRow> group = new List<TodoRow>();
+            foreach (TodoRow t in rows)
+            {
+                if (string.Equals(t.Kind, kind, StringComparison.Ordinal))
+                {
+                    group.Add(t);
+                }
+            }
+            if (group.Count == 0)
+            {
+                return;
+            }
+            Console.WriteLine("  [" + title + "] " + group.Count + " 条");
+            foreach (TodoRow t in group)
+            {
+                string tail = "  （登记于 " + t.CreatedAt + "）";
+                if (string.Equals(kind, "offline", StringComparison.Ordinal))
                 {
                     string path = t.Key;
                     string note = "";
-                    List<RootEntry> all = new List<RootEntry>(cfg.ModRootsOrdered());
-                    all.AddRange(cfg.CardRootsOrdered());
                     foreach (RootEntry e in all)
                     {
                         if (string.Equals((e.path ?? "").Trim().ToLowerInvariant(), t.Key, StringComparison.OrdinalIgnoreCase))
@@ -1436,10 +1706,76 @@ namespace KKManager
                             break;
                         }
                     }
-                    Console.WriteLine("  #" + t.Id + "  [" + t.Kind + "]  " + path
-                        + (string.IsNullOrWhiteSpace(note) ? "" : "  备注：" + note)
-                        + "  （登记于 " + t.CreatedAt + "）");
+                    Console.WriteLine("    #" + t.Id + "  " + path
+                        + (string.IsNullOrWhiteSpace(note) ? "" : "  备注：" + note) + tail);
                 }
+                else if (string.Equals(kind, "card", StringComparison.Ordinal))
+                {
+                    Console.WriteLine("    #" + t.Id + "  " + t.Text
+                        + "  —— " + (t.RefName ?? "") + "  <" + (t.RefPath ?? "") + ">" + tail);
+                }
+                else
+                {
+                    Console.WriteLine("    #" + t.Id + "  " + t.Text + tail);
+                }
+            }
+        }
+
+        /// <summary>新建待办——`todo-add &lt;文本&gt;` 手输；`todo-add --card &lt;卡片路径&gt; &lt;文本&gt;` 挂到卡片上。</summary>
+        private static int TodoAddCommand(string db, List<string> rest)
+        {
+            string card = Take(rest, "--card");
+            string text = string.Join(" ", rest).Trim();
+            using (StoreHub hub = new StoreHub(db))
+            {
+                string error;
+                if (!string.IsNullOrWhiteSpace(card))
+                {
+                    error = hub.Core.AddCardTodo(card, Path.GetFileName(card), text, Store.Now());
+                }
+                else
+                {
+                    error = hub.Core.AddManualTodo(text, Store.Now());
+                }
+                if (error != null)
+                {
+                    Console.WriteLine("! " + error);
+                    return 1;
+                }
+                Console.WriteLine(string.IsNullOrWhiteSpace(card)
+                    ? "已登记手输待办：" + text
+                    : "已登记卡片待办：" + text + "  —— " + card);
+            }
+            return 0;
+        }
+
+        /// <summary>关闭待办——`todo-close &lt;id&gt;`（id 由 `todos` 列出）。</summary>
+        private static int TodoCloseCommand(string db, List<string> rest)
+        {
+            if (rest.Count < 1)
+            {
+                Console.WriteLine("用法: todo-close <待办 id>");
+                return 2;
+            }
+            long id = long.Parse(rest[0], CultureInfo.InvariantCulture);
+            using (StoreHub hub = new StoreHub(db))
+            {
+                bool found = false;
+                foreach (TodoRow t in hub.Core.ListTodos())
+                {
+                    if (t.Id == id)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    Console.WriteLine("! 没有这条待办：#" + id);
+                    return 1;
+                }
+                hub.Core.CloseTodo(id);
+                Console.WriteLine("已关闭待办 #" + id);
             }
             return 0;
         }
@@ -1566,7 +1902,7 @@ namespace KKManager
                 RootsRules.Normalize(cfg);
                 hub.Core.SaveRoots(cfg);
                 Console.WriteLine("游戏根: " + cfg.gameRoot);
-                Console.WriteLine("mod 库根 " + cfg.modRoots.Count + " 个 / 卡片库根 " + cfg.cardRoots.Count + " 个");
+                Console.WriteLine("插件库根 " + cfg.pluginRoots.Count + " 个 / mod 库根 " + cfg.modRoots.Count + " 个 / 卡片库根 " + cfg.cardRoots.Count + " 个");
                 foreach (string w in warnings)
                 {
                     Console.WriteLine("  ! " + w);
