@@ -1149,6 +1149,12 @@ namespace KKManager.Data
             return a.Tier.CompareTo(b.Tier);
         }
 
+        /// <summary>读某库某卡的某一分项分析（服装槽位 / 卡片分析 / 场景深度；没有返回 null）——面板卡片分析优先读库用。</summary>
+        public CardAnalysisRow LoadCardAnalysis(int lib, long id, string kind)
+        {
+            return StoreByLib(lib).LoadCardAnalysis(id, kind);
+        }
+
         /// <summary>按库位取单张卡片（0 = 主库）。</summary>
         public CardRow GetCard(int lib, long id)
         {
@@ -2031,14 +2037,11 @@ namespace KKManager.Data
             return null;
         }
 
-        /// <summary>路径是否落在某个受管 mod 库根内（打开文件前的白名单校验——按库根配置判定，不读库）。</summary>
+        /// <summary>路径是否落在某个受管 mod 库根内（打开文件前的白名单校验——按库根配置判定，不读库）。
+        /// 判据 = 落在受管库根内；不按扩展名筛（扫描面已放宽为「能读到 manifest.xml 即收」，白名单面随之一致）。</summary>
         public static bool IsUnderModRoot(RootsConfig cfg, string path)
         {
             if (cfg == null || string.IsNullOrWhiteSpace(path))
-            {
-                return false;
-            }
-            if (!path.EndsWith(".zipmod", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }

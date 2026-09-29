@@ -50,6 +50,8 @@ namespace KKManager.Web
 
         /// <summary>非卡文件数。</summary>
         public int NonCard { get; set; }
+        /// <summary>非 mod 文件数（mod 库内读不到 manifest.xml 的文件）。</summary>
+        public int NonMod { get; set; }
 
         /// <summary>失败数。</summary>
         public int Failed { get; set; }
@@ -74,6 +76,21 @@ namespace KKManager.Web
 
         /// <summary>本次扫描清理的已消失记录数。</summary>
         public int Removed { get; set; }
+
+        /// <summary>当前步骤序号（1 起）。</summary>
+        public int StepIndex { get; set; }
+
+        /// <summary>步骤总数。</summary>
+        public int StepCount { get; set; }
+
+        /// <summary>当前步骤名（段名）。</summary>
+        public string StepName { get; set; }
+
+        /// <summary>当前步骤内已处理文件数。</summary>
+        public int StepDone { get; set; }
+
+        /// <summary>当前步骤内文件总数。</summary>
+        public int StepTotal { get; set; }
 
         /// <summary>开始时刻。</summary>
         public string StartedAt { get; set; }
@@ -943,7 +960,9 @@ namespace KKManager.Web
                 string target = dto == null || string.IsNullOrEmpty(dto.target) ? "cards" : dto.target;
                 bool force = dto != null && dto.force;
                 string root = dto == null ? null : dto.root;
-                string error = StartScan(target, force, root);
+                string order = dto == null ? null : dto.order;
+                string on = dto == null ? null : dto.on;
+                string error = StartScan(target, force, root, order, on);
                 context.Response.ContentType = "application/json";
                 await context.Response.WriteAsync(error == null
                     ? "{\"ok\":true}"
@@ -970,6 +989,7 @@ namespace KKManager.Web
                     added = s.Added,
                     skipped = s.Skipped,
                     nonCard = s.NonCard,
+                    nonMod = s.NonMod,
                     failed = s.Failed,
                     refs = s.Refs,
                     thumbMB = Math.Round(s.ThumbBytes / 1024.0 / 1024.0, 1),
@@ -978,10 +998,39 @@ namespace KKManager.Web
                     typesFixed = s.TypesFixed,
                     timelineRead = s.TimelineRead,
                     removed = s.Removed,
+                    stepIndex = s.StepIndex,
+                    stepCount = s.StepCount,
+                    stepName = s.StepName,
+                    stepDone = s.StepDone,
+                    stepTotal = s.StepTotal,
                     startedAt = s.StartedAt,
                     finishedAt = s.FinishedAt,
                     errors = s.Errors
                 });
+            });
+
+            // 扫描计划（步骤定义 + 当前顺序与勾选）——面板「扫描配置」窗用
+            app.MapGet("/api/scan/plan", () =>
+            {
+                string orderText = _hub.Core.GetSetting(ScanPlanCatalog.OrderKey);
+                string onText = _hub.Core.GetSetting(ScanPlanCatalog.OnKey);
+                ScanPlan plan = ScanPlanCatalog.Load(orderText, onText);
+                List<object> steps = new List<object>();
+                foreach (ScanStepDef d in ScanPlanCatalog.All)
+                {
+                    steps.Add(new
+                    {
+                        id = d.Id,
+                        name = d.Name,
+                        mods = d.Mods,
+                        required = d.Required,
+                        defaultOn = d.DefaultOn,
+                        grayed = d.Grayed,
+                        note = d.Note,
+                        on = plan.IsOn(d.Id)
+                    });
+                }
+                return Results.Json(new { order = plan.Order, on = plan.On, steps = steps });
             });
 
             app.MapGet("/api/stats", () =>
@@ -1159,25 +1208,63 @@ namespace KKManager.Web
                 string timelineText = null;
                 CardCoordinateResult coords = null;
                 SceneInfoResult scene = null;
+                object coordsOut = null;
+                object detailOut = null;
+                object sceneOut = null;
                 if (st.Error == null && st.ImageEnd > 0)
                 {
-                    detail = CardDetail.Parse(path, st.ImageEnd);
+                    detailOut = LoadCachedAnalysis(_hub, lib, id, "detail", path);
+                    if (detailOut == null)
+                    {
+                        detail = CardDetail.Parse(path, st.ImageEnd);
+                        detailOut = detail;
+                    }
                     if (st.CardType == CardReader.SceneCardType)
                     {
                         timeline = ReadTimelineCached(lib, id, path, st.ImageEnd);
                         timelineText = TimelineReader.Describe(timeline);
-                        // 场景卡（sd）深度分析——插件数据条目（timeline / kkpe / vnge_*）+ 内嵌角色卡数据份数
-                        scene = SceneReader.Read(path, st.ImageEnd);
-                        // 每份内嵌角色数据的首图——与数据区图片清单对上（宽高 / 字节数取自 CardDetail 的同一遍扫描）
-                        scene.AttachCharaFaces(detail.Images);
+                        // 场景卡（sd）深度分析——优先读扫描时落库的档案（含逐份卡面图；落库时就已 Attach）
+                        sceneOut = LoadCachedAnalysis(_hub, lib, id, "scene", path);
+                        if (sceneOut == null)
+                        {
+                            scene = SceneReader.Read(path, st.ImageEnd);
+                            if (detail != null)
+                            {
+                                scene.AttachCharaFaces(detail.Images);
+                            }
+                            sceneOut = scene;
+                        }
                     }
                     else
                     {
-                        // 服装 / 饰品（Coordinate 块七套槽位）——人物卡才有；非人物卡读出错误文本，前端按错误不显示
-                        coords = CardCoordinate.Read(path);
+                        // 服装 / 饰品（Coordinate 块七套槽位）——人物卡才有；优先读扫描时落库的分项分析，失效或缺失再现场解析
+                        object cachedCoords = LoadCachedAnalysis(_hub, lib, id, "coord", path);
+                        if (cachedCoords != null)
+                        {
+                            coordsOut = cachedCoords;
+                        }
+                        else
+                        {
+                            coords = CardCoordinate.Read(path);
+                        }
                     }
                 }
-                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detail, timeline = timeline, timelineText = timelineText, coords = coords, scene = scene });
+                object coordsFinal = coordsOut;
+                if (coordsFinal == null)
+                {
+                    coordsFinal = coords;
+                }
+                object detailFinal = detailOut;
+                if (detailFinal == null)
+                {
+                    detailFinal = detail;
+                }
+                object sceneFinal = sceneOut;
+                if (sceneFinal == null)
+                {
+                    sceneFinal = scene;
+                }
+                return Results.Json(new { ok = st.Error == null, error = st.Error, structure = st, detail = detailFinal, timeline = timeline, timelineText = timelineText, coords = coordsFinal, scene = sceneFinal });
             });
 
             // 卡片内嵌图片缩略图（只读）——按偏移 / 长度取数据区里的 PNG，缩放为 JPEG 返回
@@ -2754,7 +2841,7 @@ namespace KKManager.Web
             Console.WriteLine(line);
         }
 
-        private static string StartScan(string target, bool force, string rootPath)
+        private static string StartScan(string target, bool force, string rootPath, string orderText, string onText)
         {
             lock (ScanLock)
             {
@@ -2782,6 +2869,20 @@ namespace KKManager.Web
                         hub.EnsureMigrated(cfg);
                         int thumbWidth = int.Parse(hub.Core.GetSetting("thumbWidth") ?? "256");
                         int quality = int.Parse(hub.Core.GetSetting("quality") ?? "82");
+                        // 扫描计划——请求带了顺序 / 勾选就落盘（全局一套，追加库扫描同样适用），否则读已保存的
+                        string order = orderText;
+                        string on = onText;
+                        if (!string.IsNullOrEmpty(order) || !string.IsNullOrEmpty(on))
+                        {
+                            hub.Core.SetSetting(ScanPlanCatalog.OrderKey, order ?? "");
+                            hub.Core.SetSetting(ScanPlanCatalog.OnKey, on ?? "");
+                        }
+                        else
+                        {
+                            order = hub.Core.GetSetting(ScanPlanCatalog.OrderKey);
+                            on = hub.Core.GetSetting(ScanPlanCatalog.OnKey);
+                        }
+                        ScanPlan plan = ScanPlanCatalog.Load(order, on);
                         Action<string> log = m => SetMessage(m);
                         bool isMods = target == "mods";
 
@@ -2817,8 +2918,7 @@ namespace KKManager.Web
                             {
                                 _scan.RootCount = cfg.ModRootsOrdered().Count + cfg.CardRootsOrdered().Count;
                             }
-                            r.Merge(Scanner.ScanMods(hub, cfg, null, scope, force, log));
-                            r.Merge(Scanner.ScanCards(hub, cfg, null, scope, force, thumbWidth, quality, log));
+                            r.Merge(Scanner.ScanAll(hub, cfg, null, scope, force, thumbWidth, quality, plan, log));
                         }
                         else
                         {
@@ -2833,11 +2933,11 @@ namespace KKManager.Web
                             }
                             if (isMods)
                             {
-                                r = Scanner.ScanMods(hub, cfg, only, ScanScope.All, force, log);
+                                r = Scanner.ScanMods(hub, cfg, only, ScanScope.All, force, plan, log);
                             }
                             else
                             {
-                                r = Scanner.ScanCards(hub, cfg, only, ScanScope.All, force, thumbWidth, quality, log);
+                                r = Scanner.ScanCards(hub, cfg, only, ScanScope.All, force, thumbWidth, quality, plan, log);
                             }
                         }
 
@@ -2847,6 +2947,7 @@ namespace KKManager.Web
                             _scan.Added = r.Added;
                             _scan.Skipped = r.Skipped;
                             _scan.NonCard = r.NonCard;
+                            _scan.NonMod = r.NonMod;
                             _scan.Failed = r.Failed;
                             _scan.Refs = r.RefEntries;
                             _scan.ThumbBytes = r.ThumbBytes;
@@ -2855,6 +2956,11 @@ namespace KKManager.Web
                             _scan.TypesFixed = r.TypesFixed;
                             _scan.TimelineRead = r.TimelineRead;
                             _scan.Removed = r.Removed;
+                            _scan.StepIndex = r.StepIndex;
+                            _scan.StepCount = r.StepCount;
+                            _scan.StepName = r.StepName;
+                            _scan.StepDone = r.StepDone;
+                            _scan.StepTotal = r.StepTotal;
                             _scan.Errors.AddRange(r.Errors);
                             _scan.Message = "扫描完成，用时 " + r.Elapsed.TotalSeconds.ToString("F1") + " 秒";
                         }
@@ -2883,6 +2989,30 @@ namespace KKManager.Web
             return null;
         }
 
+        /// <summary>读库里的分项分析（存在且 size + mtime 未失效 → 返回 JSON 元素；否则 null）——卡片分析窗优先读库，避免每次重算。</summary>
+        private static object LoadCachedAnalysis(StoreHub hub, int lib, long id, string kind, string path)
+        {
+            CardAnalysisRow row = hub.LoadCardAnalysis(lib, id, kind);
+            if (row == null || string.IsNullOrEmpty(row.Data))
+            {
+                return null;
+            }
+            try
+            {
+                FileInfo fi = new FileInfo(path);
+                if (!fi.Exists || fi.Length != row.Size || !string.Equals(Store.StampOf(fi), row.Mtime, StringComparison.Ordinal))
+                {
+                    return null;
+                }
+                JsonDocument doc = JsonDocument.Parse(row.Data);
+                return doc.RootElement.Clone();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private static void SetMessage(string message)
         {
             lock (ScanLock)
@@ -2901,14 +3031,34 @@ namespace KKManager.Web
                     _scan.CurrentRoot = message;
                     _scan.RootIndex++;
                 }
+                if (message.StartsWith("步骤 ", StringComparison.Ordinal))
+                {
+                    int slashAt = message.IndexOf('/');
+                    int colonAt = message.IndexOf('：');
+                    if (slashAt > 3 && colonAt > slashAt)
+                    {
+                        int stepIndex;
+                        int stepCount;
+                        if (int.TryParse(message.Substring(3, slashAt - 3), out stepIndex))
+                        {
+                            _scan.StepIndex = stepIndex;
+                        }
+                        if (int.TryParse(message.Substring(slashAt + 1, colonAt - slashAt - 1), out stepCount))
+                        {
+                            _scan.StepCount = stepCount;
+                        }
+                        _scan.StepName = message.Substring(colonAt + 1);
+                    }
+                }
                 System.Text.RegularExpressions.Match m = ProgressRx.Match(message);
                 if (m.Success)
                 {
                     int left;
                     int right;
-                    if (int.TryParse(m.Groups[1].Value, out left) && left > _scan.Added)
+                    if (int.TryParse(m.Groups[1].Value, out left))
                     {
                         _scan.Added = left;
+                        _scan.StepDone = left;
                     }
                     if (int.TryParse(m.Groups[2].Value, out right))
                     {
@@ -2999,6 +3149,12 @@ namespace KKManager.Web
 
         /// <summary>只扫这一条库根（面板「更新本库」；空 = 按 target 全量扫）。</summary>
         public string root { get; set; }
+
+        /// <summary>扫描步骤顺序（逗号分隔 id；空 = 用已保存的）。</summary>
+        public string order { get; set; }
+
+        /// <summary>扫描步骤勾选（逗号分隔 id；空 = 用已保存的）。</summary>
+        public string on { get; set; }
     }
 
     /// <summary>关闭待办的请求体。</summary>

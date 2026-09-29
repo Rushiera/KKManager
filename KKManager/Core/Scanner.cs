@@ -20,23 +20,25 @@ namespace KKManager.Core
         Extra
     }
 
-    /// <summary>扫描统计。</summary>
+    /// <summary>扫描统计（按步骤累计计数——同一步骤跨库根累加）。</summary>
     public class ScanResult
     {
         /// <summary>枚举到的文件数。</summary>
         public int Seen { get; set; }
 
-        /// <summary>新增 / 更新数。</summary>
+        /// <summary>步骤实际完成数（按文件 × 步骤计）。</summary>
         public int Added { get; set; }
 
-        /// <summary>因 size+mtime 未变而跳过数。</summary>
+        /// <summary>步骤跳过数（文件未变且该步已完成）。</summary>
         public int Skipped { get; set; }
 
-        /// <summary>解析失败数。</summary>
+        /// <summary>步骤失败数。</summary>
         public int Failed { get; set; }
 
         /// <summary>无卡类型标记、不算卡片的文件数。</summary>
         public int NonCard { get; set; }
+        /// <summary>mod 库内读不到 manifest.xml、不算 mod 的文件数（mod 侧全扫面下的非 mod 文件）。</summary>
+        public int NonMod { get; set; }
 
         /// <summary>本次入库的引用条目数。</summary>
         public long RefEntries { get; set; }
@@ -44,25 +46,42 @@ namespace KKManager.Core
         /// <summary>缩略图字节总量。</summary>
         public long ThumbBytes { get; set; }
 
-        /// <summary>本次扫描新读到角色名的卡片数。</summary>
+        /// <summary>本次扫描新读到角色名的卡片数（库里原先没有该行）。</summary>
         public int NamesRead { get; set; }
 
         /// <summary>本次扫描为存量卡片补读到角色名的数。</summary>
         public int NamesFilled { get; set; }
 
-        /// <summary>本次扫描为存量卡片补正卡类型的数（本版之前场景卡的 card_type 记成了数据区头段的乱码）。</summary>
+        /// <summary>本次扫描补正卡类型的数。</summary>
         public int TypesFixed { get; set; }
-        /// <summary>本次扫描为场景卡读到 timeline 长度的数（供「按 timeline 长度」排序——读失败不计数，原因进错误明细）。</summary>
+
+        /// <summary>本次扫描读到 timeline 的场景卡数。</summary>
         public int TimelineRead { get; set; }
 
-        /// <summary>本次扫描因磁盘上已不存在而清理的记录数——卡片行 / mod 副本涉及的 guid 数 / 旧版登记条数之和。</summary>
+        /// <summary>提交的写事务批次（同一步骤跨文件 × 500 条一批）。</summary>
         public int Removed { get; set; }
+
+        /// <summary>当前步骤序号（1 起）。</summary>
+        public int StepIndex { get; set; }
+
+        /// <summary>步骤总数。</summary>
+        public int StepCount { get; set; }
+
+        /// <summary>当前步骤名（段名）。</summary>
+        public string StepName { get; set; }
+
+        /// <summary>当前步骤内已处理文件数。</summary>
+        public int StepDone { get; set; }
+
+        /// <summary>当前步骤内文件总数（各库根之和）。</summary>
+        public int StepTotal { get; set; }
 
         /// <summary>耗时。</summary>
         public TimeSpan Elapsed { get; set; }
 
         /// <summary>错误明细（上限 200 条）。</summary>
         public List<string> Errors { get; } = new List<string>();
+
         /// <summary>并入另一轮扫描的计数（「扫描主要 / 追加库扫描」是两轮扫描，面板合并展示）——耗时相加，错误明细续接。</summary>
         public void Merge(ScanResult other)
         {
@@ -75,6 +94,7 @@ namespace KKManager.Core
             Skipped += other.Skipped;
             Failed += other.Failed;
             NonCard += other.NonCard;
+            NonMod += other.NonMod;
             RefEntries += other.RefEntries;
             ThumbBytes += other.ThumbBytes;
             NamesRead += other.NamesRead;
@@ -96,156 +116,128 @@ namespace KKManager.Core
         public List<string> OfflineRoots { get; } = new List<string>();
     }
 
-    /// <summary>库扫描——按级别 1→2→3 顺序扫描；增量判据：文件 size + mtime 未变则跳过。</summary>
+    /// <summary>一轮扫描里一个文件的内存态——跨步骤复用（省重复 FileInfo 与重复查库）。</summary>
+    public class ScanFile
+    {
+        /// <summary>文件绝对路径。</summary>
+        public string Path { get; set; }
+
+        /// <summary>所属库根路径。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>相对库根的文件夹（根目录为空串）。</summary>
+        public string Folder { get; set; }
+
+        /// <summary>文件字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>修改时间戳（UTC 文本）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>卡片 id（row 步写入或建索引时读得；0 = 尚未建行）。</summary>
+        public long CardId { get; set; }
+
+        /// <summary>图片区终点（head 步或建索引时读得）。</summary>
+        public long ImageEnd { get; set; }
+
+        /// <summary>卡类型（head 步或建索引时读得）。</summary>
+        public string CardType { get; set; }
+
+        /// <summary>库里原先记的卡类型（供类型补正出声）。</summary>
+        public string OldCardType { get; set; }
+
+        /// <summary>本轮会话内头段是否已解析（true 时 ImageEnd / CardType 可直接用，不再读文件）。</summary>
+        public bool HeadRead { get; set; }
+
+        /// <summary>本轮会话内头段读取失败（失败后不再重试——避免同段内多步各试一次）。</summary>
+        public bool HeadFailed { get; set; }
+
+        /// <summary>mod 副本的 guid（mod 行步写入或建索引时读得）。</summary>
+        public string ModGuid { get; set; }
+
+        /// <summary>本轮之前库里是否已有该文件的行（false = 新文件——供「新读 / 补读」区分）。</summary>
+        public bool IsNew { get; set; }
+    }
+
+    /// <summary>一个库根在本轮扫描中的状态——库文件句柄 / 文件清单 / 已完成步骤索引。</summary>
+    public class ScanRootState
+    {
+        /// <summary>库根条目。</summary>
+        public RootEntry Entry { get; set; }
+
+        /// <summary>true = mod 侧。</summary>
+        public bool Mods { get; set; }
+
+        /// <summary>该库根对应的库文件（主库条目走主库）。</summary>
+        public Store Store { get; set; }
+
+        /// <summary>枚举所得的文件清单（本轮只枚举一次）。</summary>
+        public List<ScanFile> Files { get; set; }
+
+        /// <summary>已完成步骤索引——file_path → （步骤 id → 记录）。</summary>
+        public Dictionary<string, Dictionary<string, ScanStepRow>> Steps { get; set; }
+
+        /// <summary>枚举是否失败（失败时不清扫——空结果不等于文件消失）。</summary>
+        public bool EnumFailed { get; set; }
+    }
+
+    /// <summary>库扫描——按步骤编排：同一段内共用一个文件打开；每步独立完成戳（scan_state）。</summary>
     public static class Scanner
     {
         private const int MaxErrors = 200;
         private const int BatchSize = 500;
 
-        /// <summary>库里记的卡类型是否需要补正——空值，或既不是场景卡标记也不是游戏内标记串（「【…】」形态，本版之前场景卡记的是数据区头段乱码）。</summary>
-        private static bool NeedsTypeFix(string storedType)
-        {
-            if (string.IsNullOrEmpty(storedType))
-            {
-                return true;
-            }
-            if (storedType == CardReader.SceneCardType)
-            {
-                return false;
-            }
-            return storedType.IndexOf('【') < 0;
-        }
-
-        /// <summary>扫描 mod 库（按级别升序）——按库根路由到对应库文件；库根不存在时出声跳过，不代建目录。</summary>
-        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, bool force, Action<string> log)
-        {
-            return ScanMods(hub, cfg, null, ScanScope.All, force, log);
-        }
-
-        /// <summary>扫描 mod 库——only 非空时只扫该条库根（面板「更新本库」）· scope 限定预置条目 / 使用者添加的库根（面板「扫描主要 / 追加库扫描」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
-        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, Action<string> log)
+        /// <summary>
+        /// 统一编排入口——按计划的段顺序执行（跨侧交错：卡片行 → mod 总数 → 声明区 …）。
+        /// 两侧库根各枚举一次；收尾（清扫 / 作者索引 / 离线标记）在全部段跑完后执行。
+        /// </summary>
+        public static ScanResult ScanAll(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, ScanPlan plan, Action<string> log)
         {
             Stopwatch watch = Stopwatch.StartNew();
             ScanResult result = new ScanResult();
-            List<RootEntry> roots = cfg.ModRootsOrdered();
-
-            foreach (RootEntry root in roots)
+            if (plan == null)
             {
-                if (only != null && !SamePath(root.path, only.path))
-                {
-                    continue;
-                }
-                if (!InScope(root, scope, true))
-                {
-                    continue;
-                }
-                if (log != null)
-                {
-                    log("级别 " + root.tier + "（" + Tier.Name(root.tier) + "） · " + root.path);
-                }
+                plan = ScanPlanCatalog.Default();
+            }
+            List<ScanRootState> modStates = CollectRoots(hub, cfg, only, scope, true, result, log);
+            List<ScanRootState> cardStates = CollectRoots(hub, cfg, only, scope, false, result, log);
+            List<ScanSegment> segs = plan.Segments();
+            result.StepCount = segs.Count;
 
-                if (root.offline)
+            int index = 0;
+            foreach (ScanSegment seg in segs)
+            {
+                index = index + 1;
+                result.StepIndex = index;
+                result.StepName = seg.Label;
+                List<ScanRootState> states = seg.Mods ? modStates : cardStates;
+                result.StepTotal = TotalFiles(states);
+                result.StepDone = 0;
+                Report(log, "步骤 " + index + "/" + segs.Count + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
+                foreach (ScanRootState st in states)
                 {
-                    if (log != null)
+                    if (seg.Mods)
                     {
-                        log("  离线库，已跳过（内容取本库数据库）");
+                        RunModSegment(hub, cfg, st, seg, force, result, log);
                     }
-                    continue;
-                }
-
-                if (!Directory.Exists(root.path))
-                {
-                    AddError(result, "目录不存在，已跳过：" + root.path);
-                    MarkOffline(result, root, true, log);
-                    continue;
-                }
-
-                Store store = hub.StoreFor(root, true);
-                Dictionary<string, string[]> stamps = force
-                    ? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
-                    : store.LoadModStamps();
-
-                bool enumFailed = false;
-                List<string> files = Enumerate(root.path, "*.zipmod", root.recurse, log, out enumFailed);
-                result.Seen += files.Count;
-                if (files.Count == 0 && !enumFailed)
-                {
-                    MarkOffline(result, root, true, log);
-                }
-                int i = 0;
-                int batchCount = 0;
-                store.Begin();
-                try
-                {
-                    foreach (string f in files)
+                    else
                     {
-                        i++;
-                        FileInfo fi = new FileInfo(f);
-                        string mtime = Store.StampOf(fi);
-                        string[] old = null;
-                        if (stamps.TryGetValue(f, out old) && old[0] == fi.Length.ToString() && old[1] == mtime)
-                        {
-                            result.Skipped++;
-                            continue;
-                        }
-
-                        ModInfo m = ZipModReader.Parse(f);
-                        if (!string.IsNullOrEmpty(m.Error) || string.IsNullOrEmpty(m.Guid))
-                        {
-                            result.Failed++;
-                            AddError(result, m.FileName + " → " + (m.Error ?? "无 guid"));
-                            continue;
-                        }
-
-                        store.UpsertModFile(m, root, mtime);
-                        store.FillModMeta(m);
-                        result.Added++;
-
-                        batchCount++;
-                        if (batchCount >= BatchSize)
-                        {
-                            store.Commit();
-                            store.Begin();
-                            batchCount = 0;
-                        }
-
-                        if (log != null && i % 2000 == 0)
-                        {
-                            log("  " + i + "/" + files.Count);
-                        }
-                    }
-                    store.Commit();
-                }
-                catch
-                {
-                    store.Rollback();
-                    throw;
-                }
-
-                // 清扫：本次枚举集合中已不存在的行——离线库 / 枚举失败 / 枚举为空一律不清扫（枚举失败不等于文件消失）
-                if (!enumFailed && files.Count > 0)
-                {
-                    HashSet<string> present = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-                    List<string> goneGuids = store.DeleteModFilesMissingUnderRoot(root.path, present);
-                    foreach (string guid in goneGuids)
-                    {
-                        hub.RecomputeMod(cfg, guid);
-                    }
-                    int goneOld = hub.Core.DeleteModOldMissingUnderRoot(root.path, present);
-                    if (goneGuids.Count > 0 || goneOld > 0)
-                    {
-                        result.Removed += goneGuids.Count + goneOld;
-                        if (log != null)
-                        {
-                            log("  已清理 " + goneGuids.Count + " 个 guid 的已消失副本记录 · 旧版登记 " + goneOld + " 条（磁盘上已不存在）");
-                        }
+                        RunCardSegment(st, seg, force, thumbWidth, thumbQuality, result, log);
                     }
                 }
             }
 
-            ApplyOfflineMarks(hub, cfg, result, true, log);
+            foreach (ScanRootState st in cardStates)
+            {
+                CleanupCards(st, result, log);
+            }
+            foreach (ScanRootState st in modStates)
+            {
+                CleanupMods(hub, cfg, st, result, log);
+            }
 
-            // 作者聚合表整表重建（mod 主表是唯一真相源，聚合表只是读侧缓存）——扫描结束即刷新，面板「按作者筛选」直接读它
+            ApplyOfflineMarks(hub, cfg, result, false, log);
+            ApplyOfflineMarks(hub, cfg, result, true, log);
             hub.Core.RefreshModAuthors();
             if (log != null)
             {
@@ -256,34 +248,165 @@ namespace KKManager.Core
             return result;
         }
 
-        /// <summary>扫描卡片库（按级别升序），提取 mod 声明与缩略图——按库根路由到对应库文件。</summary>
-        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, bool force, int thumbWidth, int thumbQuality, Action<string> log)
+        /// <summary>扫描 mod 库（全部库根）。</summary>
+        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, bool force, Action<string> log)
         {
-            return ScanCards(hub, cfg, null, ScanScope.All, force, thumbWidth, thumbQuality, log);
+            return ScanMods(hub, cfg, null, ScanScope.All, force, null, log);
         }
 
-        /// <summary>扫描卡片库——only 非空时只扫该条库根（面板「更新本库」）· scope 限定预置条目 / 使用者添加的库根（面板「扫描主要 / 追加库扫描」）；离线库一律跳过；目录不存在或枚举为空 → 记入「该离线」清单。</summary>
-        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, Action<string> log)
+        /// <summary>扫描 mod 库（默认计划）。</summary>
+        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, Action<string> log)
+        {
+            return ScanMods(hub, cfg, only, scope, force, null, log);
+        }
+
+        /// <summary>扫描 mod 库——plan 为 null 时用默认计划；only 非空时只扫该条库根；离线库一律跳过。</summary>
+        public static ScanResult ScanMods(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, ScanPlan plan, Action<string> log)
         {
             Stopwatch watch = Stopwatch.StartNew();
             ScanResult result = new ScanResult();
-            List<RootEntry> roots = cfg.CardRootsOrdered();
+            if (plan == null)
+            {
+                plan = ScanPlanCatalog.Default();
+            }
+            List<ScanRootState> states = CollectRoots(hub, cfg, only, scope, true, result, log);
+            List<ScanSegment> segs = SegmentsFor(plan, true);
+            result.StepCount = segs.Count;
 
+            int index = 0;
+            foreach (ScanSegment seg in segs)
+            {
+                index = index + 1;
+                result.StepIndex = index;
+                result.StepName = seg.Label;
+                result.StepDone = 0;
+                result.StepTotal = TotalFiles(states);
+                Report(log, "步骤 " + index + "/" + segs.Count + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
+                foreach (ScanRootState st in states)
+                {
+                    RunModSegment(hub, cfg, st, seg, force, result, log);
+                }
+            }
+
+            foreach (ScanRootState st in states)
+            {
+                CleanupMods(hub, cfg, st, result, log);
+            }
+
+            ApplyOfflineMarks(hub, cfg, result, true, log);
+            hub.Core.RefreshModAuthors();
+            if (log != null)
+            {
+                log("作者索引已重建：" + hub.Core.QueryAuthors().Count + " 位作者");
+            }
+
+            result.Elapsed = watch.Elapsed;
+            return result;
+        }
+
+        /// <summary>扫描卡片库（全部库根 · 默认计划）。</summary>
+        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, bool force, int thumbWidth, int thumbQuality, Action<string> log)
+        {
+            return ScanCards(hub, cfg, null, ScanScope.All, force, thumbWidth, thumbQuality, null, log);
+        }
+
+        /// <summary>扫描卡片库（默认计划）。</summary>
+        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, Action<string> log)
+        {
+            return ScanCards(hub, cfg, only, scope, force, thumbWidth, thumbQuality, null, log);
+        }
+
+        /// <summary>扫描卡片库——plan 为 null 时用默认计划；only 非空时只扫该条库根；离线库一律跳过。</summary>
+        public static ScanResult ScanCards(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, ScanPlan plan, Action<string> log)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            ScanResult result = new ScanResult();
+            if (plan == null)
+            {
+                plan = ScanPlanCatalog.Default();
+            }
+            List<ScanRootState> states = CollectRoots(hub, cfg, only, scope, false, result, log);
+            List<ScanSegment> segs = SegmentsFor(plan, false);
+            result.StepCount = segs.Count;
+
+            int index = 0;
+            foreach (ScanSegment seg in segs)
+            {
+                index = index + 1;
+                result.StepIndex = index;
+                result.StepName = seg.Label;
+                result.StepDone = 0;
+                result.StepTotal = TotalFiles(states);
+                Report(log, "步骤 " + index + "/" + segs.Count + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
+                result.StepDone = 0;
+                foreach (ScanRootState st in states)
+                {
+                    RunCardSegment(st, seg, force, thumbWidth, thumbQuality, result, log);
+                }
+            }
+
+            foreach (ScanRootState st in states)
+            {
+                CleanupCards(st, result, log);
+            }
+
+            ApplyOfflineMarks(hub, cfg, result, false, log);
+            result.Elapsed = watch.Elapsed;
+            return result;
+        }
+
+        /// <summary>取某一侧的执行段（顺序来自计划——跨侧交错的段按顺序过滤）。</summary>
+        private static List<ScanSegment> SegmentsFor(ScanPlan plan, bool mods)
+        {
+            List<ScanSegment> list = new List<ScanSegment>();
+            foreach (ScanSegment seg in plan.Segments())
+            {
+                if (seg.Mods == mods)
+                {
+                    list.Add(seg);
+                }
+            }
+            return list;
+        }
+
+        private static int TotalFiles(List<ScanRootState> states)
+        {
+            int n = 0;
+            foreach (ScanRootState st in states)
+            {
+                n += st.Files.Count;
+            }
+            return n;
+        }
+
+        // [段1] 库根收集与文件清单（枚举只做一次，各段复用）
+
+        /// <summary>收集本次扫描的库根状态——跳过离线库与不存在的目录；枚举一次并缓存（mod 侧全枚举，不限扩展名）。</summary>
+        private static List<ScanRootState> CollectRoots(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool mods, ScanResult result, Action<string> log)
+        {
+            List<ScanRootState> list = new List<ScanRootState>();
+            List<RootEntry> roots = mods ? cfg.ModRootsOrdered() : cfg.CardRootsOrdered();
             foreach (RootEntry root in roots)
             {
                 if (only != null && !SamePath(root.path, only.path))
                 {
                     continue;
                 }
-                if (!InScope(root, scope, false))
+                if (!InScope(root, scope, mods))
                 {
                     continue;
                 }
                 if (log != null)
                 {
-                    log("级别 " + root.tier + " · " + root.path + (root.recurse ? "（含子目录）" : "（仅本目录）"));
+                    if (mods)
+                    {
+                        log("级别 " + root.tier + "（" + Tier.Name(root.tier) + "） · " + root.path);
+                    }
+                    else
+                    {
+                        log("级别 " + root.tier + " · " + root.path + (root.recurse ? "（含子目录）" : "（仅本目录）"));
+                    }
                 }
-
                 if (root.offline)
                 {
                     if (log != null)
@@ -292,182 +415,616 @@ namespace KKManager.Core
                     }
                     continue;
                 }
-
                 if (!Directory.Exists(root.path))
                 {
                     AddError(result, "目录不存在，已跳过：" + root.path);
-                    MarkOffline(result, root, false, log);
+                    MarkOffline(result, root, mods, log);
                     continue;
                 }
 
-                Store store = hub.StoreFor(root, false);
-                Dictionary<string, string[]> stamps = force
-                    ? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
-                    : store.LoadCardStamps();
-
-                string rootNorm = root.path.TrimEnd('\\', '/');
+                ScanRootState st = new ScanRootState();
+                st.Entry = root;
+                st.Mods = mods;
+                st.Store = hub.StoreFor(root, mods);
                 bool enumFailed = false;
-                List<string> files = Enumerate(root.path, "*.png", root.recurse, log, out enumFailed);
+                // mod 侧全枚举（不限扩展名）——是不是 mod 由 modrow 步按「能读到 manifest.xml」判定
+                List<string> files = Enumerate(root.path, mods ? "*" : "*.png", root.recurse, log, out enumFailed);
+                st.EnumFailed = enumFailed;
                 result.Seen += files.Count;
                 if (files.Count == 0 && !enumFailed)
                 {
-                    MarkOffline(result, root, false, log);
+                    MarkOffline(result, root, mods, log);
                 }
-                int i = 0;
-                int batchCount = 0;
-                store.Begin();
-                try
+                st.Files = BuildFiles(root, files, mods, st.Store);
+                st.Steps = st.Store.LoadScanSteps();
+                list.Add(st);
+            }
+            return list;
+        }
+
+        /// <summary>建文件清单内存态——从库里的索引补 guid / 卡片 id / 图片区终点 / 旧类型。</summary>
+        private static List<ScanFile> BuildFiles(RootEntry root, List<string> files, bool mods, Store store)
+        {
+            List<ScanFile> list = new List<ScanFile>(files.Count);
+            string rootNorm = (root.path ?? "").TrimEnd('\\', '/');
+            if (mods)
+            {
+                Dictionary<string, string> guids = store.LoadModFileGuids();
+                foreach (string f in files)
                 {
-                    foreach (string f in files)
+                    FileInfo fi = new FileInfo(f);
+                    ScanFile sf = new ScanFile();
+                    sf.Path = f;
+                    sf.RootPath = root.path;
+                    sf.Folder = FolderOf(f, rootNorm);
+                    sf.Size = fi.Exists ? fi.Length : 0;
+                    sf.Mtime = Store.StampOf(fi);
+                    string guid;
+                    if (guids.TryGetValue(f, out guid))
                     {
-                        i++;
-                        FileInfo fi = new FileInfo(f);
-                        string mtime = Store.StampOf(fi);
-                        string[] old = null;
-                        if (stamps.TryGetValue(f, out old) && old[0] == fi.Length.ToString() && old[1] == mtime)
-                        {
-                            result.Skipped++;
-                            if (old.Length > 3 && NeedsTypeFix(old[3]))
-                            {
-                                // 存量类型补正：本版之前场景卡的 card_type 记成了数据区头段的乱码——只读文件头段重判一次
-                                string fixedType;
-                                string fixedVersion;
-                                if (CardReader.ReadHeadOnly(f, out fixedType, out fixedVersion) && fixedType != old[3])
-                                {
-                                    store.UpdateCardType(f, fixedType, fixedVersion);
-                                    result.TypesFixed++;
-                                }
-                            }
-                            if (old.Length > 2 && old[2] == "1")
-                            {
-                                // 存量补名：人物卡的角色名列还空着（本版新列）——只读 Parameter 块补上，不重扫声明区
-                                store.UpdateCardName(f, CardName.ReadCharacter(f));
-                                result.NamesFilled++;
-                            }
-                            if (old.Length > 4 && old[4] == "1")
-                            {
-                                // 存量 timeline 补齐：场景卡的长度还没读过（本版新口径）——读一次落表，供「按 timeline 长度」排序
-                                long oldCardId = long.Parse(old[5], CultureInfo.InvariantCulture);
-                                long oldImageEnd = long.Parse(old[6], CultureInfo.InvariantCulture);
-                                TimelineInfo cached = TimelineReader.Read(f, oldImageEnd);
-                                if (cached.Error == null)
-                                {
-                                    store.SaveCardTimeline(oldCardId, f, fi.Length, mtime, cached);
-                                    result.TimelineRead++;
-                                }
-                                else
-                                {
-                                    AddError(result, Path.GetFileName(f) + " timeline → " + cached.Error);
-                                }
-                            }
-                            continue;
-                        }
+                        sf.ModGuid = guid;
+                    }
+                    else
+                    {
+                        sf.IsNew = true;
+                    }
+                    list.Add(sf);
+                }
+                return list;
+            }
 
-                        CardInfo c;
-                        try
-                        {
-                            c = CardReader.Parse(f);
-                        }
-                        catch (Exception ex)
-                        {
-                            result.Failed++;
-                            AddError(result, Path.GetFileName(f) + " → " + ex.GetType().Name + ": " + ex.Message);
-                            continue;
-                        }
+            Dictionary<string, string[]> stamps = store.LoadCardStamps();
+            foreach (string f in files)
+            {
+                FileInfo fi = new FileInfo(f);
+                ScanFile sf = new ScanFile();
+                sf.Path = f;
+                sf.RootPath = root.path;
+                sf.Folder = FolderOf(f, rootNorm);
+                sf.Size = fi.Exists ? fi.Length : 0;
+                sf.Mtime = Store.StampOf(fi);
+                string[] old;
+                if (stamps.TryGetValue(f, out old))
+                {
+                    if (old.Length > 3)
+                    {
+                        sf.OldCardType = old[3];
+                    }
+                    if (old.Length > 5)
+                    {
+                        sf.CardId = ParseLong(old[5]);
+                    }
+                    if (old.Length > 6)
+                    {
+                        sf.ImageEnd = ParseLong(old[6]);
+                    }
+                }
+                else
+                {
+                    sf.IsNew = true;
+                }
+                list.Add(sf);
+            }
+            return list;
+        }
 
-                        if (string.IsNullOrEmpty(c.CardType))
-                        {
-                            result.NonCard++;
-                            continue;
-                        }
-                        if (c.CharaName == null && c.CardType.Contains("Chara"))
-                        {
-                            // 人物卡：角色名在数据区 Parameter 块（服装卡的名字已由 CardReader 从头段顺带读出）
-                            c.CharaName = CardName.ReadCharacter(f);
-                            result.NamesRead++;
-                        }
+        // [段2] 卡片侧执行
 
-                        byte[] thumb = null;
-                        if (thumbWidth > 0)
+        /// <summary>卡片侧一段的执行——按库根循环文件；段内步骤共享一次文件打开（阶段 2 起）。</summary>
+        private static void RunCardSegment(ScanRootState st, ScanSegment seg, bool force, int thumbWidth, int thumbQuality, ScanResult result, Action<string> log)
+        {
+            Store store = st.Store;
+            int i = 0;
+            int batch = 0;
+            int total = st.Files.Count;
+            store.Begin();
+            try
+            {
+                foreach (ScanFile f in st.Files)
+                {
+                    i = i + 1;
+                    result.StepDone = result.StepDone + 1;
+                    CardFileSession session = null;
+                    if (seg.Tier != ScanReadTier.None)
+                    {
+                        session = CardFileSession.Open(f.Path);
+                    }
+                    try
+                    {
+                        foreach (ScanStepDef step in seg.Steps)
                         {
-                            thumb = Thumbnail.FromCard(f, c.ImageEnd, thumbWidth, thumbQuality);
-                            if (thumb != null)
+                            if (!force && StepDone(st, f, step.Id))
                             {
-                                result.ThumbBytes += thumb.Length;
+                                result.Skipped = result.Skipped + 1;
+                                continue;
                             }
-                            else if (Thumbnail.LastError != null)
+                            bool ok = RunCardStep(store, st.Entry, f, session, step, thumbWidth, thumbQuality, result);
+                            if (ok)
                             {
-                                AddError(result, Path.GetFileName(f) + " 缩略图 → " + Thumbnail.LastError);
-                            }
-                        }
-
-                        string folder = FolderOf(f, rootNorm);
-                        long id = store.UpsertCard(c, root, folder, thumb, mtime);
-                        store.ReplaceCardRefs(id, c.ModRefs);
-                        result.Added++;
-                        result.RefEntries += c.ModRefs.Count;
-                        if (c.CardType == CardReader.SceneCardType)
-                        {
-                            // 场景卡：顺带读 timeline 长度落表（供「按 timeline 长度」排序——空轴也落表，判空看关键帧）
-                            TimelineInfo tl = TimelineReader.Read(f, c.ImageEnd);
-                            if (tl.Error == null)
-                            {
-                                store.SaveCardTimeline(id, f, fi.Length, mtime, tl);
-                                result.TimelineRead++;
+                                store.MarkScanStep(f.Path, step.Id, f.Size, f.Mtime);
+                                result.Added = result.Added + 1;
                             }
                             else
                             {
-                                AddError(result, Path.GetFileName(f) + " timeline → " + tl.Error);
+                                result.Failed = result.Failed + 1;
                             }
-                        }
-
-                        batchCount++;
-                        if (batchCount >= BatchSize)
-                        {
-                            store.Commit();
-                            store.Begin();
-                            batchCount = 0;
-                            if (log != null)
-                            {
-                                log("  已入库 " + result.Added + " / 枚举 " + i + " / 共 " + files.Count);
-                            }
-                        }
-
-                        if (log != null && i % 200 == 0)
-                        {
-                            log("  " + i + "/" + files.Count + "  " + c.FileName);
                         }
                     }
-                    store.Commit();
-                }
-                catch
-                {
-                    store.Rollback();
-                    throw;
-                }
-
-                // 清扫：本次枚举集合中已不存在的行——离线库 / 枚举失败 / 枚举为空一律不清扫（枚举失败不等于文件消失）
-                if (!enumFailed && files.Count > 0)
-                {
-                    HashSet<string> present = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-                    int goneCards = store.DeleteCardsMissingUnderRoot(root.path, present);
-                    if (goneCards > 0)
+                    finally
                     {
-                        result.Removed += goneCards;
-                        if (log != null)
+                        if (session != null)
                         {
-                            log("  已清理 " + goneCards + " 条已消失的卡片记录（磁盘上已不存在）");
+                            session.Dispose();
                         }
+                    }
+                    batch = batch + 1;
+                    if (batch >= BatchSize)
+                    {
+                        store.Commit();
+                        store.Begin();
+                        batch = 0;
+                    }
+                    if (log != null && i % 200 == 0)
+                    {
+                        log("  " + seg.Label + " " + i + "/" + total);
+                    }
+                }
+                store.Commit();
+            }
+            catch
+            {
+                store.Rollback();
+                throw;
+            }
+        }
+
+        /// <summary>卡片侧单步执行——返回 true 表示该步对这一文件已完成（可落完成戳）。</summary>
+        private static bool RunCardStep(Store store, RootEntry root, ScanFile f, CardFileSession session, ScanStepDef step, int thumbWidth, int thumbQuality, ScanResult result)
+        {
+            if (step.Id == "row")
+            {
+                f.CardId = store.UpsertCardRow(f.Path, Path.GetFileName(f.Path), f.Size, f.Mtime, root, f.Folder);
+                return f.CardId > 0;
+            }
+            if (step.Id == "head")
+            {
+                return StepCardHead(store, f, session, result);
+            }
+            if (step.Id == "refs")
+            {
+                return StepCardRefs(store, f, session, result);
+            }
+            if (step.Id == "name")
+            {
+                return StepCardName(store, f, result);
+            }
+            if (step.Id == "timeline")
+            {
+                return StepCardTimeline(store, f, result);
+            }
+            if (step.Id == "thumb")
+            {
+                return StepCardThumb(store, f, thumbWidth, thumbQuality, result);
+            }
+            if (step.Id == "coord" || step.Id == "detail" || step.Id == "scene")
+            {
+                return StepCardAnalysis(store, f, step.Id, result);
+            }
+            return false;
+        }
+
+        /// <summary>卡头段步——写卡类型 / 数据版本 / 图片区终点；非卡文件删行并计数。</summary>
+        private static bool StepCardHead(Store store, ScanFile f, CardFileSession session, ScanResult result)
+        {
+            string type;
+            string ver;
+            long imageEnd;
+            bool ok;
+            if (session != null)
+            {
+                ok = CardReader.ReadHeadInfo(session, out type, out ver, out imageEnd);
+            }
+            else
+            {
+                ok = CardReader.ReadHeadInfo(f.Path, out type, out ver, out imageEnd);
+            }
+            if (!ok)
+            {
+                f.HeadFailed = true;
+                AddError(result, Path.GetFileName(f.Path) + " 头段读取失败");
+                return false;
+            }
+            if (string.IsNullOrEmpty(type))
+            {
+                store.DeleteCardByPath(f.Path);
+                result.NonCard = result.NonCard + 1;
+                return true;
+            }
+            if (f.OldCardType != null && f.OldCardType.Length > 0 && f.OldCardType != type)
+            {
+                result.TypesFixed = result.TypesFixed + 1;
+            }
+            f.CardType = type;
+            f.ImageEnd = imageEnd;
+            f.HeadRead = true;
+            store.UpdateCardHead(f.Path, type, ver, imageEnd);
+            return true;
+        }
+
+        /// <summary>声明区步——取 mod 引用 + UAR 块数并落库。</summary>
+        private static bool StepCardRefs(Store store, ScanFile f, CardFileSession session, ScanResult result)
+        {
+            if (!EnsureHead(store, f, session, result))
+            {
+                return false;
+            }
+            if (f.CardId <= 0)
+            {
+                f.CardId = store.CardIdOf(f.Path);
+            }
+            int uar = 0;
+            List<ModRef> refs;
+            if (session != null)
+            {
+                refs = CardReader.CollectRefs(session, out uar);
+            }
+            else
+            {
+                refs = CardReader.CollectRefs(f.Path, f.ImageEnd, out uar);
+            }
+            store.ReplaceCardRefs(f.CardId, refs);
+            store.UpdateCardRefsMeta(f.Path, CountDistinct(refs), uar);
+            result.RefEntries += refs.Count;
+            return true;
+        }
+
+        /// <summary>角色名步——人物卡读 Parameter 的姓 / 名（其余卡型直接算完成）。</summary>
+        private static bool StepCardName(Store store, ScanFile f, ScanResult result)
+        {
+            if (!EnsureHead(store, f, null, result))
+            {
+                return false;
+            }
+            if (f.CardType == null || f.CardType.IndexOf("Chara", StringComparison.Ordinal) < 0)
+            {
+                return true;
+            }
+            string name = CardName.ReadCharacter(f.Path);
+            store.UpdateCardName(f.Path, name);
+            if (name != null)
+            {
+                if (f.IsNew)
+                {
+                    result.NamesRead = result.NamesRead + 1;
+                }
+                else
+                {
+                    result.NamesFilled = result.NamesFilled + 1;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>时间轴步——场景卡读 Timeline 条目（其余卡型直接算完成）。</summary>
+        private static bool StepCardTimeline(Store store, ScanFile f, ScanResult result)
+        {
+            if (!EnsureHead(store, f, null, result))
+            {
+                return false;
+            }
+            if (f.CardType != CardReader.SceneCardType)
+            {
+                return true;
+            }
+            if (f.CardId <= 0)
+            {
+                f.CardId = store.CardIdOf(f.Path);
+            }
+            TimelineInfo tl = TimelineReader.Read(f.Path, f.ImageEnd);
+            if (tl.Error != null)
+            {
+                AddError(result, Path.GetFileName(f.Path) + " timeline → " + tl.Error);
+                return false;
+            }
+            store.SaveCardTimeline(f.CardId, f.Path, f.Size, f.Mtime, tl);
+            result.TimelineRead = result.TimelineRead + 1;
+            return true;
+        }
+
+        /// <summary>缩略图步——图片区取图并缩为 JPEG。</summary>
+        private static bool StepCardThumb(Store store, ScanFile f, int thumbWidth, int thumbQuality, ScanResult result)
+        {
+            if (!EnsureHead(store, f, null, result))
+            {
+                return false;
+            }
+            if (thumbWidth <= 0)
+            {
+                return true;
+            }
+            byte[] thumb = Thumbnail.FromCard(f.Path, f.ImageEnd, thumbWidth, thumbQuality);
+            if (thumb == null)
+            {
+                AddError(result, Path.GetFileName(f.Path) + " 缩略图 → " + (Thumbnail.LastError ?? "未知原因"));
+                return false;
+            }
+            store.UpdateCardThumb(f.Path, thumb);
+            result.ThumbBytes += thumb.Length;
+            return true;
+        }
+
+        /// <summary>分项步（服装槽位 / 卡片分析 / 场景深度）——落库（兑现见阶段 3）。</summary>
+        private static bool StepCardAnalysis(Store store, ScanFile f, string stepId, ScanResult result)
+        {
+            if (!EnsureHead(store, f, null, result))
+            {
+                return false;
+            }
+            return CardAnalysis.Run(store, f, stepId, result);
+        }
+
+        /// <summary>按需前置——本步需要图片区终点时，若本轮尚未解析则就地读头段（顺序自由的关键）。</summary>
+        private static bool EnsureHead(Store store, ScanFile f, CardFileSession session, ScanResult result)
+        {
+            if (f.HeadRead && f.ImageEnd > 0)
+            {
+                return true;
+            }
+            if (f.HeadFailed)
+            {
+                return false;
+            }
+            if (!StepCardHead(store, f, session, result))
+            {
+                return false;
+            }
+            store.MarkScanStep(f.Path, "head", f.Size, f.Mtime);
+            return f.ImageEnd > 0;
+        }
+
+        // [段3] mod 侧执行
+
+        /// <summary>mod 侧一段的执行。</summary>
+        private static void RunModSegment(StoreHub hub, RootsConfig cfg, ScanRootState st, ScanSegment seg, bool force, ScanResult result, Action<string> log)
+        {
+            Store store = st.Store;
+            int i = 0;
+            int batch = 0;
+            int total = st.Files.Count;
+            store.Begin();
+            try
+            {
+                foreach (ScanFile f in st.Files)
+                {
+                    i = i + 1;
+                    result.StepDone = result.StepDone + 1;
+                    foreach (ScanStepDef step in seg.Steps)
+                    {
+                        if (!force && StepDone(st, f, step.Id))
+                        {
+                            result.Skipped = result.Skipped + 1;
+                            continue;
+                        }
+                        bool skip;
+                        bool ok = RunModStep(hub, cfg, store, st, f, step, force, result, out skip);
+                        if (ok)
+                        {
+                            store.MarkScanStep(f.Path, step.Id, f.Size, f.Mtime);
+                            result.Added = result.Added + 1;
+                        }
+                        else if (skip)
+                        {
+                            // 非 mod 文件——判定完也落戳（下次不再重复解析），单独计数出声
+                            store.MarkScanStep(f.Path, step.Id, f.Size, f.Mtime);
+                            result.NonMod = result.NonMod + 1;
+                        }
+                        else
+                        {
+                            result.Failed = result.Failed + 1;
+                        }
+                    }
+                    batch = batch + 1;
+                    if (batch >= BatchSize)
+                    {
+                        store.Commit();
+                        store.Begin();
+                        batch = 0;
+                    }
+                    if (log != null && i % 2000 == 0)
+                    {
+                        log("  " + seg.Label + " " + i + "/" + total);
+                    }
+                }
+                store.Commit();
+            }
+            catch
+            {
+                store.Rollback();
+                throw;
+            }
+        }
+
+        /// <summary>mod 侧单步执行——skip 为真表示该文件不是 mod（读不到 manifest.xml），已判定为跳过。</summary>
+        private static bool RunModStep(StoreHub hub, RootsConfig cfg, Store store, ScanRootState st, ScanFile f, ScanStepDef step, bool force, ScanResult result, out bool skip)
+        {
+            skip = false;
+            if (step.Id == "modrow")
+            {
+                ModInfo m = ZipModReader.Parse(f.Path);
+                if (m.ErrorKind == ModErrorKind.NotContainer || m.ErrorKind == ModErrorKind.NoManifest)
+                {
+                    // 读不到 manifest.xml 的文件——不是 mod，跳过（不算失败）
+                    skip = true;
+                    return false;
+                }
+                if (!string.IsNullOrEmpty(m.Error) || string.IsNullOrEmpty(m.Guid))
+                {
+                    AddError(result, m.FileName + " → " + (m.Error ?? "无 guid"));
+                    return false;
+                }
+                f.ModGuid = m.Guid;
+                store.UpsertModFile(m, st.Entry, f.Mtime);
+                store.FillModMeta(m);
+                return true;
+            }
+            if (step.Id == "composition")
+            {
+                if (string.IsNullOrEmpty(f.ModGuid))
+                {
+                    ModInfo again = ZipModReader.Parse(f.Path);
+                    if (again.ErrorKind == ModErrorKind.NotContainer || again.ErrorKind == ModErrorKind.NoManifest)
+                    {
+                        skip = true;
+                        return false;
+                    }
+                    f.ModGuid = again.Guid;
+                }
+                if (string.IsNullOrEmpty(f.ModGuid))
+                {
+                    AddError(result, Path.GetFileName(f.Path) + " → 无 guid，跳过组成建档");
+                    return false;
+                }
+                string error;
+                ModComposition rec = hub.AnalyzeComposition(cfg, f.ModGuid, force, out error);
+                if (rec == null)
+                {
+                    AddError(result, Path.GetFileName(f.Path) + " 组成 → " + error);
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // [段4] 收尾——清扫与索引
+
+        /// <summary>卡片侧清扫——删除磁盘上已消失的卡片行与步骤记录。</summary>
+        private static void CleanupCards(ScanRootState st, ScanResult result, Action<string> log)
+        {
+            if (st.EnumFailed || st.Files == null || st.Files.Count == 0)
+            {
+                return;
+            }
+            HashSet<string> present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ScanFile f in st.Files)
+            {
+                present.Add(f.Path);
+            }
+            st.Store.Begin();
+            try
+            {
+                int goneCards = st.Store.DeleteCardsMissingUnderRoot(st.Entry.path, present);
+                int goneSteps = st.Store.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
+                st.Store.Commit();
+                if (goneCards > 0 || goneSteps > 0)
+                {
+                    result.Removed += goneCards;
+                    if (log != null)
+                    {
+                        log("  已清理 " + goneCards + " 条已消失的卡片记录 · 步骤记录 " + goneSteps + " 条");
                     }
                 }
             }
-
-            ApplyOfflineMarks(hub, cfg, result, false, log);
-            result.Elapsed = watch.Elapsed;
-            return result;
+            catch
+            {
+                st.Store.Rollback();
+                throw;
+            }
         }
 
-        /// <summary>把扫描结果里的「该离线」库根落进配置并登记待办——同库只留一条待办（重复自动离线不叠加）；预置条目已在扫描侧排除。</summary>
+        /// <summary>mod 侧清扫——删除已消失的副本与旧版登记，并跨库重算受影响的 guid。</summary>
+        private static void CleanupMods(StoreHub hub, RootsConfig cfg, ScanRootState st, ScanResult result, Action<string> log)
+        {
+            if (st.EnumFailed || st.Files == null || st.Files.Count == 0)
+            {
+                return;
+            }
+            HashSet<string> present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ScanFile f in st.Files)
+            {
+                present.Add(f.Path);
+            }
+            st.Store.Begin();
+            List<string> goneGuids;
+            int goneOld;
+            int goneSteps;
+            try
+            {
+                goneGuids = st.Store.DeleteModFilesMissingUnderRoot(st.Entry.path, present);
+                goneOld = hub.Core.DeleteModOldMissingUnderRoot(st.Entry.path, present);
+                goneSteps = st.Store.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
+                st.Store.Commit();
+            }
+            catch
+            {
+                st.Store.Rollback();
+                throw;
+            }
+            foreach (string guid in goneGuids)
+            {
+                hub.RecomputeMod(cfg, guid);
+            }
+            if ((goneGuids.Count > 0 || goneOld > 0) && log != null)
+            {
+                result.Removed += goneGuids.Count + goneOld;
+                log("  已清理 " + goneGuids.Count + " 个 guid 的已消失副本记录 · 旧版登记 " + goneOld + " 条 · 步骤记录 " + goneSteps + " 条");
+            }
+        }
+
+        // [段5] 辅助
+
+        /// <summary>该文件该步骤是否已完成——size + mtime 双等且步骤记录在案。</summary>
+        private static bool StepDone(ScanRootState st, ScanFile f, string stepId)
+        {
+            if (st.Steps == null)
+            {
+                return false;
+            }
+            Dictionary<string, ScanStepRow> steps;
+            if (!st.Steps.TryGetValue(f.Path, out steps))
+            {
+                return false;
+            }
+            ScanStepRow rec;
+            if (!steps.TryGetValue(stepId, out rec))
+            {
+                return false;
+            }
+            return rec.Size == f.Size && string.Equals(rec.Mtime, f.Mtime, StringComparison.Ordinal);
+        }
+
+        private static int CountDistinct(List<ModRef> refs)
+        {
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ModRef r in refs)
+            {
+                if (!string.IsNullOrEmpty(r.ModId))
+                {
+                    seen.Add(r.ModId);
+                }
+            }
+            return seen.Count;
+        }
+
+        private static long ParseLong(string text)
+        {
+            long v;
+            if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out v))
+            {
+                return v;
+            }
+            return 0;
+        }
+
+        private static void Report(Action<string> log, string message)
+        {
+            if (log != null)
+            {
+                log(message);
+            }
+        }
+
+        /// <summary>把扫描结果里的「该离线」库根落进配置并登记待办——同库只留一条待办；预置条目已在扫描侧排除。</summary>
         private static void ApplyOfflineMarks(StoreHub hub, RootsConfig cfg, ScanResult result, bool isMods, Action<string> log)
         {
             if (result == null || result.OfflineRoots.Count == 0)
@@ -555,6 +1112,7 @@ namespace KKManager.Core
             string y = (b ?? "").Trim().TrimEnd('\\', '/');
             return string.Equals(x, y, StringComparison.OrdinalIgnoreCase);
         }
+
         /// <summary>库根是否落在本次扫描范围内——预置条目 = 锁定主库 / mod 缓存库槽位（不可离线的那些），其余为使用者添加的库根。</summary>
         private static bool InScope(RootEntry root, ScanScope scope, bool isMods)
         {

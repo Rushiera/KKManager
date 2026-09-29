@@ -196,27 +196,90 @@ namespace KKManager.Core
             return dot;
         }
 
-        /// <summary>只读卡片数据区头段（存量类型补正用——不扫声明区），读到返回 true。</summary>
-        public static bool ReadHeadOnly(string path, out string cardType, out string dataVersion)
+        /// <summary>只读卡片头段与图片区终点——卡类型 / 数据版本 / IEND 偏移；不扫声明区、不读数据区内容（卡头段步的唯一实现）。</summary>
+        public static bool ReadHeadInfo(string path, out string cardType, out string dataVersion, out long imageEnd)
         {
             cardType = null;
             dataVersion = null;
+            imageEnd = -1;
             if (!File.Exists(path))
             {
                 return false;
             }
             using (FileStream fs = File.OpenRead(path))
             {
-                long iend = FindPngEnd(fs, fs.Length);
-                if (iend <= 0 || fs.Length - iend < 5)
+                imageEnd = FindPngEnd(fs, fs.Length);
+                if (imageEnd <= 0 || fs.Length - imageEnd < 5)
                 {
                     return false;
                 }
-                fs.Position = iend;
+                fs.Position = imageEnd;
                 BinaryReader br = new BinaryReader(fs);
                 ReadCardHead(br, out cardType, out dataVersion);
                 return cardType != null;
             }
+        }
+
+        /// <summary>只读卡片头段与图片区终点（会话版——IEND 只定位一次，段内多步共用同一句柄）。</summary>
+        public static bool ReadHeadInfo(CardFileSession s, out string cardType, out string dataVersion, out long imageEnd)
+        {
+            cardType = null;
+            dataVersion = null;
+            imageEnd = -1;
+            if (s == null || !s.HeadOk)
+            {
+                return false;
+            }
+            cardType = s.CardType;
+            dataVersion = s.DataVersion;
+            imageEnd = s.ImageEnd;
+            return cardType != null;
+        }
+
+        /// <summary>扫数据区取 mod 引用与 UAR 标记计数（会话版——复用段内已打开的句柄）。</summary>
+        public static List<ModRef> CollectRefs(CardFileSession s, out int uarBlocks)
+        {
+            uarBlocks = 0;
+            CardInfo info = new CardInfo();
+            if (s == null)
+            {
+                return info.ModRefs;
+            }
+            info.FilePath = s.Path;
+            info.ImageEnd = s.ImageEnd;
+            if (info.ImageEnd <= 0)
+            {
+                return info.ModRefs;
+            }
+            CollectDeclaration(s.Stream, info);
+            uarBlocks = info.UarBlocks;
+            return info.ModRefs;
+        }
+
+        /// <summary>扫数据区取 mod 引用（声明区 ModID）与 UAR 标记计数——只读，须给图片区终点（声明区步的唯一实现）。</summary>
+        public static List<ModRef> CollectRefs(string path, long imageEnd, out int uarBlocks)
+        {
+            uarBlocks = 0;
+            CardInfo info = new CardInfo();
+            info.FilePath = path;
+            info.ImageEnd = imageEnd;
+            if (!File.Exists(path) || imageEnd <= 0)
+            {
+                return info.ModRefs;
+            }
+            using (FileStream fs = File.OpenRead(path))
+            {
+                CollectDeclaration(fs, info);
+            }
+            uarBlocks = info.UarBlocks;
+            return info.ModRefs;
+        }
+
+        /// <summary>只读卡片数据区头段（存量类型补正用——不扫声明区），读到返回 true。</summary>
+        public static bool ReadHeadOnly(string path, out string cardType, out string dataVersion)
+        {
+            long imageEnd;
+            return ReadHeadInfo(path, out cardType, out dataVersion, out imageEnd);
         }
 
         /// <summary>定位 PNG 的 IEND 结束偏移（图片区终点）；未找到返回 -1。</summary>
@@ -279,26 +342,36 @@ namespace KKManager.Core
                     remaining -= read;
                     int total = carry + read;
 
-                    for (int i = 0; i <= total - ModIdAnchor.Length; i++)
+                    // 标记定位用 Span.IndexOf（SIMD 向量化）——逐字节循环在 2 MB × 每张卡上是 CPU 主成本
+                    Span<byte> span = buf.AsSpan(0, total);
+                    int scanFrom = 0;
+                    while (scanFrom <= total - ModIdAnchor.Length)
                     {
-                        if (buf[i] != ModIdAnchor[0] || !MatchAt(buf, i, ModIdAnchor))
+                        int hit = span.Slice(scanFrom).IndexOf(ModIdAnchor);
+                        if (hit < 0)
                         {
-                            continue;
+                            break;
                         }
-                        int p = i + ModIdAnchor.Length;
+                        int abs = scanFrom + hit;
+                        int p = abs + ModIdAnchor.Length;
                         string modId = ReadMsgPackString(buf, ref p, total);
                         if (modId != null && modId.Length > 0)
                         {
                             info.ModRefs.Add(new ModRef { ModId = modId });
                         }
+                        scanFrom = abs + 1;
                     }
 
-                    for (int i = 0; i <= total - UarMark.Length; i++)
+                    int uarFrom = 0;
+                    while (uarFrom <= total - UarMark.Length)
                     {
-                        if (buf[i] == UarMark[0] && MatchAt(buf, i, UarMark))
+                        int hit = span.Slice(uarFrom).IndexOf(UarMark);
+                        if (hit < 0)
                         {
-                            info.UarBlocks++;
+                            break;
                         }
+                        info.UarBlocks++;
+                        uarFrom = uarFrom + hit + 1;
                     }
 
                     carry = Math.Min(63, total);

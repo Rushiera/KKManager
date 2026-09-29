@@ -38,6 +38,7 @@ namespace KKManager
             bool open = rest.Remove("--open");
             bool browseDebug = rest.Remove("--browse-debug");
             bool force = rest.Remove("--force");
+            string stepsArg = Take(rest, "--steps");
 
             switch (cmd)
             {
@@ -62,13 +63,15 @@ namespace KKManager
                 case "thumb":
                     return ThumbCommand(rest, thumb, quality);
                 case "scan-mods":
-                    return ScanModsCommand(db, rest, force);
+                    return ScanModsCommand(db, rest, force, stepsArg);
                 case "scan-cards":
-                    return ScanCardsCommand(db, rest, force, thumb, quality);
+                    return ScanCardsCommand(db, rest, force, thumb, quality, stepsArg);
                 case "scan-main":
-                    return ScanScopeCommand(db, force, ScanScope.Preset, thumb, quality);
+                    return ScanScopeCommand(db, force, ScanScope.Preset, thumb, quality, stepsArg);
                 case "scan-extra":
-                    return ScanScopeCommand(db, force, ScanScope.Extra, thumb, quality);
+                    return ScanScopeCommand(db, force, ScanScope.Extra, thumb, quality, stepsArg);
+                case "scan-plan":
+                    return ScanPlanCommand(db, rest);
                 case "stats":
                     return StatsCommand(db);
                 case "authors":
@@ -133,6 +136,7 @@ namespace KKManager
             Console.WriteLine("  scan-cards [目录...]                  扫描卡片库（无目录则用已配置的库根）");
             Console.WriteLine("  scan-main                             扫描主要库（预置条目——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio）");
             Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
+            Console.WriteLine("  scan-plan [set <顺序> [勾选]]          看 / 设扫描步骤（顺序即执行顺序；同侧同档相邻步合并为一次读取）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
             Console.WriteLine("  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）");
@@ -155,7 +159,7 @@ namespace KKManager
             Console.WriteLine("  set-game-root <路径>                  设置游戏根（预置主库条目路径随它重派生）");
             Console.WriteLine("  serve [--port 8539] [--open] [--browse-debug]  启动本地面板（--browse-debug 打印浏览框调试日志）");
             Console.WriteLine();
-            Console.WriteLine("  通用: --db <路径>（默认 exe 目录下 data/kkmanager.db）· --force 全量重扫");
+            Console.WriteLine("  通用: --db <路径>（默认 exe 目录下 data/kkmanager.db）· --force 全量重扫 · --steps a,b,c 只跑这些步骤");
             Console.WriteLine("  级别: 1=主库（游戏读取）· 2=缓存库（可一键搬入主库）· 3=冷冻库（只读）");
             Console.WriteLine("  规则: 预置主库（mods / female / coordinate / Studio）锁定——不可改不可删 · 缓存库槽位不可删（路径与勾选归使用者）· 新增 mod 库根固定冷冻库、卡片库根固定附加库");
         }
@@ -691,7 +695,7 @@ namespace KKManager
             return 0;
         }
 
-        private static int ScanModsCommand(string db, List<string> dirs, bool force)
+        private static int ScanModsCommand(string db, List<string> dirs, bool force, string steps)
         {
             using (StoreHub hub = new StoreHub(db))
             {
@@ -701,10 +705,10 @@ namespace KKManager
                 RootsConfig cfg = BuildConfig(hub, dirs, true);
                 Console.WriteLine("库: " + hub.CorePath);
                 System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
-                ScanResult r = Scanner.ScanMods(hub, cfg, force, m => Console.WriteLine(m));
+                ScanResult r = Scanner.ScanMods(hub, cfg, null, ScanScope.All, force, BuildPlan(hub, steps), m => Console.WriteLine(m));
                 Console.WriteLine();
                 Console.WriteLine("mod 扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
-                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped + "  失败 " + r.Failed
+                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped + "  非 mod " + r.NonMod + "  失败 " + r.Failed
                     + "  清理 " + r.Removed);
                 foreach (string e in r.Errors)
                 {
@@ -714,7 +718,7 @@ namespace KKManager
             return 0;
         }
 
-        private static int ScanCardsCommand(string db, List<string> dirs, bool force, int thumb, int quality)
+        private static int ScanCardsCommand(string db, List<string> dirs, bool force, int thumb, int quality, string steps)
         {
             using (StoreHub hub = new StoreHub(db))
             {
@@ -724,11 +728,11 @@ namespace KKManager
                 RootsConfig cfg = BuildConfig(hub, dirs, false);
                 Console.WriteLine("库: " + hub.CorePath);
                 System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
-                ScanResult r = Scanner.ScanCards(hub, cfg, force, thumb, quality, m => Console.WriteLine(m));
+                ScanResult r = Scanner.ScanCards(hub, cfg, null, ScanScope.All, force, thumb, quality, BuildPlan(hub, steps), m => Console.WriteLine(m));
                 Console.WriteLine();
                 Console.WriteLine("卡片扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
-                    + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
+                    + "  非卡 " + r.NonCard + "  非 mod " + r.NonMod + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  引用条目 " + r.RefEntries + "  缩略图 " + (r.ThumbBytes / 1024.0 / 1024.0).ToString("F1") + " MB");
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 Console.WriteLine("  卡类型补正 " + r.TypesFixed);
@@ -741,7 +745,7 @@ namespace KKManager
             return 0;
         }
         /// <summary>按范围扫描（面板「扫描主要 / 追加库扫描」的 CLI 通道）——mod 与卡片两轮，结果合并展示；离线库一律跳过。</summary>
-        private static int ScanScopeCommand(string db, bool force, ScanScope scope, int thumb, int quality)
+        private static int ScanScopeCommand(string db, bool force, ScanScope scope, int thumb, int quality, string steps)
         {
             using (StoreHub hub = new StoreHub(db))
             {
@@ -753,13 +757,11 @@ namespace KKManager
                     ? "范围: 主要库——预置条目（mod 主库 / 缓存库槽位 + 卡片 female / coordinate / Studio）"
                     : "范围: 追加库——使用者添加的库根（mod 冷冻库 + 卡片附加库）");
                 System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
-                ScanResult r = new ScanResult();
-                r.Merge(Scanner.ScanMods(hub, disk, null, scope, force, m => Console.WriteLine(m)));
-                r.Merge(Scanner.ScanCards(hub, disk, null, scope, force, thumb, quality, m => Console.WriteLine(m)));
+                ScanResult r = Scanner.ScanAll(hub, disk, null, scope, force, thumb, quality, BuildPlan(hub, steps), m => Console.WriteLine(m));
                 Console.WriteLine();
                 Console.WriteLine("扫描完成：" + watch.Elapsed.TotalSeconds.ToString("F1") + " 秒");
                 Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped
-                    + "  非卡 " + r.NonCard + "  失败 " + r.Failed + "  清理 " + r.Removed);
+                    + "  非卡 " + r.NonCard + "  非 mod " + r.NonMod + "  失败 " + r.Failed + "  清理 " + r.Removed);
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 Console.WriteLine("  卡类型补正 " + r.TypesFixed);
                 Console.WriteLine("  timeline 读取 " + r.TimelineRead);
@@ -769,6 +771,76 @@ namespace KKManager
                 }
             }
             return 0;
+        }
+
+        /// <summary>构造扫描计划——steps 非空时以它为顺序与勾选（并落盘），否则读已保存的（全局一套）。</summary>
+        private static ScanPlan BuildPlan(StoreHub hub, string steps)
+        {
+            if (!string.IsNullOrEmpty(steps))
+            {
+                ScanPlan given = ScanPlanCatalog.Load(steps, steps);
+                hub.Core.SetSetting(ScanPlanCatalog.OrderKey, ScanPlanCatalog.OrderText(given));
+                hub.Core.SetSetting(ScanPlanCatalog.OnKey, ScanPlanCatalog.OnText(given));
+                return given;
+            }
+            string order = hub.Core.GetSetting(ScanPlanCatalog.OrderKey);
+            string on = hub.Core.GetSetting(ScanPlanCatalog.OnKey);
+            return ScanPlanCatalog.Load(order, on);
+        }
+
+        /// <summary>扫描计划——列出步骤与当前配置；`scan-plan set &lt;顺序&gt; [勾选]` 落盘（全局一套）。</summary>
+        private static int ScanPlanCommand(string db, List<string> rest)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                Console.WriteLine("库: " + hub.CorePath);
+                if (rest.Count > 0 && rest[0] == "set")
+                {
+                    string order = rest.Count > 1 ? rest[1] : "";
+                    string on = rest.Count > 2 ? rest[2] : order;
+                    ScanPlan given = ScanPlanCatalog.Load(order, on);
+                    hub.Core.SetSetting(ScanPlanCatalog.OrderKey, ScanPlanCatalog.OrderText(given));
+                    hub.Core.SetSetting(ScanPlanCatalog.OnKey, ScanPlanCatalog.OnText(given));
+                    Console.WriteLine("扫描计划已保存：");
+                    PrintPlan(given);
+                    return 0;
+                }
+                PrintPlan(ScanPlanCatalog.Load(hub.Core.GetSetting(ScanPlanCatalog.OrderKey), hub.Core.GetSetting(ScanPlanCatalog.OnKey)));
+            }
+            return 0;
+        }
+
+        /// <summary>打印扫描计划——步骤（勾选 / 必选 / 灰置）+ 切出的段。</summary>
+        private static void PrintPlan(ScanPlan plan)
+        {
+            Console.WriteLine("步骤（顺序即执行顺序）：");
+            foreach (string id in plan.Order)
+            {
+                ScanStepDef d = ScanPlanCatalog.Find(id);
+                if (d == null)
+                {
+                    continue;
+                }
+                string mark;
+                if (d.Grayed)
+                {
+                    mark = "（灰置）";
+                }
+                else if (plan.IsOn(id))
+                {
+                    mark = "[x]";
+                }
+                else
+                {
+                    mark = "[ ]";
+                }
+                Console.WriteLine("  " + mark + " " + id + " —— " + d.Name + (d.Required ? "（必选）" : "") + " · " + d.Note);
+            }
+            Console.WriteLine("段（同段共用一次文件打开）：");
+            foreach (ScanSegment seg in plan.Segments())
+            {
+                Console.WriteLine("  " + (seg.Mods ? "mod" : "卡片") + " / 档 " + (int)seg.Tier + "：" + seg.Label);
+            }
         }
 
         /// <summary>命令行给了目录则临时按级别 1 构造配置，否则用已保存的库根配置。</summary>

@@ -591,6 +591,23 @@
   </div>
 </div>
 
+<div class="overlay hidden" id="ovScanPlan">
+  <div class="modal wide">
+    <header><b>扫描配置</b> <span class="dim">必选项锁定 · 分项默认不选 · 顺序即执行顺序</span></header>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:8px">同一侧、同一读取档的相邻步骤会合并成一次文件读取——把想一起做的步骤排在一起即可减少打开次数。顺序与勾选全局一套，追加库扫描同样适用。</div>
+      <div id="spList"></div>
+    </div>
+    <footer>
+      <span class="dim" id="spFoot"></span>
+      <span class="grow"></span>
+      <button id="btnSpReset">恢复默认</button>
+      <button class="primary" id="btnSpRun">开始扫描</button>
+      <button id="btnSpClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 let state = { tab:'cards', page:1, folder:null, root:null, cardSort:'mtime', cardDesc:true, cardSortHint:'', roots:{gameRoot:'',modRoots:[],cardRoots:[]}, refs:[], cards:[], rendered:0, batch:120, foldFolders:false,
@@ -2682,8 +2699,60 @@ function renderModCards(){
 
 /* ---------- 扫描 ---------- */
 const SCAN_TARGET = {main:'主要库', extra:'追加库', mods:'mod 库', cards:'卡片库'};
-async function startScan(target){
-  const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({target})});
+/* 扫描配置窗——必选项锁定、分项默认不选、顺序可调（全局一套） */
+let spState = { target:'main', steps:[], order:[], on:[] };
+async function openScanPlan(target){
+  try{
+    const d = await api('/api/scan/plan');
+    if(!d || !d.steps){ alert('读取扫描计划失败'); return; }
+    spState.target = target;
+    spState.steps = d.steps;
+    spState.order = d.order || [];
+    spState.on = d.on || [];
+    renderScanPlan();
+    $('ovScanPlan').classList.remove('hidden');
+  }catch(e){ alert('读取扫描计划失败：' + e.message); }
+}
+function spDef(id){
+  for(const s of spState.steps){ if(s.id === id) return s; }
+  return null;
+}
+function renderScanPlan(){
+  const rows = spState.order.map(id => {
+    const s = spDef(id);
+    if(!s) return '';
+    const tag = s.grayed ? '灰置' : (s.required ? '必选' : (s.defaultOn ? '可选' : '分项'));
+    const side = s.mods ? 'mod' : '卡片';
+    let box;
+    if(s.grayed) box = '<input type="checkbox" disabled title="本轮占位，不参与扫描">';
+    else if(s.required) box = '<input type="checkbox" checked disabled title="必选，不可取消">';
+    else box = `<input type="checkbox" class="spOn" data-id="${id}"${spState.on.indexOf(id) >= 0 ? ' checked' : ''}>`;
+    return `<div class="spRow" data-id="${id}" style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)">
+      <span class="dim" style="width:64px;font-size:11px;white-space:nowrap">${tag}·${side}</span>
+      ${box}
+      <span style="flex:1;${s.grayed ? 'opacity:.5' : ''}">${esc(s.name)}<span class="dim" style="font-size:11px"> · ${esc(s.note)}</span></span>
+      <button class="spUp" data-id="${id}" style="padding:1px 7px;font-size:12px" title="上移">↑</button>
+      <button class="spDown" data-id="${id}" style="padding:1px 7px;font-size:12px" title="下移">↓</button>
+    </div>`;
+  }).join('');
+  $('spList').innerHTML = rows;
+  const onCount = spState.order.filter(id => { const s = spDef(id); return s && !s.grayed && (s.required || spState.on.indexOf(id) >= 0); }).length;
+  $('spFoot').textContent = `启用 ${onCount} / ${spState.order.length} 步`;
+}
+function spMove(id, up){
+  const at = spState.order.indexOf(id);
+  if(at < 0) return;
+  const to = up ? at - 1 : at + 1;
+  if(to < 0 || to >= spState.order.length) return;
+  const t = spState.order[to];
+  spState.order[to] = spState.order[at];
+  spState.order[at] = t;
+  renderScanPlan();
+}
+async function startScan(target, plan){
+  const body = { target };
+  if(plan){ body.order = plan.order; body.on = plan.on; }
+  const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   if(!r.ok){ alert(r.error || '启动失败'); return; }
   $('scanFloat').classList.remove('hidden');
   pollScan();
@@ -2694,14 +2763,18 @@ async function pollScan(){
   const tick = async () => {
     const s = await api('/api/scan/status');
     const total = s.seen || 0;
-    const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.failed||0);
+    const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.nonMod||0) + (s.failed||0);
     $('scanInfo').textContent = `${s.running?'进行中':'已结束'} · ${SCAN_TARGET[s.target]||s.target||''} · 级别 ${s.currentTier||'-'} · ${s.message||''}`
       + ((s.removed||0) > 0 ? ` · 清理 ${s.removed} 条已消失记录` : '')
       + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '')
       + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '')
-      + ((s.timelineRead||0) > 0 ? ` · timeline 读 ${s.timelineRead}` : '');
-    $('scanStatus').textContent = s.running ? `扫描中 ${done} / ${total}` : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
-    $('scanBar').style.width = total ? Math.min(100, done*100/total) + '%' : '0';
+      + ((s.timelineRead||0) > 0 ? ` · timeline 读 ${s.timelineRead}` : '')
+      + ((s.nonMod||0) > 0 ? ` · 非 mod 文件 ${s.nonMod}` : '');
+    $('scanStatus').textContent = s.running
+      ? ((s.stepIndex||0) > 0 ? `步骤 ${s.stepIndex}/${s.stepCount} · ${s.stepName||''} ${s.stepDone||0} / ${s.stepTotal||0}` : `扫描中 ${done} / ${total}`)
+      : (s.finishedAt ? '上次结束 ' + s.finishedAt : '');
+    const barBase = (s.stepTotal||0) > 0 ? (s.stepDone||0) * 100 / s.stepTotal : (total ? done * 100 / total : 0);
+    $('scanBar').style.width = barBase ? Math.min(100, barBase) + '%' : '0';
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
     $('btnScanMain').disabled = s.running;
     $('btnScanExtra').disabled = s.running;
@@ -2763,8 +2836,33 @@ $('btnSortChara').onclick = () => setCardSort('chara');
 $('btnSortTimeline').onclick = () => setCardSort('timeline');
 $('btnPickGameRoot').onclick = pickGameRoot;
 $('gameRoot').addEventListener('change', () => { syncMainRoots().catch(e => alert('刷新级别 1 路径失败：' + e.message)); });
-$('btnScanMain').onclick = () => startScan('main');
-$('btnScanExtra').onclick = () => startScan('extra');
+$('btnScanMain').onclick = () => openScanPlan('main');
+$('btnScanExtra').onclick = () => openScanPlan('extra');
+$('btnSpClose').onclick = () => $('ovScanPlan').classList.add('hidden');
+$('btnSpReset').onclick = () => {
+  spState.order = spState.steps.map(s => s.id);
+  spState.on = spState.steps.filter(s => s.defaultOn && !s.required && !s.grayed).map(s => s.id);
+  renderScanPlan();
+};
+$('btnSpRun').onclick = () => {
+  $('ovScanPlan').classList.add('hidden');
+  startScan(spState.target, { order: spState.order.join(','), on: spState.on.join(',') });
+};
+$('spList').addEventListener('click', e => {
+  const up = e.target.closest('button.spUp');
+  if(up){ spMove(up.dataset.id, true); return; }
+  const dn = e.target.closest('button.spDown');
+  if(dn){ spMove(dn.dataset.id, false); }
+});
+$('spList').addEventListener('change', e => {
+  const cb = e.target;
+  if(!cb.classList.contains('spOn')) return;
+  const id = cb.dataset.id;
+  const at = spState.on.indexOf(id);
+  if(cb.checked){ if(at < 0) spState.on.push(id); }
+  else if(at >= 0){ spState.on.splice(at, 1); }
+  renderScanPlan();
+});
 $('btnScanFloatHide').onclick = () => $('scanFloat').classList.add('hidden');
 $('btnFoldFolders').onclick = () => {
   state.foldFolders = !state.foldFolders;

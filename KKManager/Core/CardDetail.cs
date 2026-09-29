@@ -717,35 +717,67 @@ namespace KKManager.Core
             {
                 int total = carry + read;
                 int limit = total - maxLen;
-                for (int i = 0; i <= limit; i = i + 1)
+                if (limit < 0)
                 {
-                    if (buf[i] == PngSig[0] && MatchAt(buf, i, PngSig))
+                    carry = maxLen - 1;
+                    if (carry > total)
                     {
-                        if (pngHits.Count < MaxPng)
-                        {
-                            pngHits.Add(baseOffset + i);
-                        }
-                        continue;
+                        carry = total;
                     }
-                    if (buf[i] == UarMark[0] && uarHit < 0 && MatchAt(buf, i, UarMark))
+                    Array.Copy(buf, total - carry, buf, 0, carry);
+                    continue;
+                }
+                // 标记定位走 Span.IndexOf（SIMD）——逐字节 × 5 种标记在全数据区上是 CPU 主成本
+                Span<byte> span = buf.AsSpan(0, limit + 1);
+                int searchFrom = 0;
+                while (searchFrom <= limit)
+                {
+                    int hit = span.Slice(searchFrom).IndexOf(PngSig);
+                    if (hit < 0)
                     {
-                        uarHit = baseOffset + i;
-                        continue;
+                        break;
                     }
-                    if (buf[i] == LstInfoMark[0] && lstHit < 0 && MatchAt(buf, i, LstInfoMark))
+                    int abs = searchFrom + hit;
+                    if (pngHits.Count < MaxPng)
                     {
-                        lstHit = baseOffset + i;
-                        continue;
+                        pngHits.Add(baseOffset + abs);
                     }
-                    if (buf[i] == KkxMark[0] && MatchAt(buf, i, KkxMark))
+                    searchFrom = abs + 1;
+                }
+                if (uarHit < 0)
+                {
+                    int hit = span.IndexOf(UarMark);
+                    if (hit >= 0)
                     {
-                        kkxHits.Add(baseOffset + i);
-                        continue;
+                        uarHit = baseOffset + hit;
                     }
-                    if (buf[i] == PartsMark[0] && partsHit < 0 && MatchAt(buf, i, PartsMark))
+                }
+                if (lstHit < 0)
+                {
+                    int hit = span.IndexOf(LstInfoMark);
+                    if (hit >= 0)
                     {
-                        partsHit = baseOffset + i;
-                        continue;
+                        lstHit = baseOffset + hit;
+                    }
+                }
+                searchFrom = 0;
+                while (searchFrom <= limit)
+                {
+                    int hit = span.Slice(searchFrom).IndexOf(KkxMark);
+                    if (hit < 0)
+                    {
+                        break;
+                    }
+                    int abs = searchFrom + hit;
+                    kkxHits.Add(baseOffset + abs);
+                    searchFrom = abs + 1;
+                }
+                if (partsHit < 0)
+                {
+                    int hit = span.IndexOf(PartsMark);
+                    if (hit >= 0)
+                    {
+                        partsHit = baseOffset + hit;
                     }
                 }
                 carry = maxLen - 1;

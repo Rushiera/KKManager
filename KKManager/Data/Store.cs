@@ -604,6 +604,41 @@ namespace KKManager.Data
         public string CreatedAt { get; set; }
     }
 
+    /// <summary>一条「已完成步骤」记录——扫描跳步判据 = size + mtime 双等。</summary>
+    public class ScanStepRow
+    {
+        /// <summary>步骤 id（如 row / head / thumb / refs / name / timeline / coord / detail / scene / modrow / composition）。</summary>
+        public string Step { get; set; }
+
+        /// <summary>登记时的文件字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>登记时的文件修改时间戳（UTC 文本）。</summary>
+        public string Mtime { get; set; }
+    }
+
+    /// <summary>一份卡片分项分析（服装槽位 / 卡片分析 / 场景深度）——data 为 JSON 文本，前端按 kind 反序列化后复用原渲染。</summary>
+    public class CardAnalysisRow
+    {
+        /// <summary>分析类型（coord / detail / scene）。</summary>
+        public string Kind { get; set; }
+
+        /// <summary>读时的卡片文件路径。</summary>
+        public string FilePath { get; set; }
+
+        /// <summary>读时的文件字节数（失效判据之一）。</summary>
+        public long Size { get; set; }
+
+        /// <summary>读时的修改时间戳（失效判据之一）。</summary>
+        public string Mtime { get; set; }
+
+        /// <summary>分析结果 JSON。</summary>
+        public string Data { get; set; }
+
+        /// <summary>落库时刻。</summary>
+        public string ReadAt { get; set; }
+    }
+
     /// <summary>SQLite 存储——库根配置 / mod / 卡片 / 引用 / 设置。</summary>
     public class Store : IDisposable
     {
@@ -763,6 +798,14 @@ namespace KKManager.Data
                              card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
                              has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
                              keyframes INTEGER, xml_length INTEGER, hit_stage TEXT, read_at TEXT, error TEXT)");
+            Exec(@"CREATE TABLE IF NOT EXISTS scan_state(
+                             file_path TEXT NOT NULL, step TEXT NOT NULL,
+                             size INTEGER, mtime TEXT, done_at TEXT,
+                             PRIMARY KEY(file_path, step))");
+            Exec(@"CREATE TABLE IF NOT EXISTS card_analysis(
+                             card_id INTEGER NOT NULL, kind TEXT NOT NULL,
+                             file_path TEXT, size INTEGER, mtime TEXT, data TEXT, read_at TEXT,
+                             PRIMARY KEY(card_id, kind))");
             if (_isCore)
             {
                 Exec("CREATE INDEX IF NOT EXISTS ix_mod_tier ON mod(tier)");
@@ -820,6 +863,8 @@ namespace KKManager.Data
         {
             Exec("DROP TABLE IF EXISTS card_mod");
             Exec("DROP TABLE IF EXISTS card");
+            Exec("DROP TABLE IF EXISTS card_analysis");
+            Exec("DROP TABLE IF EXISTS scan_state");
             Exec("DROP TABLE IF EXISTS mod_file");
             if (_isCore)
             {
@@ -1002,7 +1047,7 @@ namespace KKManager.Data
         {
             var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
             using (SqliteCommand cmd = NewCommand(@"SELECT c.file_path, c.size, c.mtime,
-                             (c.chara_name IS NULL AND c.card_type LIKE '%Chara%'), c.card_type,
+                             (c.chara_name IS NULL AND IFNULL(c.card_type,'') LIKE '%Chara%'), c.card_type,
                              CASE WHEN c.card_type = 'sd' AND (t.card_id IS NULL OR t.size <> c.size OR IFNULL(t.mtime,'') <> IFNULL(c.mtime,'')) THEN 1 ELSE 0 END,
                              c.id, c.image_end
                              FROM card c LEFT JOIN card_timeline t ON t.card_id = c.id"))
@@ -1042,6 +1087,74 @@ namespace KKManager.Data
             {
                 cmd.Parameters.AddWithValue("$type", cardType == null ? (object)DBNull.Value : cardType);
                 cmd.Parameters.AddWithValue("$ver", dataVersion == null ? (object)DBNull.Value : dataVersion);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>扫描「卡片行」步——只写文件与归属（不碰画像字段与缩略图）；已存在的行只刷新 size / mtime / 归属。返回卡片 id。</summary>
+        public long UpsertCardRow(string filePath, string fileName, long size, string mtime, RootEntry root, string folder)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO card(file_path,file_name,size,mtime,tier,root_path,folder,scan_time)
+                     VALUES($path,$file,$size,$mtime,$tier,$root,$folder,$now)
+                     ON CONFLICT(file_path) DO UPDATE SET
+                       file_name=excluded.file_name, size=excluded.size, mtime=excluded.mtime,
+                       tier=excluded.tier, root_path=excluded.root_path, folder=excluded.folder,
+                       scan_time=excluded.scan_time"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.Parameters.AddWithValue("$file", fileName);
+                cmd.Parameters.AddWithValue("$size", size);
+                cmd.Parameters.AddWithValue("$mtime", mtime ?? "");
+                cmd.Parameters.AddWithValue("$tier", root.tier);
+                cmd.Parameters.AddWithValue("$root", root.path);
+                cmd.Parameters.AddWithValue("$folder", folder ?? "");
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+
+            using (SqliteCommand cmd = NewCommand("SELECT id FROM card WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>扫描「卡头段」步——写卡类型 / 数据版本 / 图片区终点。</summary>
+        public void UpdateCardHead(string filePath, string cardType, string dataVersion, long imageEnd)
+        {
+            using (SqliteCommand cmd = NewCommand("UPDATE card SET card_type=$type, data_version=$ver, image_end=$img WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$type", cardType == null ? (object)DBNull.Value : cardType);
+                cmd.Parameters.AddWithValue("$ver", dataVersion == null ? (object)DBNull.Value : dataVersion);
+                cmd.Parameters.AddWithValue("$img", imageEnd);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>扫描「声明区」步——刷新引用计数与 UAR 块数（引用行由 ReplaceCardRefs 另行替换）。</summary>
+        public void UpdateCardRefsMeta(string filePath, int modCount, int uarBlocks)
+        {
+            using (SqliteCommand cmd = NewCommand("UPDATE card SET mod_count=$cnt, uar_blocks=$uar WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$cnt", modCount);
+                cmd.Parameters.AddWithValue("$uar", uarBlocks);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>扫描「缩略图」步——写缩略图（thumb 为 null 表示本次没生成，保留原值不清空）。</summary>
+        public void UpdateCardThumb(string filePath, byte[] thumb)
+        {
+            if (thumb == null)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("UPDATE card SET thumb=$thumb WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$thumb", thumb);
                 cmd.Parameters.AddWithValue("$path", filePath);
                 cmd.ExecuteNonQuery();
             }
@@ -1145,6 +1258,107 @@ namespace KKManager.Data
                 cmd.ExecuteNonQuery();
             }
         }
+        /// <summary>载入「已完成步骤」索引——file_path → （步骤 id → 记录）；扫描按 step 跳步判定用（判据 = size + mtime 双等）。</summary>
+        public Dictionary<string, Dictionary<string, ScanStepRow>> LoadScanSteps()
+        {
+            var map = new Dictionary<string, Dictionary<string, ScanStepRow>>(StringComparer.OrdinalIgnoreCase);
+            using (SqliteCommand cmd = NewCommand("SELECT file_path, step, size, mtime FROM scan_state"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    string path = r.IsDBNull(0) ? "" : r.GetString(0);
+                    string step = r.IsDBNull(1) ? "" : r.GetString(1);
+                    if (path.Length == 0 || step.Length == 0)
+                    {
+                        continue;
+                    }
+                    Dictionary<string, ScanStepRow> steps;
+                    if (!map.TryGetValue(path, out steps))
+                    {
+                        steps = new Dictionary<string, ScanStepRow>(StringComparer.Ordinal);
+                        map[path] = steps;
+                    }
+                    ScanStepRow row = new ScanStepRow();
+                    row.Step = step;
+                    row.Size = r.IsDBNull(2) ? 0 : r.GetInt64(2);
+                    row.Mtime = r.IsDBNull(3) ? "" : r.GetString(3);
+                    steps[step] = row;
+                }
+            }
+            return map;
+        }
+
+        /// <summary>登记一步完成（同文件同步骤覆盖式更新——文件变了旧记录自然失配，不必先删）。</summary>
+        public void MarkScanStep(string filePath, string step, long size, string mtime)
+        {
+            if (string.IsNullOrEmpty(filePath) || string.IsNullOrEmpty(step))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO scan_state(file_path,step,size,mtime,done_at)
+                     VALUES($path,$step,$size,$mtime,$now)
+                     ON CONFLICT(file_path,step) DO UPDATE SET
+                       size=excluded.size, mtime=excluded.mtime, done_at=excluded.done_at"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.Parameters.AddWithValue("$step", step);
+                cmd.Parameters.AddWithValue("$size", size);
+                cmd.Parameters.AddWithValue("$mtime", mtime ?? "");
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>清扫某库根下已从磁盘消失文件的步骤记录（present 为空时不清扫——枚举失败不该误删）；返回删除条数。</summary>
+        public int DeleteScanStepsMissingUnderRoot(string rootPath, HashSet<string> present)
+        {
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/');
+            if (prefix.Length == 0 || present == null || present.Count == 0)
+            {
+                return 0;
+            }
+            List<string> gone = new List<string>();
+            using (SqliteCommand cmd = NewCommand("SELECT DISTINCT file_path FROM scan_state"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    string path = r.IsDBNull(0) ? "" : r.GetString(0);
+                    if (path.Length <= prefix.Length + 1)
+                    {
+                        continue;
+                    }
+                    if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    if (path[prefix.Length] != '\\' && path[prefix.Length] != '/')
+                    {
+                        continue;
+                    }
+                    if (!present.Contains(path))
+                    {
+                        gone.Add(path);
+                    }
+                }
+            }
+            if (gone.Count == 0)
+            {
+                return 0;
+            }
+            using (SqliteCommand del = NewCommand("DELETE FROM scan_state WHERE file_path=$p"))
+            {
+                SqliteParameter p = del.Parameters.Add("$p", SqliteType.Text);
+                foreach (string path in gone)
+                {
+                    p.Value = path;
+                    del.ExecuteNonQuery();
+                }
+            }
+            return gone.Count;
+        }
+
         /// <summary>清扫某库根下已从磁盘消失的卡片记录——present 为本次枚举到的文件全路径集合；返回删除的卡片数（含引用行）。</summary>
         public int DeleteCardsMissingUnderRoot(string rootPath, HashSet<string> present)
         {
@@ -1478,6 +1692,119 @@ namespace KKManager.Data
             {
                 cmd.Parameters.AddWithValue("$path", c.FilePath);
                 return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>载入 mod 副本的 guid 索引——file_path → guid（扫描组装内存态用）。</summary>
+        public Dictionary<string, string> LoadModFileGuids()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (SqliteCommand cmd = NewCommand("SELECT file_path, guid FROM mod_file"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    string path = r.IsDBNull(0) ? "" : r.GetString(0);
+                    string guid = r.IsDBNull(1) ? "" : r.GetString(1);
+                    if (path.Length > 0 && guid.Length > 0)
+                    {
+                        map[path] = guid;
+                    }
+                }
+            }
+            return map;
+        }
+
+        /// <summary>按路径取卡片 id（没有返回 0）。</summary>
+        public long CardIdOf(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+            {
+                return 0;
+            }
+            using (SqliteCommand cmd = NewCommand("SELECT id FROM card WHERE file_path=$path"))
+            {
+                cmd.Parameters.AddWithValue("$path", filePath);
+                object v = cmd.ExecuteScalar();
+                if (v == null || v == DBNull.Value)
+                {
+                    return 0;
+                }
+                return Convert.ToInt64(v, CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>按路径删除一张卡片（含引用行与分项分析行）——头段步判定为非卡时用。</summary>
+        public void DeleteCardByPath(string filePath)
+        {
+            long id = CardIdOf(filePath);
+            if (id <= 0)
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("DELETE FROM card_mod WHERE card_id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+            using (SqliteCommand cmd = NewCommand("DELETE FROM card_analysis WHERE card_id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+            using (SqliteCommand cmd = NewCommand("DELETE FROM card WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>落一份卡片分项分析（服装槽位 / 卡片分析 / 场景深度——kind 区分，data 为 JSON 文本）。</summary>
+        public void SaveCardAnalysis(long cardId, string kind, string filePath, long size, string mtime, string data)
+        {
+            if (cardId <= 0 || string.IsNullOrEmpty(kind))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO card_analysis(card_id,kind,file_path,size,mtime,data,read_at)
+                     VALUES($id,$kind,$path,$size,$mtime,$data,$now)
+                     ON CONFLICT(card_id,kind) DO UPDATE SET
+                       file_path=excluded.file_path, size=excluded.size, mtime=excluded.mtime,
+                       data=excluded.data, read_at=excluded.read_at"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                cmd.Parameters.AddWithValue("$kind", kind);
+                cmd.Parameters.AddWithValue("$path", filePath);
+                cmd.Parameters.AddWithValue("$size", size);
+                cmd.Parameters.AddWithValue("$mtime", mtime ?? "");
+                cmd.Parameters.AddWithValue("$data", (object)data ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>读一份卡片分项分析（没有返回 null）。</summary>
+        public CardAnalysisRow LoadCardAnalysis(long cardId, string kind)
+        {
+            using (SqliteCommand cmd = NewCommand("SELECT kind,file_path,size,mtime,data,read_at FROM card_analysis WHERE card_id=$id AND kind=$kind"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                cmd.Parameters.AddWithValue("$kind", kind);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (!r.Read())
+                    {
+                        return null;
+                    }
+                    CardAnalysisRow row = new CardAnalysisRow();
+                    row.Kind = r.IsDBNull(0) ? "" : r.GetString(0);
+                    row.FilePath = r.IsDBNull(1) ? "" : r.GetString(1);
+                    row.Size = r.IsDBNull(2) ? 0 : r.GetInt64(2);
+                    row.Mtime = r.IsDBNull(3) ? "" : r.GetString(3);
+                    row.Data = r.IsDBNull(4) ? "" : r.GetString(4);
+                    row.ReadAt = r.IsDBNull(5) ? "" : r.GetString(5);
+                    return row;
+                }
             }
         }
 
@@ -2333,11 +2660,12 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>本库按 guid 的副本计数（总数 / 非旧版数）——重复副本组数与「待确认」组数用（跨库由 hub 合并）。</summary>
+        /// <summary>本库按 guid 的副本计数（总数 / 非旧版数）——重复副本组数与「待确认」组数用（跨库由 hub 合并）。
+        /// 旧版判据与 RootsRules.IsOldFileName 对齐（扩展名前的 .old 段）——SQL 侧按容器扩展名枚举（.zipmod / .zip）。</summary>
         public List<ModFileCount> ListModFileCounts()
         {
             List<ModFileCount> list = new List<ModFileCount>();
-            using (SqliteCommand cmd = NewCommand(@"SELECT guid, COUNT(*), SUM(CASE WHEN file_name LIKE '%.old.zipmod' THEN 0 ELSE 1 END)
+            using (SqliteCommand cmd = NewCommand(@"SELECT guid, COUNT(*), SUM(CASE WHEN file_name LIKE '%.old.zipmod' OR file_name LIKE '%.old.zip' THEN 0 ELSE 1 END)
                              FROM mod_file WHERE guid IS NOT NULL AND guid <> '' GROUP BY guid"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {

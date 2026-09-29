@@ -208,7 +208,7 @@ namespace KKManager.Core
             return NormalizeGameRoot(gameRoot) + "\\" + sub;
         }
 
-        /// <summary>旧版文件名的中缀——加在扩展名前（如 `xxx.old.zipmod`）；仍属 .zipmod 扫描面，库内可见。</summary>
+        /// <summary>旧版文件名的中缀——加在扩展名前（如 `xxx.old.zipmod` / `xxx.old.zip`）；仍属 mod 扫描面，库内可见。</summary>
         public const string OldInfix = ".old";
 
         /// <summary>文件名是否带旧版中缀（扩展名前的 .old 段）——「结尾是 old」即旧版引用的判据。</summary>

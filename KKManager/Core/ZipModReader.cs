@@ -7,6 +7,28 @@ using System.Xml;
 
 namespace KKManager.Core
 {
+    /// <summary>zipmod 解析结果分类——扫描侧据此区分「不是 mod 的文件」（静默跳过）与「坏 mod」（出声）。</summary>
+    public enum ModErrorKind
+    {
+        /// <summary>解析成功。</summary>
+        None = 0,
+
+        /// <summary>打不开为 zip 容器——不是 mod 文件（扫描面按「非 mod」跳过）。</summary>
+        NotContainer = 1,
+
+        /// <summary>是 zip 容器但根部没有 manifest.xml——不是 zipmod（同上，跳过）。</summary>
+        NoManifest = 2,
+
+        /// <summary>有 manifest.xml 但 XML 解析失败——坏 mod（出声）。</summary>
+        BadManifest = 3,
+
+        /// <summary>manifest 缺 guid——坏 mod（出声）。</summary>
+        NoGuid = 4,
+
+        /// <summary>文件本身读不到（不存在 / 无权限 / IO 错误）——出声。</summary>
+        Io = 5
+    }
+
     /// <summary>zipmod 元数据——取自容器根部 manifest.xml。</summary>
     public class ModInfo
     {
@@ -45,6 +67,8 @@ namespace KKManager.Core
 
         /// <summary>解析诊断——成功为 null。</summary>
         public string Error { get; set; }
+        /// <summary>解析结果的分类——None = 成功；其余见 ModErrorKind。</summary>
+        public ModErrorKind ErrorKind { get; set; }
 
         /// <summary>文件名（去扩展名）与 guid 是否一致。</summary>
         public bool FileNameMatchesGuid
@@ -77,7 +101,7 @@ namespace KKManager.Core
     /// <summary>zipmod 解析——只读容器中央目录中的 manifest.xml，不解包。</summary>
     public static class ZipModReader
     {
-        /// <summary>解析一个 zipmod（失败时返回带 Error 的 ModInfo，不抛异常）。</summary>
+        /// <summary>解析一个 zipmod（失败时返回带 Error / ErrorKind 的 ModInfo，不抛异常）。</summary>
         public static ModInfo Parse(string path)
         {
             var fi = new FileInfo(path);
@@ -90,18 +114,40 @@ namespace KKManager.Core
 
             if (!fi.Exists)
             {
+                info.ErrorKind = ModErrorKind.Io;
                 info.Error = "文件不存在";
                 return info;
             }
 
+            // [段1] 打开容器——打不开 = 不是 zip 容器（扫描侧按「非 mod 文件」跳过，不算失败）
+            ZipArchive zip = null;
             try
             {
-                using (var zip = ZipFile.OpenRead(path))
+                zip = ZipFile.OpenRead(path);
+            }
+            catch (InvalidDataException ex)
+            {
+                info.ErrorKind = ModErrorKind.NotContainer;
+                info.Error = "不是 zip 容器：" + ex.Message;
+                return info;
+            }
+            catch (Exception ex)
+            {
+                info.ErrorKind = ModErrorKind.Io;
+                info.Error = ex.GetType().Name + ": " + ex.Message;
+                return info;
+            }
+
+            // [段2] 读根部 manifest.xml——无此条目 = 不是 zipmod（跳过）；条目坏了 = 坏 mod（出声）
+            try
+            {
+                using (zip)
                 {
                     info.EntryCount = zip.Entries.Count;
                     ZipArchiveEntry entry = zip.GetEntry("manifest.xml");
                     if (entry == null)
                     {
+                        info.ErrorKind = ModErrorKind.NoManifest;
                         info.Error = "容器内无 manifest.xml";
                         return info;
                     }
@@ -114,6 +160,7 @@ namespace KKManager.Core
             }
             catch (Exception ex)
             {
+                info.ErrorKind = ModErrorKind.Io;
                 info.Error = ex.GetType().Name + ": " + ex.Message;
             }
 
@@ -197,7 +244,7 @@ namespace KKManager.Core
             }
         }
 
-        /// <summary>解析 manifest 文本——容忍注释 / BOM / 字段缺失；成功返回 null，否则返回诊断。</summary>
+        /// <summary>解析 manifest 文本——容忍注释 / BOM / 字段缺失；成功返回 null，失败返回诊断并置 ErrorKind。</summary>
         private static string ParseManifest(string xml, ModInfo info)
         {
             try
@@ -207,6 +254,7 @@ namespace KKManager.Core
                 XmlElement root = doc.DocumentElement;
                 if (root == null)
                 {
+                    info.ErrorKind = ModErrorKind.BadManifest;
                     return "manifest 无根节点";
                 }
                 info.SchemaVer = root.GetAttribute("schema-ver");
@@ -218,12 +266,14 @@ namespace KKManager.Core
                 info.Description = Text(doc, "//description");
                 if (string.IsNullOrEmpty(info.Guid))
                 {
+                    info.ErrorKind = ModErrorKind.NoGuid;
                     return "manifest 缺 guid";
                 }
                 return null;
             }
             catch (XmlException ex)
             {
+                info.ErrorKind = ModErrorKind.BadManifest;
                 return "manifest XML 解析失败: " + ex.Message;
             }
         }
