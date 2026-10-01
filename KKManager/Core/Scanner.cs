@@ -334,7 +334,7 @@ namespace KKManager.Core
                 index = index + 1;
                 result.StepIndex = index;
                 result.StepName = "插件库（dll 元数据 + 配置文件）";
-                result.StepTotal = CountPluginDlls(cfg);
+                result.StepTotal = CountPluginDlls(cfg, result);
                 result.StepDone = 0;
                 Report(log, "步骤 " + index + "/" + result.StepCount + "：插件库（dll 元数据 + 配置文件）（" + result.StepTotal + " 个文件）");
                 List<string> pluginErrors = new List<string>();
@@ -1037,7 +1037,7 @@ namespace KKManager.Core
             long built = 0;
             if (anyNew)
             {
-                DeleteShardFiles(tpl);
+                DeleteShardFiles(tpl, log);
                 using (Store tplStore = new Store(tpl))
                 {
                     tplStore.Checkpoint();
@@ -1050,10 +1050,10 @@ namespace KKManager.Core
                     {
                         continue;
                     }
-                    DeleteShardFiles(p);
+                    DeleteShardFiles(p, log);
                     File.Copy(tpl, p, true);
                 }
-                DeleteShardFiles(tpl);
+                DeleteShardFiles(tpl, log);
             }
             // [段3] 打开分片库——结构已就绪，跳过建表；分片库**常驻**（不合并、不删）
             List<Store> list = hub.OpenShardStores(baseLib, shards);
@@ -1070,32 +1070,42 @@ namespace KKManager.Core
                 log("  [分片] 首建 " + list.Count + " 个分片库：模板 " + built + " ms · 建齐 " + watch.ElapsedMilliseconds + " ms（此后常驻，不再合并）");
             }
         }
-        /// <summary>删除分片库的临时中间文件（模板）——分片库本身常驻，不在此列；失败不影响结果。</summary>
-        private static void DeleteShardFiles(string path)
+        /// <summary>删除分片库的临时中间文件（模板）——分片库本身常驻，不在此列；删除失败不阻断扫描，但出声（失败必须可见）。</summary>
+        private static void DeleteShardFiles(string path, Action<string> log = null)
         {
             try
             {
                 File.Delete(path);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // 删除失败可忽略——分片库是临时中间产物，下次扫描会覆盖重建
+                // 删除失败不阻断扫描——分片库是临时中间产物，下次扫描会覆盖重建
+                if (log != null)
+                {
+                    log("  临时文件删除失败（可忽略）：" + path + " · " + ex.Message);
+                }
             }
             try
             {
                 File.Delete(path + "-wal");
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // 同上
+                if (log != null)
+                {
+                    log("  临时文件删除失败（可忽略）：" + path + "-wal · " + ex.Message);
+                }
             }
             try
             {
                 File.Delete(path + "-shm");
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // 同上
+                if (log != null)
+                {
+                    log("  临时文件删除失败（可忽略）：" + path + "-shm · " + ex.Message);
+                }
             }
         }
 
@@ -1768,8 +1778,8 @@ namespace KKManager.Core
             }
             return new List<string>(set);
         }
-        /// <summary>插件库根下的 dll 总数（进度分母——枚举失败按 0 计，错误在扫描段内出声）。</summary>
-        private static int CountPluginDlls(RootsConfig cfg)
+        /// <summary>插件库根下的 dll 总数（进度分母——枚举失败按已得计数，失败原因并入扫描错误清单出声）。</summary>
+        private static int CountPluginDlls(RootsConfig cfg, ScanResult result)
         {
             int n = 0;
             if (cfg == null || cfg.pluginRoots == null)
@@ -1787,9 +1797,9 @@ namespace KKManager.Core
                     SearchOption option = root.recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
                     n = n + Directory.GetFiles(root.path, "*.dll", option).Length;
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // 枚举失败——分母按已得计数；失败原因由扫描段出声
+                    AddError(result, "插件库枚举失败（" + root.path + "）：" + ex.Message);
                 }
             }
             return n;
