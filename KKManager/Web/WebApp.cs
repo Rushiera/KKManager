@@ -75,6 +75,21 @@ namespace KKManager.Web
         /// <summary>本次扫描为场景卡读到 timeline 长度的数。</summary>
         public int TimelineRead { get; set; }
 
+        /// <summary>插件库段已完成的 dll 数（主要库扫描连带段——面板进度用）。</summary>
+        public int PluginDone { get; set; }
+
+        /// <summary>插件库段的 dll 总数。</summary>
+        public int PluginTotal { get; set; }
+
+        /// <summary>本次扫描枚举到的插件 dll 数（主要库扫描连带段）。</summary>
+        public int PluginDlls { get; set; }
+
+        /// <summary>本次扫描落库的插件项数（有 guid 的插件行）。</summary>
+        public int Plugins { get; set; }
+
+        /// <summary>本次扫描读到的插件配置文件（cfg）数。</summary>
+        public int PluginConfigs { get; set; }
+
         /// <summary>本次扫描清理的已消失记录数。</summary>
         public int Removed { get; set; }
 
@@ -1086,6 +1101,11 @@ namespace KKManager.Web
                     namesFilled = s.NamesFilled,
                     typesFixed = s.TypesFixed,
                     timelineRead = s.TimelineRead,
+                    pluginDlls = s.PluginDlls,
+                    plugins = s.Plugins,
+                    pluginConfigs = s.PluginConfigs,
+                    pluginDone = s.PluginDone,
+                    pluginTotal = s.PluginTotal,
                     removed = s.Removed,
                     stepIndex = s.StepIndex,
                     stepCount = s.StepCount,
@@ -1192,17 +1212,54 @@ namespace KKManager.Web
                 });
             });
 
-            // 插件清单——插件库（BepInEx）下解析出的插件（只读元数据；非插件 dll 只计数不列出）
+            // 插件清单——插件库（BepInEx）下解析出的插件（只读元数据；非插件 dll 一并列出，带未解析原因）
             app.MapGet("/api/plugins", () =>
             {
                 List<PluginRow> rows = _hub.Core.LoadPlugins();
+                List<PluginConfigRow> cfgs = _hub.Core.LoadPluginConfigs();
+                // cfg 按 GUID / 插件名建索引——插件行据此挂上「配置文件 / 配置项数」
+                Dictionary<string, PluginConfigRow> cfgByGuid = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, PluginConfigRow> cfgByName = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
+                foreach (PluginConfigRow cfg in cfgs)
+                {
+                    if (cfg.Guid.Length > 0 && !cfgByGuid.ContainsKey(cfg.Guid))
+                    {
+                        cfgByGuid[cfg.Guid] = cfg;
+                    }
+                    if (cfg.PluginName.Length > 0 && !cfgByName.ContainsKey(cfg.PluginName))
+                    {
+                        cfgByName[cfg.PluginName] = cfg;
+                    }
+                }
                 List<object> items = new List<object>();
+                List<object> nonPlugins = new List<object>();
                 Dictionary<string, int> guidCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 int withGuid = 0;
+                int noted = 0;
                 foreach (PluginRow row in rows)
                 {
+                    string note = PluginNoteReader.Lookup(row.Guid, row.Name);
+                    if (note.Length > 0 || PluginNoteReader.LookupFile(row.FileName).Length > 0)
+                    {
+                        noted = noted + 1;
+                    }
                     if (row.Guid.Length == 0)
                     {
+                        // 非插件 dll——一并列出（名称取程序集标题 + 中文说明 / 未解析原因），让「装了但不是插件」可见
+                        string fileNote = PluginNoteReader.LookupFile(row.FileName);
+                        nonPlugins.Add(new
+                        {
+                            fileName = row.FileName,
+                            filePath = row.FilePath,
+                            title = row.Title,
+                            description = row.Description,
+                            company = row.Company,
+                            fileVersion = row.FileVersion,
+                            size = row.Size,
+                            mtime = row.Mtime,
+                            note = fileNote,
+                            reason = row.Note
+                        });
                         continue;
                     }
                     withGuid = withGuid + 1;
@@ -1213,6 +1270,12 @@ namespace KKManager.Web
                     else
                     {
                         guidCount[row.Guid] = 1;
+                    }
+                    PluginConfigRow cfg = null;
+                    cfgByGuid.TryGetValue(row.Guid, out cfg);
+                    if (cfg == null && row.Name.Length > 0)
+                    {
+                        cfgByName.TryGetValue(row.Name, out cfg);
                     }
                     items.Add(new
                     {
@@ -1225,7 +1288,18 @@ namespace KKManager.Web
                         dependencies = row.Dependencies,
                         isIpa = row.IsIpa,
                         size = row.Size,
-                        mtime = row.Mtime
+                        mtime = row.Mtime,
+                        title = row.Title,
+                        description = row.Description,
+                        company = row.Company,
+                        copyright = row.Copyright,
+                        product = row.Product,
+                        fileVersion = row.FileVersion,
+                        targetFramework = row.TargetFramework,
+                        note = note,
+                        cfgFile = cfg == null ? "" : cfg.FileName,
+                        cfgSections = cfg == null ? 0 : cfg.SectionCount,
+                        cfgOptions = cfg == null ? 0 : cfg.OptionCount
                     });
                 }
                 int dupGuids = 0;
@@ -1242,7 +1316,12 @@ namespace KKManager.Web
                     plugins = withGuid,
                     nonPlugin = rows.Count - withGuid,
                     dupGuids = dupGuids,
-                    items = items
+                    noted = noted,
+                    noteTotal = PluginNoteReader.Count,
+                    noteError = PluginNoteReader.Error,
+                    configs = cfgs.Count,
+                    items = items,
+                    nonPluginItems = nonPlugins
                 });
             });
 
@@ -1252,7 +1331,7 @@ namespace KKManager.Web
                 RootsConfig cfg = LoadConfig();
                 List<string> errors = new List<string>();
                 DateTime started = DateTime.Now;
-                int count = Scanner.ScanPlugins(_hub.Core, cfg, errors);
+                PluginScanResult scan = Scanner.ScanPlugins(_hub.Core, cfg, errors, null);
                 double seconds = (DateTime.Now - started).TotalSeconds;
                 List<PluginRow> rows = _hub.Core.LoadPlugins();
                 int withGuid = 0;
@@ -1263,7 +1342,7 @@ namespace KKManager.Web
                         withGuid = withGuid + 1;
                     }
                 }
-                Console.WriteLine("[插件] 扫描完成——" + count + " 个 dll · " + seconds.ToString("F1") + " 秒 · 插件 " + withGuid + " 项");
+                Console.WriteLine("[插件] 扫描完成——" + scan.Dlls + " 个 dll · " + seconds.ToString("F1") + " 秒 · 插件 " + withGuid + " 项 · 配置文件 " + scan.Configs + " 个");
                 foreach (string e in errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -1271,10 +1350,11 @@ namespace KKManager.Web
                 return Results.Json(new
                 {
                     ok = true,
-                    dllTotal = count,
+                    dllTotal = scan.Dlls,
                     seconds = Math.Round(seconds, 1),
                     plugins = withGuid,
                     nonPlugin = rows.Count - withGuid,
+                    configs = scan.Configs,
                     errors = errors
                 });
             });
@@ -1324,6 +1404,209 @@ namespace KKManager.Web
                     errors = s.errors,
                     skips = s.skipped
                 });
+            });
+
+            // 单个插件详情（插件分析窗）——dll 元数据 + 配置文件分节 / 选项 / 作者注释 + 日志加载状态
+            app.MapGet("/api/plugin/detail", (string guid, string name) =>
+            {
+                List<PluginRow> rows = _hub.Core.LoadPlugins();
+                List<object> hits = new List<object>();
+                string key = (guid == null ? "" : guid).Trim();
+                string alt = (name == null ? "" : name).Trim();
+                foreach (PluginRow row in rows)
+                {
+                    bool match = (key.Length > 0 && string.Equals(row.Guid, key, StringComparison.OrdinalIgnoreCase))
+                        || (alt.Length > 0 && string.Equals(row.Name, alt, StringComparison.OrdinalIgnoreCase));
+                    if (!match)
+                    {
+                        continue;
+                    }
+                    hits.Add(new
+                    {
+                        guid = row.Guid,
+                        name = row.Name,
+                        version = row.Version,
+                        fileName = row.FileName,
+                        filePath = row.FilePath,
+                        processes = row.Processes,
+                        dependencies = row.Dependencies,
+                        isIpa = row.IsIpa,
+                        size = row.Size,
+                        mtime = row.Mtime,
+                        title = row.Title,
+                        description = row.Description,
+                        company = row.Company,
+                        copyright = row.Copyright,
+                        product = row.Product,
+                        fileVersion = row.FileVersion,
+                        targetFramework = row.TargetFramework
+                    });
+                }
+                // 配置文件——按 GUID 精确取；没有则按插件名在 cfg 文件头里找
+                PluginConfigRow cfg = _hub.Core.LoadPluginConfigByGuid(key);
+                if (cfg.FilePath.Length == 0 && alt.Length > 0)
+                {
+                    foreach (PluginConfigRow c in _hub.Core.LoadPluginConfigs())
+                    {
+                        if (string.Equals(c.PluginName, alt, StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg = _hub.Core.LoadPluginConfigByGuid(c.Guid);
+                            if (cfg.FilePath.Length == 0)
+                            {
+                                cfg = c;
+                            }
+                            break;
+                        }
+                    }
+                }
+                PluginConfigFile parsed = PluginConfigReader.FromJson(cfg.Sections);
+                // 日志实况——该插件是否出现在「已加载 / 进程过滤跳过」里（只读解析，不入库）
+                RootsConfig roots = LoadConfig();
+                PluginLogSummary log = PluginLogReader.Read(PluginLogReader.LogPathOf(roots));
+                string logState = "日志未提及";
+                foreach (PluginRow row in rows)
+                {
+                    if (row.Guid.Length == 0)
+                    {
+                        continue;
+                    }
+                    bool match = (key.Length > 0 && string.Equals(row.Guid, key, StringComparison.OrdinalIgnoreCase))
+                        || (alt.Length > 0 && string.Equals(row.Name, alt, StringComparison.OrdinalIgnoreCase));
+                    if (!match)
+                    {
+                        continue;
+                    }
+                    foreach (string item in log.loaded)
+                    {
+                        if (string.Equals(NameOfLogItem(item), row.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            logState = "本次已加载";
+                            break;
+                        }
+                    }
+                    if (logState == "本次已加载")
+                    {
+                        break;
+                    }
+                    foreach (string item in log.skipped)
+                    {
+                        string head = item;
+                        int arrow = item.IndexOf("  →  ", StringComparison.Ordinal);
+                        if (arrow > 0)
+                        {
+                            head = item.Substring(0, arrow);
+                        }
+                        if (string.Equals(NameOfLogItem(head), row.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            logState = "进程过滤跳过（该插件只在别的进程加载）";
+                            break;
+                        }
+                    }
+                    if (logState == "进程过滤跳过（该插件只在别的进程加载）")
+                    {
+                        break;
+                    }
+                }
+                return Results.Json(new
+                {
+                    note = PluginNoteReader.Lookup(key, alt),
+                    logState = logState,
+                    logTime = log.fileTime,
+                    cfgFile = cfg.FileName,
+                    cfgPath = cfg.FilePath,
+                    cfgSize = cfg.Size,
+                    cfgMtime = cfg.Mtime,
+                    cfgError = cfg.Error,
+                    sectionCount = parsed.sections.Count,
+                    sections = parsed.sections,
+                    items = hits
+                });
+            });
+
+            // 写回单个插件配置项的值（插件分析窗「当前值」改完点确认 → 保存）——🔴 编辑授权为唯一闸门：
+            // 未授权一律拒绝（判定在服务端，前端勾选不作授权依据）；路径须落在插件库根内（白名单）
+            app.MapPost("/api/plugin/config/save", async context =>
+            {
+                context.Response.ContentType = "application/json; charset=utf-8";
+                PluginConfigSaveDto dto = null;
+                try
+                {
+                    dto = await JsonSerializer.DeserializeAsync<PluginConfigSaveDto>(context.Request.Body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch (JsonException)
+                {
+                    dto = null;
+                }
+                if (dto == null)
+                {
+                    context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"请求体无法解析\"}");
+                    return;
+                }
+                // [闸门1] 编辑授权——未授权不改任何文件
+                if (!IsEditAuthorized())
+                {
+                    context.Response.StatusCode = 403;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"未取得编辑授权——请先在编辑授权窗里确认\"}");
+                    return;
+                }
+                // [闸门2] 路径白名单——cfg 必须落在已配置的插件库根内
+                RootsConfig roots = LoadConfig();
+                if (!StoreHub.IsUnderPluginRoot(roots, dto.path))
+                {
+                    context.Response.StatusCode = 403;
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"路径不在受管的插件库根内\"}");
+                    return;
+                }
+                PluginConfigSaveResult saved = PluginConfigWriter.Save(dto.path, dto.section, dto.key, dto.value);
+                if (!saved.ok)
+                {
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"" + EscapeJson(saved.error) + "\"}");
+                    return;
+                }
+                // [段3] 读回落库——cfg 解析结果整段刷新，面板再读即见新值（不靠重扫整库）
+                PluginConfigFile reread = PluginConfigReader.Read(dto.path);
+                if (reread.error.Length == 0)
+                {
+                    PluginConfigRow row = new PluginConfigRow();
+                    row.FilePath = reread.filePath;
+                    row.FileName = reread.fileName;
+                    row.PluginName = reread.pluginName;
+                    row.PluginVersion = reread.pluginVersion;
+                    row.Guid = reread.guid;
+                    row.Size = reread.size;
+                    row.Mtime = reread.mtime;
+                    row.Sections = PluginConfigReader.ToJson(reread);
+                    row.SectionCount = reread.sections.Count;
+                    long optionCount = 0;
+                    foreach (PluginConfigSection sec in reread.sections)
+                    {
+                        optionCount = optionCount + sec.options.Count;
+                    }
+                    row.OptionCount = optionCount;
+                    _hub.Core.SavePluginConfig(row);
+                }
+                Console.WriteLine("[插件] 配置写回 " + saved.fileName + " [" + saved.section + "] " + saved.key
+                    + "：" + saved.oldValue + " → " + saved.newValue
+                    + "（" + saved.sizeBefore + " → " + saved.sizeAfter + " 字节）");
+                // [段4] 回执——本次改了什么 + 重读后的全量分节（前端就地重绘，不必再发一次读取）
+                string payload = JsonSerializer.Serialize(new
+                {
+                    ok = true,
+                    section = saved.section,
+                    key = saved.key,
+                    oldValue = saved.oldValue,
+                    newValue = saved.newValue,
+                    sizeBefore = saved.sizeBefore,
+                    sizeAfter = saved.sizeAfter,
+                    mtimeBefore = saved.mtimeBefore,
+                    mtimeAfter = saved.mtimeAfter,
+                    changed = !string.Equals(saved.oldValue, saved.newValue, StringComparison.Ordinal),
+                    sectionCount = reread.sections.Count,
+                    sections = reread.sections
+                });
+                await context.Response.WriteAsync(payload);
             });
 
             // 待办清单——软件认为需要使用者处理的事（目前只有「离线库」一类）；条目文案由前端按 kind 组装
@@ -1949,10 +2232,11 @@ namespace KKManager.Web
                     return;
                 }
                 RootsConfig revealCfg = LoadConfig();
-                if (!StoreHub.IsUnderModRoot(revealCfg, dto.path) && !StoreHub.IsUnderCardRoot(revealCfg, dto.path) && !IsUnderArchive(dto.path))
+                if (!StoreHub.IsUnderModRoot(revealCfg, dto.path) && !StoreHub.IsUnderCardRoot(revealCfg, dto.path)
+                    && !StoreHub.IsUnderPluginRoot(revealCfg, dto.path) && !IsUnderArchive(dto.path))
                 {
                     context.Response.StatusCode = 403;
-                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"路径不在受管的 mod 库根、卡片库根或编辑留档目录内\"}");
+                    await context.Response.WriteAsync("{\"ok\":false,\"error\":\"路径不在受管的 mod 库根、卡片库根、插件库根或编辑留档目录内\"}");
                     return;
                 }
                 if (!File.Exists(dto.path))
@@ -3314,6 +3598,9 @@ namespace KKManager.Web
                             _scan.NamesFilled = r.NamesFilled;
                             _scan.TypesFixed = r.TypesFixed;
                             _scan.TimelineRead = r.TimelineRead;
+                            _scan.PluginDlls = r.PluginDlls;
+                            _scan.Plugins = r.Plugins;
+                            _scan.PluginConfigs = r.PluginConfigs;
                             _scan.Removed = r.Removed;
                             _scan.StepIndex = r.StepIndex;
                             _scan.StepCount = r.StepCount;
@@ -3409,19 +3696,39 @@ namespace KKManager.Web
                         _scan.StepName = message.Substring(colonAt + 1);
                     }
                 }
-                System.Text.RegularExpressions.Match m = ProgressRx.Match(message);
-                if (m.Success)
+                // 插件库进度行（「  插件库 done/total」）——走插件段自己的分母，不污染卡片 / mod 的累计计数
+                System.Text.RegularExpressions.Match pm = PluginProgressRx.Match(message);
+                if (pm.Success)
                 {
-                    int left;
-                    int right;
-                    if (int.TryParse(m.Groups[1].Value, out left))
+                    int pdone;
+                    int ptotal;
+                    if (int.TryParse(pm.Groups[1].Value, out pdone))
                     {
-                        _scan.Added = left;
-                        _scan.StepDone = left;
+                        _scan.StepDone = pdone;
+                        _scan.PluginDone = pdone;
                     }
-                    if (int.TryParse(m.Groups[2].Value, out right))
+                    if (int.TryParse(pm.Groups[2].Value, out ptotal))
                     {
-                        _scan.Seen = right;
+                        _scan.StepTotal = ptotal;
+                        _scan.PluginTotal = ptotal;
+                    }
+                }
+                else
+                {
+                    System.Text.RegularExpressions.Match m = ProgressRx.Match(message);
+                    if (m.Success)
+                    {
+                        int left;
+                        int right;
+                        if (int.TryParse(m.Groups[1].Value, out left))
+                        {
+                            _scan.Added = left;
+                            _scan.StepDone = left;
+                        }
+                        if (int.TryParse(m.Groups[2].Value, out right))
+                        {
+                            _scan.Seen = right;
+                        }
                     }
                 }
             }
@@ -3430,6 +3737,23 @@ namespace KKManager.Web
         private static readonly System.Text.RegularExpressions.Regex ProgressRx =
             new System.Text.RegularExpressions.Regex(@"(\d+)\s*/\s*(\d+)",
                 System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>插件库进度行（「  插件库 done/total」）——插件段有独立分母，须与卡片 / mod 的累计进度行分开解析。</summary>
+        private static readonly System.Text.RegularExpressions.Regex PluginProgressRx =
+            new System.Text.RegularExpressions.Regex(@"^\s*插件库\s+(\d+)\s*/\s*(\d+)",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        /// <summary>日志条目（「名 版本」）取名称部分——去掉最后一个空格段（BepInEx 会规范化版本号，故不按版本比）。</summary>
+        /// <param name="item">日志条目文本。</param>
+        /// <returns>名称部分。</returns>
+        private static string NameOfLogItem(string item)
+        {
+            if (string.IsNullOrEmpty(item))
+            {
+                return "";
+            }
+            int at = item.LastIndexOf(' ');
+            return at > 0 ? item.Substring(0, at) : item;
+        }
 
         private static string IndexHtml()
         {
@@ -3571,6 +3895,22 @@ namespace KKManager.Web
     {
         /// <summary>是否授权（true 开启 / false 撤销）。</summary>
         public bool granted { get; set; }
+    }
+
+    /// <summary>插件配置值写回请求体（插件分析窗「当前值」改完点确认保存）。</summary>
+    public class PluginConfigSaveDto
+    {
+        /// <summary>cfg 绝对路径（须落在受管的插件库根内）。</summary>
+        public string path { get; set; }
+
+        /// <summary>分节名（文件开头无分节的键给「(无分节)」）。</summary>
+        public string section { get; set; }
+
+        /// <summary>配置键。</summary>
+        public string key { get; set; }
+
+        /// <summary>新值（空串 = 改成空值）。</summary>
+        public string value { get; set; }
     }
 
     /// <summary>卡片字段编辑请求体（null = 不改这一项；空字符串 = 改成空）。</summary>
