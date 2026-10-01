@@ -117,6 +117,11 @@ namespace KKManager.Core
                                 reason = "进程过滤：" + line.Substring(paren + "process filters (".Length).TrimEnd(')', ' ');
                             }
                             summary.skipped.Add(name + "  →  " + reason);
+                            string skipName = NameOf(name);
+                            if (skipName.Length > 0)
+                            {
+                                summary.skippedNames.Add(skipName);
+                            }
                             continue;
                         }
                         // [段3] 实际加载——「Loading [名 版本]」
@@ -127,14 +132,26 @@ namespace KKManager.Core
                             int close = line.IndexOf(']', open);
                             if (close > open)
                             {
-                                summary.loaded.Add(line.Substring(open, close - open));
+                                string item = line.Substring(open, close - open);
+                                summary.loaded.Add(item);
+                                string loadName = NameOf(item);
+                                if (loadName.Length > 0)
+                                {
+                                    summary.loadedNames.Add(loadName);
+                                }
                             }
                             continue;
                         }
-                        // [段4] 错误行——原文收下（不二次解释）
-                        if (line.IndexOf("[Error", StringComparison.Ordinal) >= 0)
+                        // [段4] 错误行——原文收下（不二次解释）+ 记下被点名的来源（「[Error  :名] ...」）
+                        int errAt = line.IndexOf("[Error", StringComparison.Ordinal);
+                        if (errAt >= 0)
                         {
                             summary.errors.Add(line);
+                            string src = ErrorSourceName(line, errAt);
+                            if (src.Length > 0)
+                            {
+                                summary.errorNames.Add(src);
+                            }
                         }
                     }
                 }
@@ -144,6 +161,36 @@ namespace KKManager.Core
                 summary.error = ex.Message;
             }
             return summary;
+        }
+        /// <summary>日志条目（「名 版本」）取名称部分——去掉最后一个空格段（BepInEx 会规范化版本号，故不按版本比）。</summary>
+        /// <param name="item">日志条目文本。</param>
+        /// <returns>名称部分。</returns>
+        private static string NameOf(string item)
+        {
+            if (string.IsNullOrEmpty(item))
+            {
+                return "";
+            }
+            int at = item.LastIndexOf(' ');
+            return at > 0 ? item.Substring(0, at) : item;
+        }
+        /// <summary>错误行取被点名的来源名——「[Error  :名] 正文」里冒号与「]」之间那段。</summary>
+        /// <param name="line">错误行原文。</param>
+        /// <param name="errAt">「[Error」在行内的起点。</param>
+        /// <returns>来源名（取不到返回空串）。</returns>
+        private static string ErrorSourceName(string line, int errAt)
+        {
+            int i = errAt + "[Error".Length;
+            while (i < line.Length && (line[i] == ' ' || line[i] == ':'))
+            {
+                i = i + 1;
+            }
+            int close = line.IndexOf(']', i);
+            if (close <= i)
+            {
+                return "";
+            }
+            return line.Substring(i, close - i).Trim();
         }
     }
 }
