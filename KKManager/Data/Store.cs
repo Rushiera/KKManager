@@ -257,6 +257,12 @@ namespace KKManager.Data
 
         /// <summary>被引用的卡数。</summary>
         public long Used { get; set; }
+        /// <summary>被引用的人物卡张数。</summary>
+        public long UsedChara { get; set; }
+        /// <summary>被引用的服装卡张数。</summary>
+        public long UsedClothes { get; set; }
+        /// <summary>被引用的场景卡（sd）张数。</summary>
+        public long UsedSd { get; set; }
 
         /// <summary>是否有登记过的旧版（该 guid 存在被判为旧版的副本）。</summary>
         public bool HasOld { get; set; }
@@ -503,6 +509,70 @@ namespace KKManager.Data
 
         /// <summary>修改时间戳文本（UTC）。</summary>
         public string Mtime { get; set; } = "";
+
+        /// <summary>程序集标题（AssemblyTitle——dll 元数据）。</summary>
+        public string Title { get; set; } = "";
+
+        /// <summary>程序集说明（AssemblyDescription——作者写的一句话用途；多数插件为空）。</summary>
+        public string Description { get; set; } = "";
+
+        /// <summary>程序集公司 / 作者署名（AssemblyCompany）。</summary>
+        public string Company { get; set; } = "";
+
+        /// <summary>程序集版权（AssemblyCopyright）。</summary>
+        public string Copyright { get; set; } = "";
+
+        /// <summary>程序集产品名（AssemblyProduct）。</summary>
+        public string Product { get; set; } = "";
+
+        /// <summary>程序集版本（InformationalVersion 优先，回落程序集版本号）。</summary>
+        public string FileVersion { get; set; } = "";
+
+        /// <summary>程序集目标框架（TargetFramework 特性）。</summary>
+        public string TargetFramework { get; set; } = "";
+
+        /// <summary>未解析出插件特性时的原因（如「未引用插件框架」——非插件 dll 用它出声）。</summary>
+        public string Note { get; set; } = "";
+    }
+
+    /// <summary>一个插件配置文件的落库行（plugin_config 表——cfg 的分节 / 选项 / 作者注释以 JSON 整段存放）。</summary>
+    public class PluginConfigRow
+    {
+        /// <summary>cfg 绝对路径（主键）。</summary>
+        public string FilePath { get; set; } = "";
+
+        /// <summary>cfg 文件名。</summary>
+        public string FileName { get; set; } = "";
+
+        /// <summary>文件头读出的插件名。</summary>
+        public string PluginName { get; set; } = "";
+
+        /// <summary>文件头读出的插件版本。</summary>
+        public string PluginVersion { get; set; } = "";
+
+        /// <summary>文件头读出的插件 GUID（老配置可能为空）。</summary>
+        public string Guid { get; set; } = "";
+
+        /// <summary>cfg 字节数。</summary>
+        public long Size { get; set; }
+
+        /// <summary>cfg 修改时间戳文本（UTC）。</summary>
+        public string Mtime { get; set; } = "";
+
+        /// <summary>解析结果 JSON（PluginConfigFile 序列化——分节 / 选项 / 注释全在内）。</summary>
+        public string Sections { get; set; } = "";
+
+        /// <summary>分节数（列表页直接用，不必反序列化）。</summary>
+        public long SectionCount { get; set; }
+
+        /// <summary>选项数（列表页直接用）。</summary>
+        public long OptionCount { get; set; }
+
+        /// <summary>入库时刻（UTC）。</summary>
+        public string ReadAt { get; set; } = "";
+
+        /// <summary>解析失败原因（空 = 成功）。</summary>
+        public string Error { get; set; } = "";
     }
 
     /// <summary>卡片编辑留档——原版留在软件内部，与卡片的对应关系落库（「寻找旧版」读它）。</summary>
@@ -730,8 +800,8 @@ namespace KKManager.Data
         private readonly bool _isCore;
         private SqliteTransaction _tx;
 
-        /// <summary>打开（不存在则建）数据库；结构版本不符时重建。corePath 非空表示本库为「库文件」——ATTACH 主库为 core，设置表与 mod 主表由主库托管。</summary>
-        public Store(string dbPath, string corePath = null)
+        /// <summary>打开（不存在则建）数据库；结构版本不符时重建。corePath 非空表示本库为「库文件」——ATTACH 主库为 core，设置表与 mod 主表由主库托管。schemaReady = 结构已就绪（预建分片库的复制件）——跳过建表，只开连接与 PRAGMA。</summary>
+        public Store(string dbPath, string corePath = null, bool schemaReady = false)
         {
             string full = Path.GetFullPath(dbPath);
             string dir = Path.GetDirectoryName(full);
@@ -742,9 +812,20 @@ namespace KKManager.Data
             DbPath = full;
             CorePath = string.IsNullOrWhiteSpace(corePath) ? null : Path.GetFullPath(corePath);
             _isCore = CorePath == null;
-            _conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = full }.ToString());
+            // Pooling=false：并行扫描时多个 Store 连接必须各自持有独立底层连接——默认连接池会把相同连接串
+            // 的 SqliteConnection 复用成同一个底层连接，第二个连接的 ATTACH core 会撞「database core is already in use」
+            _conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = full, Pooling = false }.ToString());
             _conn.Open();
-            EnsureSchema();
+            if (schemaReady)
+            {
+                // 预建分片库的复制件——结构已就绪（模板建过一次），只补连接级 PRAGMA
+                Exec("PRAGMA synchronous=NORMAL");
+                Exec("PRAGMA busy_timeout=15000");
+            }
+            else
+            {
+                EnsureSchema();
+            }
             if (!_isCore)
             {
                 Exec("ATTACH DATABASE '" + CorePath.Replace("'", "''") + "' AS core");
@@ -842,9 +923,14 @@ namespace KKManager.Data
         private void EnsureSchema()
         {
             Exec("PRAGMA journal_mode=WAL");
+            // 本机实测：单次提交的 flush ≈ 0.4–0.5 s（D: 卷）——WAL + NORMAL 只在校验点 fsync，提交不再逐次 fsync
+            Exec("PRAGMA synchronous=NORMAL");
             // 并行扫描：多连接写同一库（WAL 单写者模型）——写锁等待而非立刻 SQLITE_BUSY
             Exec("PRAGMA busy_timeout=15000");
             long version = Convert.ToInt64(ExecScalar("PRAGMA user_version"), CultureInfo.InvariantCulture);
+            // 🔴 建表 / 建索引整段一次提交——本机实测单次提交 ≈ 0.5 s（DDL 各自提交时 30 条 = 15 s 级）；
+            // 分片库并行曾因此被判「卡死」（每 worker 一个库，建库 25–40 s）
+            Begin();
             if (version != SchemaVersion)
             {
                 DropAll();
@@ -939,8 +1025,26 @@ namespace KKManager.Data
                                  root_path TEXT, file_name TEXT, name TEXT, version TEXT,
                                  processes TEXT, dependencies TEXT, is_ipa INTEGER,
                                  size INTEGER, mtime TEXT, scan_time TEXT,
+                                 title TEXT, description TEXT, company TEXT, copyright TEXT,
+                                 product TEXT, file_version TEXT, target_framework TEXT, note TEXT,
                                  PRIMARY KEY(file_path, guid))");
                 Exec("CREATE INDEX IF NOT EXISTS ix_plugin_guid ON plugin_file(guid)");
+                // 增量补列（v0.20.10）：dll 元数据扩项——旧库按列存在性逐列补，不重建整库
+                EnsureColumn("plugin_file", "title", "TEXT");
+                EnsureColumn("plugin_file", "description", "TEXT");
+                EnsureColumn("plugin_file", "company", "TEXT");
+                EnsureColumn("plugin_file", "copyright", "TEXT");
+                EnsureColumn("plugin_file", "product", "TEXT");
+                EnsureColumn("plugin_file", "file_version", "TEXT");
+                EnsureColumn("plugin_file", "target_framework", "TEXT");
+                EnsureColumn("plugin_file", "note", "TEXT");
+                Exec(@"CREATE TABLE IF NOT EXISTS plugin_config(
+                                 file_path TEXT PRIMARY KEY, file_name TEXT,
+                                 plugin_name TEXT, plugin_version TEXT, guid TEXT,
+                                 size INTEGER, mtime TEXT, sections TEXT,
+                                 section_count INTEGER, option_count INTEGER,
+                                 read_at TEXT, error TEXT)");
+                Exec("CREATE INDEX IF NOT EXISTS ix_plugin_config_guid ON plugin_config(guid)");
                 Exec(@"CREATE TABLE IF NOT EXISTS card_edit(
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                                  card_path TEXT, card_name TEXT, lib INTEGER,
@@ -961,18 +1065,24 @@ namespace KKManager.Data
             }
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mtime ON card(mtime)");
             Exec("PRAGMA user_version=" + SchemaVersion);
+            Commit();
         }
 
         /// <summary>把 todo 表迁到 v0.20.2 结构——补 text / ref_path / ref_name 三列，并把「同类型同键只留一条」的唯一性缩到只对 offline 生效（卡片待办允许一卡多条）。行数不一致即抛——失败可见，不静默丢待办。</summary>
         private void MigrateTodoTable()
         {
             long before = Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM todo"), CultureInfo.InvariantCulture);
-            Begin();
+            // 迁移可能被 EnsureSchema 的建表事务包住——外层已有事务时不另开（Begin 会覆盖 _tx）
+            bool own = _tx == null;
+            if (own)
+            {
+                Begin();
+            }
             try
             {
                 Exec(@"CREATE TABLE todo_new(
-                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                 kind TEXT, key TEXT, text TEXT, ref_path TEXT, ref_name TEXT, created_at TEXT)");
+                                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         kind TEXT, key TEXT, text TEXT, ref_path TEXT, ref_name TEXT, created_at TEXT)");
                 Exec("INSERT INTO todo_new(id, kind, key, created_at) SELECT id, kind, key, created_at FROM todo");
                 long after = Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM todo_new"), CultureInfo.InvariantCulture);
                 if (after != before)
@@ -982,11 +1092,17 @@ namespace KKManager.Data
                 Exec("DROP TABLE todo");
                 Exec("ALTER TABLE todo_new RENAME TO todo");
                 Exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_todo_offline ON todo(kind, key) WHERE kind = 'offline'");
-                Commit();
+                if (own)
+                {
+                    Commit();
+                }
             }
             catch
             {
-                Rollback();
+                if (own)
+                {
+                    Rollback();
+                }
                 throw;
             }
         }
@@ -998,6 +1114,8 @@ namespace KKManager.Data
             Exec("DROP TABLE IF EXISTS card_analysis");
             Exec("DROP TABLE IF EXISTS scan_state");
             Exec("DROP TABLE IF EXISTS mod_file");
+            Exec("DROP TABLE IF EXISTS plugin_file");
+            Exec("DROP TABLE IF EXISTS plugin_config");
             if (_isCore)
             {
                 Exec("DROP TABLE IF EXISTS mod_old");
@@ -1007,6 +1125,19 @@ namespace KKManager.Data
                 Exec("DROP TABLE IF EXISTS todo");
                 Exec("DROP TABLE IF EXISTS mod");
                 Exec("DROP TABLE IF EXISTS setting");
+            }
+        }
+
+        /// <summary>按列存在性补列（增量迁移——旧库不重建整库；列已在则不动）。</summary>
+        /// <param name="table">表名。</param>
+        /// <param name="column">列名。</param>
+        /// <param name="type">列类型声明。</param>
+        private void EnsureColumn(string table, string column, string type)
+        {
+            long has = Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('" + table + "') WHERE name='" + column + "'"), CultureInfo.InvariantCulture);
+            if (has == 0)
+            {
+                Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
             }
         }
 
@@ -3343,16 +3474,25 @@ namespace KKManager.Data
             };
         }
 
-        /// <summary>本库里各 mod guid 被引用的卡片数（跨库合并 used 用）。</summary>
-        public Dictionary<string, long> RefCountsByGuid()
+        /// <summary>本库里各 mod guid 被引用的卡片数——总数 + 按卡类型分列（人物卡 / 服装卡 / 场景卡 sd），供跨库合并。</summary>
+        public Dictionary<string, (long Used, long Chara, long Clothes, long Sd)> RefCountsByTypeByGuid()
         {
-            Dictionary<string, long> map = new Dictionary<string, long>(StringComparer.Ordinal);
-            using (SqliteCommand cmd = NewCommand("SELECT mod_guid, COUNT(DISTINCT card_id) FROM card_mod GROUP BY mod_guid"))
+            Dictionary<string, (long Used, long Chara, long Clothes, long Sd)> map =
+                new Dictionary<string, (long Used, long Chara, long Clothes, long Sd)>(StringComparer.Ordinal);
+            // 一次查询同时出总数与三类型分列——LEFT JOIN 保证卡片行缺失时不丢引用行（总数口径与本方法改造前一致）
+            string sql = @"SELECT cm.mod_guid,
+                     COUNT(DISTINCT cm.card_id),
+                     COUNT(DISTINCT CASE WHEN c.card_type LIKE '%Chara%' THEN cm.card_id END),
+                     COUNT(DISTINCT CASE WHEN c.card_type LIKE '%Clothes%' THEN cm.card_id END),
+                     COUNT(DISTINCT CASE WHEN c.card_type = 'sd' THEN cm.card_id END)
+                     FROM card_mod cm LEFT JOIN card c ON c.id = cm.card_id
+                     GROUP BY cm.mod_guid";
+            using (SqliteCommand cmd = NewCommand(sql))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
                 {
-                    map[r.GetString(0)] = r.GetInt64(1);
+                    map[r.GetString(0)] = (r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4));
                 }
             }
             return map;
@@ -3757,8 +3897,10 @@ namespace KKManager.Data
         public void SavePlugin(PluginRow row)
         {
             using (SqliteCommand cmd = NewCommand(@"INSERT OR REPLACE INTO plugin_file(
-                        file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime, scan_time)
-                        VALUES($f, $g, $r, $n, $nm, $v, $p, $d, $i, $s, $m, $t)"))
+                                file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime, scan_time,
+                                title, description, company, copyright, product, file_version, target_framework, note)
+                                VALUES($f, $g, $r, $n, $nm, $v, $p, $d, $i, $s, $m, $t,
+                                $ti, $de, $co, $cr, $pr, $fv, $tf, $no)"))
             {
                 cmd.Parameters.AddWithValue("$f", row.FilePath);
                 cmd.Parameters.AddWithValue("$g", row.Guid);
@@ -3772,6 +3914,14 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$s", row.Size);
                 cmd.Parameters.AddWithValue("$m", row.Mtime);
                 cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
+                cmd.Parameters.AddWithValue("$ti", row.Title);
+                cmd.Parameters.AddWithValue("$de", row.Description);
+                cmd.Parameters.AddWithValue("$co", row.Company);
+                cmd.Parameters.AddWithValue("$cr", row.Copyright);
+                cmd.Parameters.AddWithValue("$pr", row.Product);
+                cmd.Parameters.AddWithValue("$fv", row.FileVersion);
+                cmd.Parameters.AddWithValue("$tf", row.TargetFramework);
+                cmd.Parameters.AddWithValue("$no", row.Note);
                 cmd.ExecuteNonQuery();
             }
         }
@@ -3780,8 +3930,9 @@ namespace KKManager.Data
         public List<PluginRow> LoadPlugins()
         {
             List<PluginRow> list = new List<PluginRow>();
-            using (SqliteCommand cmd = NewCommand(@"SELECT file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime
-                        FROM plugin_file ORDER BY CASE WHEN guid='' THEN 1 ELSE 0 END, guid, file_name"))
+            using (SqliteCommand cmd = NewCommand(@"SELECT file_path, guid, root_path, file_name, name, version, processes, dependencies, is_ipa, size, mtime,
+                                title, description, company, copyright, product, file_version, target_framework, note
+                                FROM plugin_file ORDER BY CASE WHEN guid='' THEN 1 ELSE 0 END, guid, file_name"))
             using (SqliteDataReader r = cmd.ExecuteReader())
             {
                 while (r.Read())
@@ -3798,10 +3949,122 @@ namespace KKManager.Data
                     row.IsIpa = !r.IsDBNull(8) && r.GetInt64(8) != 0;
                     row.Size = r.IsDBNull(9) ? 0 : r.GetInt64(9);
                     row.Mtime = r.IsDBNull(10) ? "" : r.GetString(10);
+                    row.Title = r.IsDBNull(11) ? "" : r.GetString(11);
+                    row.Description = r.IsDBNull(12) ? "" : r.GetString(12);
+                    row.Company = r.IsDBNull(13) ? "" : r.GetString(13);
+                    row.Copyright = r.IsDBNull(14) ? "" : r.GetString(14);
+                    row.Product = r.IsDBNull(15) ? "" : r.GetString(15);
+                    row.FileVersion = r.IsDBNull(16) ? "" : r.GetString(16);
+                    row.TargetFramework = r.IsDBNull(17) ? "" : r.GetString(17);
+                    row.Note = r.IsDBNull(18) ? "" : r.GetString(18);
                     list.Add(row);
                 }
             }
             return list;
+        }
+        /// <summary>按 GUID 取一个配置文件（含整段 JSON——插件分析窗用；同 GUID 多份取文件名第一个）。</summary>
+        /// <param name="guid">插件 GUID。</param>
+        /// <returns>配置行（无则 Sections 为空）。</returns>
+        public PluginConfigRow LoadPluginConfigByGuid(string guid)
+        {
+            if (string.IsNullOrWhiteSpace(guid))
+            {
+                return new PluginConfigRow();
+            }
+            using (SqliteCommand cmd = NewCommand(@"SELECT file_path, file_name, plugin_name, plugin_version, guid,
+                                size, mtime, sections, section_count, option_count, read_at, error
+                                FROM plugin_config WHERE guid=$g ORDER BY file_name LIMIT 1"))
+            {
+                cmd.Parameters.AddWithValue("$g", guid);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (!r.Read())
+                    {
+                        return new PluginConfigRow();
+                    }
+                    PluginConfigRow row = new PluginConfigRow();
+                    row.FilePath = r.IsDBNull(0) ? "" : r.GetString(0);
+                    row.FileName = r.IsDBNull(1) ? "" : r.GetString(1);
+                    row.PluginName = r.IsDBNull(2) ? "" : r.GetString(2);
+                    row.PluginVersion = r.IsDBNull(3) ? "" : r.GetString(3);
+                    row.Guid = r.IsDBNull(4) ? "" : r.GetString(4);
+                    row.Size = r.IsDBNull(5) ? 0 : r.GetInt64(5);
+                    row.Mtime = r.IsDBNull(6) ? "" : r.GetString(6);
+                    row.Sections = r.IsDBNull(7) ? "" : r.GetString(7);
+                    row.SectionCount = r.IsDBNull(8) ? 0 : r.GetInt64(8);
+                    row.OptionCount = r.IsDBNull(9) ? 0 : r.GetInt64(9);
+                    row.ReadAt = r.IsDBNull(10) ? "" : r.GetString(10);
+                    row.Error = r.IsDBNull(11) ? "" : r.GetString(11);
+                    return row;
+                }
+            }
+        }
+        /// <summary>全部插件配置文件（按 GUID / 文件名排序——不含整段 JSON，列表页用）。</summary>
+        /// <returns>配置行清单（Sections 字段为空）。</returns>
+        public List<PluginConfigRow> LoadPluginConfigs()
+        {
+            List<PluginConfigRow> list = new List<PluginConfigRow>();
+            using (SqliteCommand cmd = NewCommand(@"SELECT file_path, file_name, plugin_name, plugin_version, guid,
+                                size, mtime, section_count, option_count, read_at, error
+                                FROM plugin_config ORDER BY guid, file_name"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    PluginConfigRow row = new PluginConfigRow();
+                    row.FilePath = r.IsDBNull(0) ? "" : r.GetString(0);
+                    row.FileName = r.IsDBNull(1) ? "" : r.GetString(1);
+                    row.PluginName = r.IsDBNull(2) ? "" : r.GetString(2);
+                    row.PluginVersion = r.IsDBNull(3) ? "" : r.GetString(3);
+                    row.Guid = r.IsDBNull(4) ? "" : r.GetString(4);
+                    row.Size = r.IsDBNull(5) ? 0 : r.GetInt64(5);
+                    row.Mtime = r.IsDBNull(6) ? "" : r.GetString(6);
+                    row.SectionCount = r.IsDBNull(7) ? 0 : r.GetInt64(7);
+                    row.OptionCount = r.IsDBNull(8) ? 0 : r.GetInt64(8);
+                    row.ReadAt = r.IsDBNull(9) ? "" : r.GetString(9);
+                    row.Error = r.IsDBNull(10) ? "" : r.GetString(10);
+                    list.Add(row);
+                }
+            }
+            return list;
+        }
+        /// <summary>写入一个插件配置文件（cfg 解析结果——分节 / 选项 / 注释整段 JSON 落库）。</summary>
+        /// <param name="row">配置行。</param>
+        public void SavePluginConfig(PluginConfigRow row)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT OR REPLACE INTO plugin_config(
+                                file_path, file_name, plugin_name, plugin_version, guid,
+                                size, mtime, sections, section_count, option_count, read_at, error)
+                                VALUES($f, $n, $pn, $pv, $g, $s, $m, $se, $sc, $oc, $r, $e)"))
+            {
+                cmd.Parameters.AddWithValue("$f", row.FilePath);
+                cmd.Parameters.AddWithValue("$n", row.FileName);
+                cmd.Parameters.AddWithValue("$pn", row.PluginName);
+                cmd.Parameters.AddWithValue("$pv", row.PluginVersion);
+                cmd.Parameters.AddWithValue("$g", row.Guid);
+                cmd.Parameters.AddWithValue("$s", row.Size);
+                cmd.Parameters.AddWithValue("$m", row.Mtime);
+                cmd.Parameters.AddWithValue("$se", row.Sections);
+                cmd.Parameters.AddWithValue("$sc", row.SectionCount);
+                cmd.Parameters.AddWithValue("$oc", row.OptionCount);
+                cmd.Parameters.AddWithValue("$r", string.IsNullOrEmpty(row.ReadAt) ? DateTime.UtcNow.ToString("o") : row.ReadAt);
+                cmd.Parameters.AddWithValue("$e", row.Error);
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>清掉某个插件库根下的全部配置行（重扫前先清——cfg 删掉了行也要跟着没）。</summary>
+        /// <param name="pluginRoot">插件库根绝对路径（cfg 在其 config 子目录下）。</param>
+        public void DeletePluginConfigsUnderRoot(string pluginRoot)
+        {
+            if (string.IsNullOrWhiteSpace(pluginRoot))
+            {
+                return;
+            }
+            using (SqliteCommand cmd = NewCommand("DELETE FROM plugin_config WHERE file_path LIKE $p"))
+            {
+                cmd.Parameters.AddWithValue("$p", pluginRoot.TrimEnd('\\', '/') + "\\%");
+                cmd.ExecuteNonQuery();
+            }
         }
         /// <summary>删掉某个 dll 的全部插件行（重解析前先清——同一 dll 的插件项可能变少）。</summary>
         /// <param name="filePath">dll 绝对路径。</param>
@@ -3812,6 +4075,11 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$p", filePath);
                 cmd.ExecuteNonQuery();
             }
+        }
+        /// <summary>把 WAL 内容归位到主库文件（预建分片库的模板复制前调用——只复制主文件时结构才完整）。</summary>
+        public void Checkpoint()
+        {
+            Exec("PRAGMA wal_checkpoint(TRUNCATE)");
         }
     }
 }

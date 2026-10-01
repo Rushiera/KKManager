@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using KKManager.Core;
@@ -50,7 +51,7 @@ namespace KKManager.Data
             get { return _corePath; }
         }
 
-        /// <summary>载入库序号映射（存主库设置表，键前缀 libdb:）。</summary>
+        /// <summary>载入库序号映射（存主库设置表，键前缀 libdb:）——含旧编号迁移（旧编号 N → 新复合号 N×进位基数，库文件 lib_N.db → lib_N_0.db）。</summary>
         private void LoadLibMap()
         {
             Dictionary<string, string> all = Core.LoadSettings();
@@ -61,19 +62,61 @@ namespace KKManager.Data
                     continue;
                 }
                 int n = 0;
-                if (!int.TryParse(kv.Value, out n))
+                if (!int.TryParse(kv.Value, out n) || n <= 0)
                 {
                     continue;
                 }
-                _libOf[kv.Key.Substring(6)] = n;
-                if (n >= _nextLib)
+                string rootPath = kv.Key.Substring(6);
+                // [段1] 旧编号迁移——本版之前库序号是「1、2、3…」；现为复合号（库根序号 × 进位基数 + 分片序号）
+                if (n < RootsRules.LibShardStride)
                 {
-                    _nextLib = n + 1;
+                    string oldFile = Path.Combine(_dir, "lib_" + n + ".db");
+                    int moved = RootsRules.LibOfShard(n, 0);
+                    string newFile = Path.Combine(_dir, RootsRules.LibDbFileName(moved));
+                    if (File.Exists(oldFile) && !File.Exists(newFile))
+                    {
+                        try
+                        {
+                            File.Move(oldFile, newFile);
+                            MoveSidecar(oldFile + "-wal", newFile + "-wal");
+                            MoveSidecar(oldFile + "-shm", newFile + "-shm");
+                            Console.WriteLine("[库数据] 编号迁移：" + Path.GetFileName(oldFile) + " → " + Path.GetFileName(newFile));
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("[库数据] 编号迁移失败（" + Path.GetFileName(oldFile) + "）：" + ex.Message + "——该库需重扫");
+                        }
+                    }
+                    n = moved;
+                    Core.SetSetting(kv.Key, n.ToString(CultureInfo.InvariantCulture));
+                }
+                _libOf[rootPath] = n;
+                int baseNo = RootsRules.BaseOfLib(n) + 1;
+                if (baseNo >= _nextLib)
+                {
+                    _nextLib = baseNo + 1;
                 }
             }
         }
 
-        /// <summary>取某个库根的库序号（没有则分配并落盘）。</summary>
+        /// <summary>随主库文件一起搬动边车文件（存在才动；失败出声不静默）。</summary>
+        private static void MoveSidecar(string from, string to)
+        {
+            if (!File.Exists(from) || File.Exists(to))
+            {
+                return;
+            }
+            try
+            {
+                File.Move(from, to);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[库数据] 边车文件迁移失败（" + from + "）：" + ex.Message);
+            }
+        }
+
+        /// <summary>取某个库根的库序号（没有则分配并落盘）——返回的是复合号的**首片**（库根序号 × 进位基数）。</summary>
         public int LibOf(string rootPath)
         {
             string key = (rootPath ?? "").Trim().ToLowerInvariant();
@@ -86,14 +129,14 @@ namespace KKManager.Data
             {
                 return n;
             }
-            n = _nextLib;
+            n = RootsRules.LibOfShard(_nextLib, 0);
             _nextLib = _nextLib + 1;
             _libOf[key] = n;
-            Core.SetSetting("libdb:" + key, n.ToString());
+            Core.SetSetting("libdb:" + key, n.ToString(CultureInfo.InvariantCulture));
             return n;
         }
 
-        /// <summary>按库序号取 Store（0 = 主库；懒开并缓存）。</summary>
+        /// <summary>按库序号取 Store（0 = 主库；懒开并缓存）——库序号是复合号：库根序号 × 进位基数 + 分片序号。</summary>
         public Store StoreByLib(int lib)
         {
             if (lib <= 0)
@@ -110,6 +153,157 @@ namespace KKManager.Data
             _libStores[lib] = s;
             _libByDb[s.DbPath] = lib;
             return s;
+        }
+
+        /// <summary>分片数目标（库设置 scan_shards → 环境变量 KKM_SCAN_SHARDS；无记录按默认 8）——与并发度（scan_workers）解耦：布局稳定，并发度可随时调。</summary>
+        public int ShardTarget()
+        {
+            int n = ReadCount(Environment.GetEnvironmentVariable("KKM_SCAN_SHARDS"));
+            if (n <= 0)
+            {
+                n = ReadCount(Core.GetSetting("scan_shards"));
+            }
+            return n <= 0 ? DefaultShardTarget : n;
+        }
+
+        /// <summary>分片数目标的默认值——本机 16 逻辑核，取 8 片（每片一个库文件，合并已取消）。</summary>
+        public const int DefaultShardTarget = 8;
+
+        /// <summary>某个卡片库根的分片数（落主库设置 libshards:&lt;库根序号&gt;；无记录返回 0 = 尚未定）。🔴 分片数一经确定必须稳定——变更即需整库重扫（行按路径哈希落片，片数变了旧行会留在错片）。</summary>
+        public int ShardCountOf(int baseLib)
+        {
+            if (baseLib <= 0)
+            {
+                return 0;
+            }
+            return ReadCount(Core.GetSetting("libshards:" + baseLib));
+        }
+
+        /// <summary>写入某个卡片库根的分片数（分片数变更需整库重扫——见 Scanner）。</summary>
+        public void SetShardCount(int baseLib, int shards)
+        {
+            if (baseLib <= 0)
+            {
+                return;
+            }
+            int n = shards <= 0 ? 1 : shards;
+            Core.SetSetting("libshards:" + baseLib, n.ToString(CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>解析一个计数字符串（空 / 非法 / 非正一律 0）。</summary>
+        private static int ReadCount(string text)
+        {
+            int n;
+            if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out n))
+            {
+                return n;
+            }
+            return 0;
+        }
+
+        /// <summary>打开（或复用）某个库根的全部分片 Store——新建的片按「结构已就绪」打开，跳过建表。分片库须 ATTACH 主库（四色聚合要读 mod 主表）。</summary>
+        public List<Store> OpenShardStores(int baseLib, int shards)
+        {
+            List<Store> list = new List<Store>();
+            if (baseLib <= 0)
+            {
+                return list;
+            }
+            for (int k = 0; k < shards; k = k + 1)
+            {
+                int lib = RootsRules.LibOfShard(baseLib, k);
+                Store s = null;
+                if (!_libStores.TryGetValue(lib, out s))
+                {
+                    string path = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
+                    s = new Store(path, _corePath, true);
+                    _libStores[lib] = s;
+                    _libByDb[s.DbPath] = lib;
+                }
+                list.Add(s);
+            }
+            return list;
+        }
+
+        /// <summary>某个库根的全部卡片分片 Store（按分片序号升序；主库条目返回空表——调用方改走主库）——尚未定片数时按 1 片；缺片的先按常规打开建结构。</summary>
+        public List<Store> StoresOfBase(int baseLib)
+        {
+            List<Store> list = new List<Store>();
+            if (baseLib <= 0)
+            {
+                return list;
+            }
+            int n = ShardCountOf(baseLib);
+            if (n <= 0)
+            {
+                n = 1;
+            }
+            bool allExist = true;
+            for (int k = 0; k < n; k = k + 1)
+            {
+                string p = Path.Combine(_dir, RootsRules.LibDbFileName(RootsRules.LibOfShard(baseLib, k)));
+                if (!File.Exists(p))
+                {
+                    allExist = false;
+                    break;
+                }
+            }
+            if (allExist)
+            {
+                return OpenShardStores(baseLib, n);
+            }
+            for (int k = 0; k < n; k = k + 1)
+            {
+                list.Add(StoreByLib(RootsRules.LibOfShard(baseLib, k)));
+            }
+            return list;
+        }
+
+        /// <summary>某个库根的分片号集合（按分片序号升序）——读面按库根扇出时用；尚未定片数时按 1 片。</summary>
+        public List<int> LibsOfBase(int baseLib)
+        {
+            List<int> list = new List<int>();
+            if (baseLib <= 0)
+            {
+                return list;
+            }
+            int n = ShardCountOf(baseLib);
+            if (n <= 0)
+            {
+                n = 1;
+            }
+            for (int k = 0; k < n; k = k + 1)
+            {
+                list.Add(RootsRules.LibOfShard(baseLib, k));
+            }
+            return list;
+        }
+
+        /// <summary>某个卡片库根对应的库根序号（懒分配并落盘）。</summary>
+        public int CardBaseOf(RootEntry entry)
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.path))
+            {
+                return 0;
+            }
+            return LibOf(entry.path);
+        }
+
+        /// <summary>把一个文件路径归到某个库根的分片号——FNV-1a 哈希取模；同一文件恒落同一分片（跨扫描稳定）。</summary>
+        public static int ShardOfPath(string filePath, int shards)
+        {
+            if (shards <= 1 || string.IsNullOrEmpty(filePath))
+            {
+                return 0;
+            }
+            // FNV-1a 32 位——大小写不敏感归一后计算（Windows 路径）
+            uint hash = 2166136261u;
+            string key = filePath.ToLowerInvariant();
+            for (int i = 0; i < key.Length; i = i + 1)
+            {
+                hash = (hash ^ key[i]) * 16777619u;
+            }
+            return (int)(hash % (uint)shards);
         }
 
         /// <summary>取某条库根对应的 Store——预置条目与 mod 缓存库走主库，使用者添加的库根各自一个库文件。</summary>
@@ -132,7 +326,7 @@ namespace KKManager.Data
             return LibOf(entry.path);
         }
 
-        /// <summary>某 Store 对应的库序号（主库返回 0）。</summary>
+        /// <summary>某 Store 对应的库序号（主库返回 0）——分片库返回其复合号。</summary>
         public int LibOfStore(Store store)
         {
             if (store == null || store.IsCore)
@@ -183,7 +377,7 @@ namespace KKManager.Data
             return list;
         }
 
-        /// <summary>把一组库根对应的库文件加进清单（已加的跳过）。</summary>
+        /// <summary>把一组库根对应的库文件加进清单（已加的跳过）——每个库根按分片数展开（卡片侧可能多片，mod 侧单片）。</summary>
         private void AddLibStores(List<Store> list, HashSet<int> seen, List<RootEntry> roots, bool isMods)
         {
             if (roots == null)
@@ -193,15 +387,21 @@ namespace KKManager.Data
             foreach (RootEntry e in roots)
             {
                 int lib = LibOfEntry(e, isMods);
-                if (lib <= 0 || !seen.Add(lib))
+                if (lib <= 0)
                 {
                     continue;
                 }
-                list.Add(StoreByLib(lib));
+                foreach (int one in LibsOfBase(lib))
+                {
+                    if (seen.Add(one))
+                    {
+                        list.Add(StoreByLib(one));
+                    }
+                }
             }
         }
 
-        /// <summary>全库扫描前按库根配置准备库文件（含首次迁移：把主库里的附加库 / 冷藏库数据搬进各自的库文件）。</summary>
+        /// <summary>全库扫描前按库根配置准备库文件（含首次迁移：把主库里的附加库 / 冷藏库数据搬进各自的库文件；卡片侧预置库根也各自独立成库）。</summary>
         public void EnsureMigrated(RootsConfig cfg)
         {
             if (Core.GetSetting("dbSplit") == "1")
@@ -216,7 +416,7 @@ namespace KKManager.Data
                 kv.Value.Vacuum();
             }
             Core.Vacuum();
-            Console.WriteLine("[迁移] 按库拆分完成——各附加库 / 冷藏库已独立为库文件");
+            Console.WriteLine("[迁移] 按库拆分完成——各库根已独立为库文件");
         }
 
         /// <summary>把一组库根的数据从主库搬进各自的库文件。</summary>
@@ -274,11 +474,21 @@ namespace KKManager.Data
             }
             _libOf.Remove(key);
             Core.DeleteSetting("libdb:" + key);
-            string path = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
-            DeleteFileIfExists(path);
-            DeleteFileIfExists(path + "-wal");
-            DeleteFileIfExists(path + "-shm");
-            Console.WriteLine("[库数据] 已彻底删除：" + rootPath + " → " + Path.GetFileName(path));
+            // 分片库常驻——一个库根可能有多片，逐片删（连同该库根的分片数设置）
+            int shards = ShardCountOf(lib);
+            if (shards <= 0)
+            {
+                shards = 1;
+            }
+            for (int k = 0; k < shards; k = k + 1)
+            {
+                string one = Path.Combine(_dir, RootsRules.LibDbFileName(RootsRules.LibOfShard(lib, k)));
+                DeleteFileIfExists(one);
+                DeleteFileIfExists(one + "-wal");
+                DeleteFileIfExists(one + "-shm");
+            }
+            Core.DeleteSetting("libshards:" + lib);
+            Console.WriteLine("[库数据] 已彻底删除：" + rootPath + " → lib_" + lib + "_*.db（" + shards + " 片）");
             return true;
         }
 
@@ -513,18 +723,23 @@ namespace KKManager.Data
             return dest;
         }
 
-        /// <summary>卡片列表——指定 root 时只查该库；否则跨库合并后排序分页（order：排序键 mtime / size / file / chara / timeline；desc：方向，只对可切向的键生效）。</summary>
+        /// <summary>卡片列表——指定 root 时只查该库根的全部分片；否则跨库合并后排序分页（order：排序键 mtime / size / file / chara / timeline；desc：方向，只对可切向的键生效）。</summary>
         public List<CardRow> QueryCards(RootsConfig cfg, int page, int size, string filter, string q, string folder, string root, string order, bool desc)
         {
             if (!string.IsNullOrEmpty(root))
             {
-                int lib = LibOfRootPath(cfg, root);
-                List<CardRow> one = StoreByLib(lib).QueryCards(page, size, filter, q, folder, root, order, desc);
-                foreach (CardRow r in one)
+                int baseLib = LibOfRootPath(cfg, root);
+                List<CardRow> one = new List<CardRow>();
+                foreach (int lib in LibsOfBase(baseLib))
                 {
-                    r.Lib = lib;
+                    foreach (CardRow r in StoreByLib(lib).QueryCards(1, 0, filter, q, folder, root, order, desc))
+                    {
+                        r.Lib = lib;
+                        one.Add(r);
+                    }
                 }
-                return one;
+                one.Sort(new CardComparer(order, desc));
+                return Slice(one, page, size);
             }
 
             List<CardRow> list = new List<CardRow>();
@@ -659,7 +874,7 @@ namespace KKManager.Data
             return list.GetRange(off, take);
         }
 
-        /// <summary>卡片文件夹清单（跨库拼接）。</summary>
+        /// <summary>卡片文件夹清单（跨库拼接，同库根的多分片合并计数）。</summary>
         public List<object> QueryFolders(RootsConfig cfg)
         {
             List<object> list = new List<object>();
@@ -670,19 +885,22 @@ namespace KKManager.Data
             return list;
         }
 
-        /// <summary>mod 列表——mod 行取主库（全局表），被引用卡数跨库汇总后排序分页。</summary>
+        /// <summary>mod 列表——mod 行取主库（全局表），被引用卡数跨库汇总（总数 + 人物卡 / 服装卡 / 场景卡分列）后排序分页。</summary>
         public List<ModRow> QueryMods(RootsConfig cfg, int page, int size, string filter, string q)
         {
             List<ModRow> rows = Core.QueryMods(1, 0, "all", q);
-            Dictionary<string, long> used = new Dictionary<string, long>(StringComparer.Ordinal);
+            // 被引用卡数按卡类型分列（人物卡 / 服装卡 / 场景卡 sd）——各库分别统计后跨库相加
+            Dictionary<string, (long Used, long Chara, long Clothes, long Sd)> used =
+                new Dictionary<string, (long Used, long Chara, long Clothes, long Sd)>(StringComparer.Ordinal);
             foreach (Store s in AllStores(cfg))
             {
-                foreach (KeyValuePair<string, long> kv in s.RefCountsByGuid())
+                foreach (KeyValuePair<string, (long Used, long Chara, long Clothes, long Sd)> kv in s.RefCountsByTypeByGuid())
                 {
-                    long n = 0;
-                    if (used.TryGetValue(kv.Key, out n))
+                    (long Used, long Chara, long Clothes, long Sd) cur;
+                    if (used.TryGetValue(kv.Key, out cur))
                     {
-                        used[kv.Key] = n + kv.Value;
+                        used[kv.Key] = (cur.Used + kv.Value.Used, cur.Chara + kv.Value.Chara,
+                                        cur.Clothes + kv.Value.Clothes, cur.Sd + kv.Value.Sd);
                     }
                     else
                     {
@@ -695,14 +913,20 @@ namespace KKManager.Data
             List<ModRow> list = new List<ModRow>();
             foreach (ModRow m in rows)
             {
-                long n = 0;
+                (long Used, long Chara, long Clothes, long Sd) n;
                 if (used.TryGetValue(m.Guid, out n))
                 {
-                    m.Used = n;
+                    m.Used = n.Used;
+                    m.UsedChara = n.Chara;
+                    m.UsedClothes = n.Clothes;
+                    m.UsedSd = n.Sd;
                 }
                 else
                 {
                     m.Used = 0;
+                    m.UsedChara = 0;
+                    m.UsedClothes = 0;
+                    m.UsedSd = 0;
                 }
                 ModOldRecord oldRec = null;
                 if (olds.TryGetValue(m.Guid, out oldRec))
@@ -2167,6 +2391,43 @@ namespace KKManager.Data
                 return false;
             }
             foreach (RootEntry e in cfg.modRoots)
+            {
+                if (e == null || string.IsNullOrWhiteSpace(e.path))
+                {
+                    continue;
+                }
+                string root = e.path.Trim().TrimEnd('\\', '/');
+                if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                if (full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        /// <summary>路径是否落在插件库根内（插件 dll / cfg 定位前的白名单校验——按库根配置判定，不读库）。</summary>
+        /// <param name="cfg">库根配置。</param>
+        /// <param name="path">待校验路径。</param>
+        /// <returns>落在任一插件库根内返回 true。</returns>
+        public static bool IsUnderPluginRoot(RootsConfig cfg, string path)
+        {
+            if (cfg == null || cfg.pluginRoots == null || string.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+            string full;
+            try
+            {
+                full = Path.GetFullPath(path);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            foreach (RootEntry e in cfg.pluginRoots)
             {
                 if (e == null || string.IsNullOrWhiteSpace(e.path))
                 {
