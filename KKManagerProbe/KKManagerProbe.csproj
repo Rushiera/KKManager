@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -10,5 +10,11 @@
     <RootNamespace>KKManager.Probe</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+
+  <!-- 侦察探针需要复用产品侧读面实现（与产品同源——探针不另写解析逻辑）：
+       CardFileSession / CardReader / CardName / Thumbnail 直接引用 KKManager 项目。 -->
+  <ItemGroup>
+    <ProjectReference Include="..\KKManager\KKManager.csproj" />
+  </ItemGroup>
 
 </Project>

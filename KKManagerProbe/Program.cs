@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using KKManager.Core;
+using KKManager.Data;
 
 namespace KKManager.Probe
 {
@@ -152,6 +154,8 @@ namespace KKManager.Probe
                     return SdItems(args[1], args[2]);
                 case "sdscan":
                     return SdScanCommand(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 16);
+                case "moduse":
+                    return ModUseCommand(args[1], int.Parse(args[2]));
                 case "tlscan":
                     return TlScanCommand(args[1], args[2]);
                 default:
@@ -4642,6 +4646,53 @@ namespace KKManager.Probe
                 pos = pos + 1;
             }
             return v;
+        }
+        /// <summary>验证用：打印 mod 列表的被引用卡数（总数 + 角色卡 / 服装卡 / 场景卡分列），并对被引用最多的若干 guid 列出引用卡片的类型明细——供人工核对三列与明细一致。</summary>
+        private static int ModUseCommand(string dbPath, int detail)
+        {
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                List<ModRow> rows = hub.QueryMods(cfg, 1, 0, "all", "");
+                long withUse = 0;
+                long over = 0;
+                foreach (ModRow m in rows)
+                {
+                    if (m.Used > 0)
+                    {
+                        withUse = withUse + 1;
+                    }
+                    if (m.UsedChara + m.UsedClothes + m.UsedSd > m.Used)
+                    {
+                        over = over + 1;
+                    }
+                }
+                Console.WriteLine("mod 行 " + rows.Count.ToString() + " · 被引用 " + withUse.ToString() + " · 分列之和超总数 " + over.ToString());
+                List<ModRow> top = new List<ModRow>(rows);
+                top.Sort(delegate (ModRow a, ModRow b) { return b.Used.CompareTo(a.Used); });
+                int n = detail < top.Count ? detail : top.Count;
+                for (int i = 0; i < n; i = i + 1)
+                {
+                    ModRow m = top[i];
+                    Console.WriteLine(m.Guid + "  used=" + m.Used.ToString() + " 角色卡=" + m.UsedChara.ToString()
+                        + " 服装卡=" + m.UsedClothes.ToString() + " 场景卡=" + m.UsedSd.ToString());
+                    List<CardRow> cards = hub.QueryCardsByMod(cfg, m.Guid, 1, 0);
+                    Dictionary<string, int> byType = new Dictionary<string, int>(StringComparer.Ordinal);
+                    foreach (CardRow c in cards)
+                    {
+                        string t = c.CardType == null ? "<null>" : c.CardType;
+                        int k = 0;
+                        byType.TryGetValue(t, out k);
+                        byType[t] = k + 1;
+                    }
+                    foreach (KeyValuePair<string, int> kv in byType)
+                    {
+                        Console.WriteLine("    卡类型 " + kv.Key + " : " + kv.Value.ToString());
+                    }
+                }
+            }
+            return 0;
         }
     }
 }
