@@ -59,6 +59,15 @@ namespace KKManager.Core
         /// <summary>本次扫描读到 timeline 的场景卡数。</summary>
         public int TimelineRead { get; set; }
 
+        /// <summary>本次扫描枚举到的插件 dll 数（插件库连带扫描——主要库扫描）。</summary>
+        public int PluginDlls { get; set; }
+
+        /// <summary>本次扫描落库的插件项数（有 guid 的插件行）。</summary>
+        public int Plugins { get; set; }
+
+        /// <summary>本次扫描读到的插件配置文件（cfg）数。</summary>
+        public int PluginConfigs { get; set; }
+
         /// <summary>提交的写事务批次（同一步骤跨文件 × 500 条一批）。</summary>
         public int Removed { get; set; }
 
@@ -76,6 +85,8 @@ namespace KKManager.Core
 
         /// <summary>当前步骤内文件总数（各库根之和）。</summary>
         public int StepTotal { get; set; }
+        /// <summary>并行 worker 共享的已完成文件计数（Interlocked 累加）——StepDone 的并行口径，仅供进度显示，不参与结果合并。</summary>
+        public int SharedDone;
 
         /// <summary>耗时。</summary>
         public TimeSpan Elapsed { get; set; }
@@ -102,6 +113,9 @@ namespace KKManager.Core
             NamesFilled += other.NamesFilled;
             TypesFixed += other.TypesFixed;
             TimelineRead += other.TimelineRead;
+            PluginDlls += other.PluginDlls;
+            Plugins += other.Plugins;
+            PluginConfigs += other.PluginConfigs;
             Removed += other.Removed;
             Elapsed += other.Elapsed;
             foreach (string e in other.Errors)
@@ -115,6 +129,19 @@ namespace KKManager.Core
 
         /// <summary>本次扫描判定为「该离线」的库根路径——目录不存在或枚举到 0 个东西（预置条目不在此列）；由调用方置位配置并生成待办。</summary>
         public List<string> OfflineRoots { get; } = new List<string>();
+    }
+
+    /// <summary>插件库扫描计数——dll 数 / 插件项数 / 配置文件数。</summary>
+    public class PluginScanResult
+    {
+        /// <summary>枚举到的 dll 数（含未解析出插件特性的非插件 dll）。</summary>
+        public int Dlls { get; set; }
+
+        /// <summary>落库的插件项数（有 guid 的插件行）。</summary>
+        public int Plugins { get; set; }
+
+        /// <summary>读到的配置文件（cfg）数。</summary>
+        public int Configs { get; set; }
     }
 
     /// <summary>一轮扫描里一个文件的内存态——跨步骤复用（省重复 FileInfo 与重复查库）。</summary>
@@ -189,6 +216,11 @@ namespace KKManager.Core
 
         /// <summary>枚举是否失败（失败时不清扫——空结果不等于文件消失）。</summary>
         public bool EnumFailed { get; set; }
+        /// <summary>并行分片库（卡片侧）——每分片一个独立 db（**常驻**，不再合并）；文件按路径哈希恒落同一分片，跨扫描稳定。非卡片侧为 null。</summary>
+        public List<Store> Shards;
+
+        /// <summary>分片库对应的完成戳索引（与 Shards 同序）——每片各读自己的 scan_state。</summary>
+        public List<Dictionary<string, Dictionary<string, ScanStepRow>>> ShardSteps;
     }
 
     /// <summary>库扫描——按步骤编排：同一段内共用一个文件打开；每步独立完成戳（scan_state）。</summary>
@@ -196,6 +228,30 @@ namespace KKManager.Core
     {
         private const int MaxErrors = 200;
         private const int BatchSize = 500;
+        /// <summary>并行 worker 数上限——分片库方案（每 worker 一个独立 db，末尾一次合并）；多连接写同一库已证伪
+        /// （451 张 14.9 s → 81.3 s，SQLite 写锁竞争），故并行只在分片库上做。</summary>
+        private const int MaxScanWorkers = 32;
+
+        /// <summary>并行 worker 数的默认值（无环境变量 / 库设置时的回落——1 = 串行，关闭并行）。</summary>
+        private const int DefaultScanWorkers = 1;
+
+        /// <summary>启用并行的最小文件数——小库不值得为分片库付建库成本。</summary>
+        private const int MinFilesForParallel = 200;
+
+        /// <summary>每个 worker 至少承担的文件数——分片库建库成本与单 worker 工作量的平衡点。</summary>
+        private const int MinFilesPerWorker = 100;
+
+        /// <summary>进度出声的文件间隔（并行时按全局计数，串行时按本 worker 计数）——面板进度条按日志行解析，本值即进度刷新粒度。</summary>
+        private const int ProgressEvery = 5;
+
+        /// <summary>mod 侧进度出声的文件间隔——mod 库动辄上万文件，出声过密会拖慢扫描（mod 行步骤几乎零耗时）。</summary>
+        private const int ModProgressEvery = 200;
+
+        /// <summary>插件库进度出声的 dll 间隔——dll 数百个，出声过密会把日志刷成瀑布。</summary>
+        private const int PluginProgressEvery = 50;
+
+        /// <summary>逐文件诊断出声的默认值（无环境变量 / 库设置时的回落——并行卡点定位用）。</summary>
+        private const bool DefaultScanTrace = false;
 
         /// <summary>
         /// 统一编排入口——按计划的段顺序执行（跨侧交错：卡片行 → mod 总数 → 声明区 …）。
@@ -212,7 +268,14 @@ namespace KKManager.Core
             List<ScanRootState> modStates = CollectRoots(hub, cfg, only, scope, true, result, log);
             List<ScanRootState> cardStates = CollectRoots(hub, cfg, only, scope, false, result, log);
             List<ScanSegment> segs = plan.Segments();
-            result.StepCount = segs.Count;
+            bool withPlugins = scope == ScanScope.Preset && only == null;
+            result.StepCount = segs.Count + (withPlugins ? 1 : 0);
+            int workers = ResolveWorkers(hub);
+            bool trace = ResolveTrace(hub);
+            if (log != null && workers > 1)
+            {
+                log("并行扫描：卡片侧 worker 数 " + workers + "（每 worker 一个分片库，卡片侧跑完一次并入）");
+            }
 
             int index = 0;
             foreach (ScanSegment seg in segs)
@@ -223,7 +286,7 @@ namespace KKManager.Core
                 List<ScanRootState> states = seg.Mods ? modStates : cardStates;
                 result.StepTotal = TotalFiles(states);
                 result.StepDone = 0;
-                Report(log, "步骤 " + index + "/" + segs.Count + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
+                Report(log, "步骤 " + index + "/" + result.StepCount + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
                 foreach (ScanRootState st in states)
                 {
                     if (seg.Mods)
@@ -232,7 +295,7 @@ namespace KKManager.Core
                     }
                     else
                     {
-                        RunCardSegment(st, seg, force, thumbWidth, thumbQuality, result, log);
+                        RunCardSegment(hub, st, seg, force, thumbWidth, thumbQuality, result, log, workers, trace);
                     }
                 }
             }
@@ -244,6 +307,27 @@ namespace KKManager.Core
             foreach (ScanRootState st in modStates)
             {
                 CleanupMods(hub, cfg, st, result, log);
+            }
+
+            // [插件库] 主要库扫描的连带段——插件库根（BepInEx）只读解析 dll 元数据与 cfg（数据落主库）；
+            // 追加库扫描（extra）与单库更新（only）不连带——插件库只有预置锁定一条，随主要库走
+            if (withPlugins)
+            {
+                index = index + 1;
+                result.StepIndex = index;
+                result.StepName = "插件库（dll 元数据 + 配置文件）";
+                result.StepTotal = CountPluginDlls(cfg);
+                result.StepDone = 0;
+                Report(log, "步骤 " + index + "/" + result.StepCount + "：插件库（dll 元数据 + 配置文件）（" + result.StepTotal + " 个文件）");
+                List<string> pluginErrors = new List<string>();
+                PluginScanResult scan = ScanPlugins(hub.Core, cfg, pluginErrors, log);
+                foreach (string e in pluginErrors)
+                {
+                    AddError(result, e);
+                }
+                result.PluginDlls = scan.Dlls;
+                result.Plugins = scan.Plugins;
+                result.PluginConfigs = scan.Configs;
             }
 
             ApplyOfflineMarks(hub, cfg, result, false, log);
@@ -338,6 +422,12 @@ namespace KKManager.Core
             List<ScanRootState> states = CollectRoots(hub, cfg, only, scope, false, result, log);
             List<ScanSegment> segs = SegmentsFor(plan, false);
             result.StepCount = segs.Count;
+            int workers = ResolveWorkers(hub);
+            bool trace = ResolveTrace(hub);
+            if (log != null && workers > 1)
+            {
+                log("并行扫描：卡片侧 worker 数 " + workers + "（每 worker 一个分片库，卡片侧跑完一次并入）");
+            }
 
             int index = 0;
             foreach (ScanSegment seg in segs)
@@ -348,10 +438,9 @@ namespace KKManager.Core
                 result.StepDone = 0;
                 result.StepTotal = TotalFiles(states);
                 Report(log, "步骤 " + index + "/" + segs.Count + "：" + seg.Label + "（" + result.StepTotal + " 个文件）");
-                result.StepDone = 0;
                 foreach (ScanRootState st in states)
                 {
-                    RunCardSegment(st, seg, force, thumbWidth, thumbQuality, result, log);
+                    RunCardSegment(hub, st, seg, force, thumbWidth, thumbQuality, result, log, workers, trace);
                 }
             }
 
@@ -387,6 +476,55 @@ namespace KKManager.Core
                 n += st.Files.Count;
             }
             return n;
+        }
+        /// <summary>解析一个计数字符串（空 / 非法 / 非正一律返回 0）。</summary>
+        private static int ReadCount(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return 0;
+            }
+            int v;
+            if (!int.TryParse(text.Trim(), out v))
+            {
+                return 0;
+            }
+            if (v <= 0)
+            {
+                return 0;
+            }
+            return v;
+        }
+        /// <summary>并行 worker 数——优先级：环境变量 KKM_SCAN_WORKERS → 库设置 scan_workers → 默认值；上限 MaxScanWorkers。</summary>
+        private static int ResolveWorkers(StoreHub hub)
+        {
+            int n = ReadCount(Environment.GetEnvironmentVariable("KKM_SCAN_WORKERS"));
+            if (n <= 0 && hub != null)
+            {
+                n = ReadCount(hub.Core.GetSetting("scan_workers"));
+            }
+            if (n <= 0)
+            {
+                n = DefaultScanWorkers;
+            }
+            if (n > MaxScanWorkers)
+            {
+                n = MaxScanWorkers;
+            }
+            return n;
+        }
+        /// <summary>并行扫描的逐文件诊断出声（每文件 + 步名，定位卡点用）——环境变量 KKM_SCAN_TRACE=1 或库设置 scan_trace=1 打开。</summary>
+        private static bool ResolveTrace(StoreHub hub)
+        {
+            if (ReadCount(Environment.GetEnvironmentVariable("KKM_SCAN_TRACE")) > 0)
+            {
+                return true;
+            }
+            if (hub != null && ReadCount(hub.Core.GetSetting("scan_trace")) > 0)
+            {
+                return true;
+            }
+            return DefaultScanTrace;
         }
 
         // [段1] 库根收集与文件清单（枚举只做一次，各段复用）
@@ -445,15 +583,35 @@ namespace KKManager.Core
                 {
                     MarkOffline(result, root, mods, log);
                 }
-                st.Files = BuildFiles(root, files, mods, st.Store);
-                st.Steps = st.Store.LoadScanSteps();
+                st.Files = BuildFiles(hub, root, files, mods, st.Store);
+                st.Steps = LoadSteps(hub, root, mods, st.Store);
                 list.Add(st);
             }
             return list;
         }
 
-        /// <summary>建文件清单内存态——从库里的索引补 guid / 卡片 id / 图片区终点 / 旧类型。</summary>
-        private static List<ScanFile> BuildFiles(RootEntry root, List<string> files, bool mods, Store store)
+        /// <summary>读完成戳索引——卡片侧跨分片合并（分片常驻后每片各存自己的戳），mod 侧读本库。</summary>
+        private static Dictionary<string, Dictionary<string, ScanStepRow>> LoadSteps(StoreHub hub, RootEntry root, bool mods, Store store)
+        {
+            if (mods)
+            {
+                return store.LoadScanSteps();
+            }
+            Dictionary<string, Dictionary<string, ScanStepRow>> map =
+                new Dictionary<string, Dictionary<string, ScanStepRow>>(StringComparer.OrdinalIgnoreCase);
+            int baseLib = hub.CardBaseOf(root);
+            foreach (Store s in hub.StoresOfBase(baseLib))
+            {
+                foreach (KeyValuePair<string, Dictionary<string, ScanStepRow>> kv in s.LoadScanSteps())
+                {
+                    map[kv.Key] = kv.Value;
+                }
+            }
+            return map;
+        }
+
+        /// <summary>建文件清单内存态——从库里的索引补 guid / 卡片 id / 图片区终点 / 旧类型（卡片侧跨分片合并，分片库常驻）。</summary>
+        private static List<ScanFile> BuildFiles(StoreHub hub, RootEntry root, List<string> files, bool mods, Store store)
         {
             List<ScanFile> list = new List<ScanFile>(files.Count);
             string rootNorm = (root.path ?? "").TrimEnd('\\', '/');
@@ -483,7 +641,16 @@ namespace KKManager.Core
                 return list;
             }
 
-            Dictionary<string, string[]> stamps = store.LoadCardStamps();
+            // 卡片侧——分片库常驻，索引跨分片合并（每个文件只在一片，后写者覆盖无冲突）
+            Dictionary<string, string[]> stamps = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+            int baseLib = hub.CardBaseOf(root);
+            foreach (Store s in hub.StoresOfBase(baseLib))
+            {
+                foreach (KeyValuePair<string, string[]> kv in s.LoadCardStamps())
+                {
+                    stamps[kv.Key] = kv.Value;
+                }
+            }
             foreach (string f in files)
             {
                 FileInfo fi = new FileInfo(f);
@@ -520,20 +687,97 @@ namespace KKManager.Core
 
         // [段2] 卡片侧执行
 
-        /// <summary>卡片侧一段的执行——按库根循环文件；段内步骤共享一次文件打开（阶段 2 起）。</summary>
-        private static void RunCardSegment(ScanRootState st, ScanSegment seg, bool force, int thumbWidth, int thumbQuality, ScanResult result, Action<string> log)
+        /// <summary>卡片侧一段的执行——按库根循环文件；段内步骤共享一次文件打开（阶段 2 起）；并行时文件按路径哈希落分片库（常驻，不合并）。</summary>
+        private static void RunCardSegment(StoreHub hub, ScanRootState st, ScanSegment seg, bool force, int thumbWidth, int thumbQuality, ScanResult result, Action<string> log, int workers = 1, bool trace = false)
         {
-            Store store = st.Store;
+            int total = st.Files.Count;
+            // [段1] 分片布局——**与并发度解耦**：片数由库根定一次并常驻（跨扫描稳定，行按路径哈希恒落同片），
+            // 并发度只决定同时跑几片。实测：合并占并行总耗时 60%（30 片 ≈ 15 分钟级）⇒ 分片库不再合并。
+            // （多连接写同一库已证伪：451 张 14.9 s → 81.3 s，SQLite 写锁竞争）
+            EnsureShards(hub, st, total, log);
+            int shards = st.Shards.Count;
+
+            // [段2] 按路径哈希分桶——同一文件恒落同一片
+            List<ScanFile>[] buckets = new List<ScanFile>[shards];
+            for (int k = 0; k < shards; k = k + 1)
+            {
+                buckets[k] = new List<ScanFile>();
+            }
+            foreach (ScanFile f in st.Files)
+            {
+                buckets[StoreHub.ShardOfPath(f.Path, shards)].Add(f);
+            }
+
+            // [段3] 并发度 = min(worker 设置, 片数)；片多于并发度时每线程领多片
+            int threads = workers;
+            if (threads > shards)
+            {
+                threads = shards;
+            }
+            if (threads < 1)
+            {
+                threads = 1;
+            }
+            result.SharedDone = 0;
+            if (threads <= 1)
+            {
+                // 串行——逐片跑（布局与并行时完全一致）；`one` 跨片复用，StepDone 因而是全程累加的
+                ScanResult one = new ScanResult();
+                for (int k = 0; k < shards; k = k + 1)
+                {
+                    RunCardRange(st, seg, force, thumbWidth, thumbQuality, one, log, buckets[k], st.Shards[k], st.ShardSteps[k], null, false);
+                }
+                result.Merge(one);
+                return;
+            }
+
+            ScanResult[] locals = new ScanResult[threads];
+            Task[] tasks = new Task[threads];
+            for (int t = 0; t < threads; t = t + 1)
+            {
+                int index = t;
+                locals[index] = new ScanResult();
+                tasks[index] = Task.Run(delegate
+                {
+                    // 该线程领分片 t, t+threads, t+2*threads …（片与线程按模分配，均衡）
+                    for (int k = index; k < shards; k = k + threads)
+                    {
+                        RunCardRange(st, seg, force, thumbWidth, thumbQuality, locals[index], log, buckets[k], st.Shards[k], st.ShardSteps[k], result, trace);
+                    }
+                });
+            }
+            Task.WaitAll(tasks);
+            foreach (ScanResult local in locals)
+            {
+                result.Merge(local);
+            }
+        }
+        /// <summary>卡片侧一段的执行（分片版）——按给定的文件子集与目标库跑；steps 为该分片自己的完成戳索引（并行时非空）。</summary>
+        private static void RunCardRange(ScanRootState st, ScanSegment seg, bool force, int thumbWidth, int thumbQuality, ScanResult result, Action<string> log, List<ScanFile> files, Store store, Dictionary<string, Dictionary<string, ScanStepRow>> steps, ScanResult progress = null, bool trace = false)
+        {
             int i = 0;
             int batch = 0;
             int total = st.Files.Count;
+            bool parallel = progress != null;
             store.Begin();
             try
             {
-                foreach (ScanFile f in st.Files)
+                foreach (ScanFile f in files)
                 {
                     i = i + 1;
                     result.StepDone = result.StepDone + 1;
+                    int done = result.StepDone;
+                    if (progress != null)
+                    {
+                        // 并行进度——全局共享计数（Interlocked）；面板 / CLI 按「已完成 / 总数」显示
+                        done = System.Threading.Interlocked.Increment(ref progress.SharedDone);
+                        progress.StepDone = done;
+                    }
+                    if (log != null && done % ProgressEvery == 0)
+                    {
+                        // 出声条件挂在「全局已完成数」上——每分片文件少时（30 分片 × 31 张）也能看见推进
+                        log("  " + seg.Label + " " + done + "/" + total);
+                    }
                     CardFileSession session = null;
                     if (seg.Tier != ScanReadTier.None)
                     {
@@ -543,10 +787,15 @@ namespace KKManager.Core
                     {
                         foreach (ScanStepDef step in seg.Steps)
                         {
-                            if (!force && StepDone(st, f, step.Id))
+                            if (!force && StepDoneIn(steps, f, step.Id))
                             {
                                 result.Skipped = result.Skipped + 1;
                                 continue;
+                            }
+                            if (parallel && trace && log != null)
+                            {
+                                // 逐文件诊断出声——卡住时最后一行即「哪个分片 / 哪张卡 / 哪一步」
+                                log("  [" + Path.GetFileNameWithoutExtension(store.DbPath) + "] " + step.Id + " " + Path.GetFileName(f.Path));
                             }
                             bool ok = RunCardStep(store, st.Entry, f, session, step, thumbWidth, thumbQuality, result);
                             if (ok)
@@ -574,10 +823,6 @@ namespace KKManager.Core
                         store.Begin();
                         batch = 0;
                     }
-                    if (log != null && i % 200 == 0)
-                    {
-                        log("  " + seg.Label + " " + i + "/" + total);
-                    }
                 }
                 store.Commit();
             }
@@ -585,6 +830,128 @@ namespace KKManager.Core
             {
                 store.Rollback();
                 throw;
+            }
+        }
+        /// <summary>准备分片库——片数首次按「分片目标」定下并落设置（受每片至少 MinFilesPerWorker 约束裁剪），此后稳定不变；缺片则用「模板建一次 + 文件复制」补齐；分片库**常驻**（不合并、不删），各片各读自己的完成戳索引。</summary>
+        private static void EnsureShards(StoreHub hub, ScanRootState st, int total, Action<string> log = null)
+        {
+            int baseLib = hub.CardBaseOf(st.Entry);
+            if (baseLib <= 0)
+            {
+                return;
+            }
+            // [段1] 片数——首次按「分片目标」定下并落盘（受每片至少 MinFilesPerWorker 约束裁剪）；此后稳定不变。
+            // 🔴 片数与并发度解耦（布局稳定，并发度随时可调）；变更片数会让已落库的行留在错片（行按路径哈希落片）⇒ 改数需整库重扫
+            int shards = hub.ShardCountOf(baseLib);
+            if (shards <= 0)
+            {
+                shards = hub.ShardTarget();
+                int byBatch = total / MinFilesPerWorker;
+                if (byBatch < 1)
+                {
+                    byBatch = 1;
+                }
+                if (shards > byBatch)
+                {
+                    shards = byBatch;
+                }
+                if (shards < 1)
+                {
+                    shards = 1;
+                }
+                hub.SetShardCount(baseLib, shards);
+                if (log != null && shards > 1)
+                {
+                    log("  [分片] 本库根分片数定为 " + shards + "（文件 " + total + " 个）——此后稳定不变");
+                }
+            }
+            if (st.Shards != null && st.Shards.Count == shards)
+            {
+                // 分片库跨段常驻——但完成戳索引必须每段重读（上一段刚写的戳要能被本段看见）
+                st.ShardSteps = new List<Dictionary<string, Dictionary<string, ScanStepRow>>>();
+                foreach (Store s in st.Shards)
+                {
+                    st.ShardSteps.Add(s.LoadScanSteps());
+                }
+                return;
+            }
+            List<int> libs = hub.LibsOfBase(baseLib);
+            Stopwatch watch = Stopwatch.StartNew();
+            // [段2] 首建——模板建一次（一次建表事务）→ WAL 归位 → 文件复制，省掉每片各跑一遍 DDL
+            string dir = Path.GetDirectoryName(st.Store.DbPath);
+            string tpl = Path.Combine(dir, "lib_" + baseLib + "_tpl.db");
+            bool anyNew = false;
+            foreach (int lib in libs)
+            {
+                string p = Path.Combine(dir, RootsRules.LibDbFileName(lib));
+                if (!File.Exists(p))
+                {
+                    anyNew = true;
+                    break;
+                }
+            }
+            long built = 0;
+            if (anyNew)
+            {
+                DeleteShardFiles(tpl);
+                using (Store tplStore = new Store(tpl))
+                {
+                    tplStore.Checkpoint();
+                }
+                built = watch.ElapsedMilliseconds;
+                foreach (int lib in libs)
+                {
+                    string p = Path.Combine(dir, RootsRules.LibDbFileName(lib));
+                    if (File.Exists(p))
+                    {
+                        continue;
+                    }
+                    DeleteShardFiles(p);
+                    File.Copy(tpl, p, true);
+                }
+                DeleteShardFiles(tpl);
+            }
+            // [段3] 打开分片库——结构已就绪，跳过建表；分片库**常驻**（不合并、不删）
+            List<Store> list = hub.OpenShardStores(baseLib, shards);
+            List<Dictionary<string, Dictionary<string, ScanStepRow>>> steps =
+                new List<Dictionary<string, Dictionary<string, ScanStepRow>>>();
+            foreach (Store s in list)
+            {
+                steps.Add(s.LoadScanSteps());
+            }
+            st.Shards = list;
+            st.ShardSteps = steps;
+            if (log != null && anyNew)
+            {
+                log("  [分片] 首建 " + list.Count + " 个分片库：模板 " + built + " ms · 建齐 " + watch.ElapsedMilliseconds + " ms（此后常驻，不再合并）");
+            }
+        }
+        /// <summary>删除分片库的临时中间文件（模板）——分片库本身常驻，不在此列；失败不影响结果。</summary>
+        private static void DeleteShardFiles(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception)
+            {
+                // 删除失败可忽略——分片库是临时中间产物，下次扫描会覆盖重建
+            }
+            try
+            {
+                File.Delete(path + "-wal");
+            }
+            catch (Exception)
+            {
+                // 同上
+            }
+            try
+            {
+                File.Delete(path + "-shm");
+            }
+            catch (Exception)
+            {
+                // 同上
             }
         }
 
@@ -904,7 +1271,7 @@ namespace KKManager.Core
                         store.Begin();
                         batch = 0;
                     }
-                    if (log != null && i % 2000 == 0)
+                    if (log != null && i % ModProgressEvery == 0)
                     {
                         log("  " + seg.Label + " " + i + "/" + total);
                     }
@@ -980,7 +1347,7 @@ namespace KKManager.Core
 
         // [段4] 收尾——清扫与索引
 
-        /// <summary>卡片侧清扫——删除磁盘上已消失的卡片行与步骤记录。</summary>
+        /// <summary>卡片侧清扫——删除磁盘上已消失的卡片行与步骤记录（分片常驻后逐片清扫）。</summary>
         private static void CleanupCards(ScanRootState st, ScanResult result, Action<string> log)
         {
             if (st.EnumFailed || st.Files == null || st.Files.Count == 0)
@@ -992,26 +1359,41 @@ namespace KKManager.Core
             {
                 present.Add(f.Path);
             }
-            st.Store.Begin();
-            try
+            List<Store> targets = new List<Store>();
+            if (st.Shards != null && st.Shards.Count > 0)
             {
-                int goneCards = st.Store.DeleteCardsMissingUnderRoot(st.Entry.path, present);
-                int goneSteps = st.Store.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
-                int goneNon = st.Store.DeleteNonCardsMissingUnderRoot(st.Entry.path);
-                st.Store.Commit();
-                if (goneCards > 0 || goneSteps > 0 || goneNon > 0)
+                targets.AddRange(st.Shards);
+            }
+            else
+            {
+                targets.Add(st.Store);
+            }
+            int goneCards = 0;
+            int goneSteps = 0;
+            int goneNon = 0;
+            foreach (Store s in targets)
+            {
+                s.Begin();
+                try
                 {
-                    result.Removed += goneCards;
-                    if (log != null)
-                    {
-                        log("  已清理 " + goneCards + " 条已消失的卡片记录 · 步骤记录 " + goneSteps + " 条 · 非卡登记 " + goneNon + " 条");
-                    }
+                    goneCards = goneCards + s.DeleteCardsMissingUnderRoot(st.Entry.path, present);
+                    goneSteps = goneSteps + s.DeleteScanStepsMissingUnderRoot(st.Entry.path, present);
+                    goneNon = goneNon + s.DeleteNonCardsMissingUnderRoot(st.Entry.path);
+                    s.Commit();
+                }
+                catch
+                {
+                    s.Rollback();
+                    throw;
                 }
             }
-            catch
+            if (goneCards > 0 || goneSteps > 0 || goneNon > 0)
             {
-                st.Store.Rollback();
-                throw;
+                result.Removed += goneCards;
+                if (log != null)
+                {
+                    log("  已清理 " + goneCards + " 条已消失的卡片记录 · 步骤记录 " + goneSteps + " 条 · 非卡登记 " + goneNon + " 条");
+                }
             }
         }
 
@@ -1058,15 +1440,15 @@ namespace KKManager.Core
 
         // [段5] 辅助
 
-        /// <summary>该文件该步骤是否已完成——size + mtime 双等且步骤记录在案。</summary>
-        private static bool StepDone(ScanRootState st, ScanFile f, string stepId)
+        /// <summary>该文件该步骤是否已完成（给定完成戳索引版）——size + mtime 双等且步骤记录在案。</summary>
+        private static bool StepDoneIn(Dictionary<string, Dictionary<string, ScanStepRow>> index, ScanFile f, string stepId)
         {
-            if (st.Steps == null)
+            if (index == null)
             {
                 return false;
             }
             Dictionary<string, ScanStepRow> steps;
-            if (!st.Steps.TryGetValue(f.Path, out steps))
+            if (!index.TryGetValue(f.Path, out steps))
             {
                 return false;
             }
@@ -1076,6 +1458,12 @@ namespace KKManager.Core
                 return false;
             }
             return rec.Size == f.Size && string.Equals(rec.Mtime, f.Mtime, StringComparison.Ordinal);
+        }
+
+        /// <summary>该文件该步骤是否已完成——size + mtime 双等且步骤记录在案。</summary>
+        private static bool StepDone(ScanRootState st, ScanFile f, string stepId)
+        {
+            return StepDoneIn(st.Steps, f, stepId);
         }
 
         private static int CountDistinct(List<ModRef> refs)
@@ -1236,14 +1624,42 @@ namespace KKManager.Core
             }
             return new List<string>(set);
         }
-        /// <summary>扫描插件库根下的全部 dll 并落库（全量重扫——预置只读一条，dll 数量有限，无需步级增量）。</summary>
+        /// <summary>插件库根下的 dll 总数（进度分母——枚举失败按 0 计，错误在扫描段内出声）。</summary>
+        private static int CountPluginDlls(RootsConfig cfg)
+        {
+            int n = 0;
+            if (cfg == null || cfg.pluginRoots == null)
+            {
+                return 0;
+            }
+            foreach (RootEntry root in cfg.pluginRoots)
+            {
+                if (string.IsNullOrWhiteSpace(root.path) || !Directory.Exists(root.path))
+                {
+                    continue;
+                }
+                try
+                {
+                    SearchOption option = root.recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+                    n = n + Directory.GetFiles(root.path, "*.dll", option).Length;
+                }
+                catch (Exception)
+                {
+                    // 枚举失败——分母按已得计数；失败原因由扫描段出声
+                }
+            }
+            return n;
+        }
+
+        /// <summary>扫描插件库根下的全部 dll 与配置文件并落库（只读解析，不改动任何文件）。</summary>
         /// <param name="store">主库（插件库数据落主库）。</param>
         /// <param name="cfg">库根配置。</param>
         /// <param name="errors">解析失败 / 枚举失败清单（出声用）。</param>
-        /// <returns>落库的 dll 项数（含未解析出插件特性的非插件 dll）。</returns>
-        public static int ScanPlugins(Store store, RootsConfig cfg, List<string> errors)
+        /// <param name="log">日志出声——进度行「插件库 done/total」由面板进度条解析；可为 null。</param>
+        /// <returns>本次扫描的计数（dll / 插件项 / 配置文件）。</returns>
+        public static PluginScanResult ScanPlugins(Store store, RootsConfig cfg, List<string> errors, Action<string> log)
         {
-            int total = 0;
+            PluginScanResult scan = new PluginScanResult();
             List<PluginRow> old = store.LoadPlugins();
             foreach (RootEntry root in cfg.pluginRoots)
             {
@@ -1251,6 +1667,10 @@ namespace KKManager.Core
                 {
                     errors.Add("插件库根不存在：" + root.path);
                     continue;
+                }
+                if (log != null)
+                {
+                    log("插件库 · " + root.path);
                 }
                 List<string> files = new List<string>();
                 SearchOption option = root.recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
@@ -1263,7 +1683,7 @@ namespace KKManager.Core
                     errors.Add("插件库枚举失败（" + root.path + "）：" + ex.Message);
                     continue;
                 }
-                total = total + files.Count;
+                scan.Dlls = scan.Dlls + files.Count;
                 // [段1] 建本次清单与旧戳索引——未变的 dll 跳过解析（增量判据 = size + mtime 双等）
                 HashSet<string> keep = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
                 Dictionary<string, long> oldSize = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -1290,8 +1710,14 @@ namespace KKManager.Core
                 }
                 // [段3] 并行解析（每文件独立只读）——未变的跳过；落库串行（SQLite 单写，锁保护）
                 object gate = new object();
+                int done = 0;
                 Parallel.ForEach(files, file =>
                 {
+                    int seen = System.Threading.Interlocked.Increment(ref done);
+                    if (log != null && (seen % PluginProgressEvery == 0 || seen == files.Count))
+                    {
+                        log("  插件库 " + seen + "/" + files.Count);
+                    }
                     FileInfo fi = new FileInfo(file);
                     long size = fi.Exists ? fi.Length : 0;
                     string mtime = fi.Exists ? fi.LastWriteTimeUtc.ToString("o") : "";
@@ -1303,7 +1729,8 @@ namespace KKManager.Core
                         return;
                     }
                     string error;
-                    List<PluginInfo> plugins = PluginReader.ReadAll(file, out error);
+                    PluginReader.AssemblyMeta meta;
+                    List<PluginInfo> plugins = PluginReader.ReadDll(file, out meta, out error);
                     lock (gate)
                     {
                         store.DeletePluginFile(file);
@@ -1316,6 +1743,14 @@ namespace KKManager.Core
                             bad.FileName = Path.GetFileName(file);
                             bad.Size = size;
                             bad.Mtime = mtime;
+                            bad.Note = error;
+                            bad.Title = meta.title;
+                            bad.Description = meta.description;
+                            bad.Company = meta.company;
+                            bad.Copyright = meta.copyright;
+                            bad.Product = meta.product;
+                            bad.FileVersion = meta.fileVersion;
+                            bad.TargetFramework = meta.targetFramework;
                             store.SavePlugin(bad);
                         }
                         else
@@ -1334,13 +1769,61 @@ namespace KKManager.Core
                                 row.IsIpa = info.isIpa;
                                 row.Size = size;
                                 row.Mtime = mtime;
+                                row.Title = info.title;
+                                row.Description = info.description;
+                                row.Company = info.company;
+                                row.Copyright = info.copyright;
+                                row.Product = info.product;
+                                row.FileVersion = info.fileVersion;
+                                row.TargetFramework = info.targetFramework;
                                 store.SavePlugin(row);
                             }
                         }
                     }
                 });
+                // [段4] 配置文件全量读取——config/*.cfg 逐个解析（分节 / 选项 / 作者注释）落库；
+                // cfg 数量有限（本机 185 个），整段重读不留增量判据——改了立刻反映，不会读到半新半旧
+                store.DeletePluginConfigsUnderRoot(root.path);
+                List<string> cfgErrors = new List<string>();
+                List<PluginConfigFile> cfgs = PluginConfigReader.ReadAll(root.path, cfgErrors);
+                foreach (string e in cfgErrors)
+                {
+                    errors.Add(e);
+                }
+                foreach (PluginConfigFile cfgFile in cfgs)
+                {
+                    PluginConfigRow row = new PluginConfigRow();
+                    row.FilePath = cfgFile.filePath;
+                    row.FileName = cfgFile.fileName;
+                    row.PluginName = cfgFile.pluginName;
+                    row.PluginVersion = cfgFile.pluginVersion;
+                    row.Guid = cfgFile.guid;
+                    row.Size = cfgFile.size;
+                    row.Mtime = cfgFile.mtime;
+                    row.Sections = PluginConfigReader.ToJson(cfgFile);
+                    long sections = 0;
+                    long options = 0;
+                    foreach (PluginConfigSection s in cfgFile.sections)
+                    {
+                        sections = sections + 1;
+                        options = options + s.options.Count;
+                    }
+                    row.SectionCount = sections;
+                    row.OptionCount = options;
+                    row.Error = cfgFile.error;
+                    store.SavePluginConfig(row);
+                }
+                scan.Configs = scan.Configs + cfgs.Count;
             }
-            return total;
+            List<PluginRow> rows = store.LoadPlugins();
+            foreach (PluginRow row in rows)
+            {
+                if (row.Guid.Length > 0)
+                {
+                    scan.Plugins = scan.Plugins + 1;
+                }
+            }
+            return scan;
         }
     }
 }
