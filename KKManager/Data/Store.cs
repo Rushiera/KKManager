@@ -1141,10 +1141,13 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>开启写入事务。</summary>
+        /// <summary>开启写入事务——**deferred（BEGIN）**，不能 IMMEDIATE：分片库连接都 ATTACH 了主库，IMMEDIATE 会给全部已附加库加写锁，多分片同时开事务必撞主库锁（busy_timeout 对跨库加锁冲突不生效）；扫描事务只写自己的分片库、对主库只读。</summary>
         public void Begin()
         {
-            _tx = _conn.BeginTransaction();
+            // 🔴 必须 deferred（BEGIN）——不能 IMMEDIATE：分片库连接都 ATTACH 了主库，IMMEDIATE 会同时给
+            // 全部已附加库加写锁 ⇒ 第 2 片必撞第 1 片持有的主库锁（busy_timeout 对跨库加锁冲突不生效）。
+            // 扫描事务只写自己的分片库、对主库只读，deferred 下各片各写各库互不干扰。
+            _tx = _conn.BeginTransaction(deferred: true);
         }
 
         /// <summary>提交写入事务。</summary>
