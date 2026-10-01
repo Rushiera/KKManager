@@ -32,6 +32,30 @@ namespace KKManager.Core
 
         /// <summary>是否为 IPA 插件（旧框架，无 BepInPlugin 特性）。</summary>
         public bool isIpa { get; set; }
+
+        /// <summary>程序集标题（AssemblyTitle——多数插件与显示名同源，缺省时为空）。</summary>
+        public string title { get; set; } = "";
+
+        /// <summary>程序集说明（AssemblyDescription——作者写的一句话用途，覆盖率不高但命中即最有价值）。</summary>
+        public string description { get; set; } = "";
+
+        /// <summary>程序集公司 / 作者署名（AssemblyCompany）。</summary>
+        public string company { get; set; } = "";
+
+        /// <summary>程序集版权（AssemblyCopyright——常含作者名与年份）。</summary>
+        public string copyright { get; set; } = "";
+
+        /// <summary>程序集产品名（AssemblyProduct）。</summary>
+        public string product { get; set; } = "";
+
+        /// <summary>程序集版本（AssemblyInformationalVersion / FileVersion——dll 自身的版本，可与插件版本不同）。</summary>
+        public string fileVersion { get; set; } = "";
+
+        /// <summary>程序集目标框架（TargetFramework 特性——如 .NET Framework 4.7.2 / .NET Standard 2.0）。</summary>
+        public string targetFramework { get; set; } = "";
+
+        /// <summary>程序集是否被标记为 BepInEx 插件（含 BepInPlugin 特性）。</summary>
+        public bool hasPluginAttribute { get; set; }
     }
 
     /// <summary>插件 dll 元数据解析——走 PE / 元数据只读通道（System.Reflection.Metadata），不加载程序集、不执行代码。</summary>
@@ -92,10 +116,118 @@ namespace KKManager.Core
         /// <summary>类型提供者单例（无状态，跨调用复用）。</summary>
         private static readonly AttrTypeProvider Provider = new AttrTypeProvider();
 
+        /// <summary>程序集级元数据（一个 dll 一份——插件类共用）。</summary>
+        public sealed class AssemblyMeta
+        {
+            /// <summary>标题。</summary>
+            public string title = "";
+
+            /// <summary>说明。</summary>
+            public string description = "";
+
+            /// <summary>公司 / 作者署名。</summary>
+            public string company = "";
+
+            /// <summary>版权。</summary>
+            public string copyright = "";
+
+            /// <summary>产品名。</summary>
+            public string product = "";
+
+            /// <summary>程序集版本（优先 InformationalVersion，回落 FileVersion）。</summary>
+            public string fileVersion = "";
+
+            /// <summary>目标框架（TargetFrameworkAttribute）。</summary>
+            public string targetFramework = "";
+        }
+
+        /// <summary>读程序集级元数据——标题 / 说明 / 公司 / 版权 / 产品 / 版本 / 目标框架（全部只读元数据表，不加载程序集）。</summary>
+        /// <param name="md">元数据读取器。</param>
+        /// <returns>程序集元数据（缺项为空串）。</returns>
+        private static AssemblyMeta ReadAssemblyMeta(MetadataReader md)
+        {
+            AssemblyMeta meta = new AssemblyMeta();
+            if (!md.IsAssembly)
+            {
+                return meta;
+            }
+            AssemblyDefinition asm = md.GetAssemblyDefinition();
+            meta.title = md.GetString(asm.Name);
+            meta.fileVersion = asm.Version.ToString();
+            foreach (CustomAttributeHandle handle in asm.GetCustomAttributes())
+            {
+                CustomAttribute attr = md.GetCustomAttribute(handle);
+                string typeName = AttributeOwnerName(md, attr, false);
+                if (typeName == "AssemblyTitleAttribute")
+                {
+                    meta.title = FirstStringArg(attr);
+                    continue;
+                }
+                if (typeName == "AssemblyDescriptionAttribute")
+                {
+                    meta.description = FirstStringArg(attr);
+                    continue;
+                }
+                if (typeName == "AssemblyCompanyAttribute")
+                {
+                    meta.company = FirstStringArg(attr);
+                    continue;
+                }
+                if (typeName == "AssemblyCopyrightAttribute")
+                {
+                    meta.copyright = FirstStringArg(attr);
+                    continue;
+                }
+                if (typeName == "AssemblyProductAttribute")
+                {
+                    meta.product = FirstStringArg(attr);
+                    continue;
+                }
+                if (typeName == "AssemblyInformationalVersionAttribute")
+                {
+                    string info = FirstStringArg(attr);
+                    if (info.Length > 0)
+                    {
+                        meta.fileVersion = info;
+                    }
+                    continue;
+                }
+                if (typeName == "TargetFrameworkAttribute")
+                {
+                    meta.targetFramework = FirstStringArg(attr);
+                }
+            }
+            return meta;
+        }
+
+        /// <summary>取特性的第一个字符串参数（没有则空串）。</summary>
+        /// <param name="attr">特性。</param>
+        /// <returns>第一个非空字符串参数。</returns>
+        private static string FirstStringArg(CustomAttribute attr)
+        {
+            List<string> args = StringArgs(attr);
+            return args.Count > 0 ? args[0] : "";
+        }
+
         /// <summary>解析一个 dll 里的全部插件——一个 dll 可含多个插件类（如 KKAPI.dll 含三个）；失败返回空列表并给出原因。</summary>
+        /// <param name="path">dll 绝对路径。</param>
+        /// <param name="error">失败原因（空 = 成功）。</param>
+        /// <returns>插件清单（可能为空——非插件 dll）。</returns>
         public static List<PluginInfo> ReadAll(string path, out string error)
         {
+            AssemblyMeta meta;
+            return ReadDll(path, out meta, out error);
+        }
+
+        /// <summary>解析一个 dll——插件清单 + 程序集级元数据（非插件 dll 也能拿到标题 / 说明 / 公司，供「非插件 dll」一并展示）。</summary>
+        /// <param name="path">dll 绝对路径。</param>
+        /// <param name="meta">程序集元数据（失败时全空）。</param>
+        /// <param name="error">失败原因（空 = 成功）。</param>
+        /// <returns>插件清单（可能为空——非插件 dll）。</returns>
+        public static List<PluginInfo> ReadDll(string path, out AssemblyMeta meta, out string error)
+        {
             List<PluginInfo> list = new List<PluginInfo>();
+            meta = new AssemblyMeta();
             error = "";
             if (!File.Exists(path))
             {
@@ -115,14 +247,16 @@ namespace KKManager.Core
                             return list;
                         }
                         MetadataReader md = pe.GetMetadataReader();
-                        // [段2] 快速过滤——不引用插件框架的程序集不可能是插件（省去全类型遍历，大 dll 秒过）
+                        // [段2] 程序集级元数据（标题 / 说明 / 公司 / 版权 / 产品 / 目标框架）——先读，非插件 dll 也有
+                        meta = ReadAssemblyMeta(md);
+                        // [段3] 快速过滤——不引用插件框架的程序集不可能是插件（省去全类型遍历，大 dll 秒过）
                         if (!ReferencesPluginFramework(md))
                         {
                             error = "未引用插件框架（BepInEx / IllusionPlugin）";
                             return list;
                         }
-                        // [段3] 遍历类型定义读插件特性
-                        ReadPluginAttributes(md, path, list);
+                        // [段4] 遍历类型定义读插件特性
+                        ReadPluginAttributes(md, path, meta, list);
                     }
                 }
             }
@@ -139,7 +273,11 @@ namespace KKManager.Core
         }
 
         /// <summary>遍历全部类型定义读插件特性（BepInPlugin 加在插件类上，不在程序集上）——每个带特性的类产出一项。</summary>
-        private static void ReadPluginAttributes(MetadataReader md, string path, List<PluginInfo> list)
+        /// <param name="md">元数据读取器。</param>
+        /// <param name="path">dll 绝对路径。</param>
+        /// <param name="meta">程序集级元数据（填入每一项——同 dll 各项共用）。</param>
+        /// <param name="list">产出清单。</param>
+        private static void ReadPluginAttributes(MetadataReader md, string path, AssemblyMeta meta, List<PluginInfo> list)
         {
             foreach (TypeDefinitionHandle typeHandle in md.TypeDefinitions)
             {
@@ -201,6 +339,14 @@ namespace KKManager.Core
                     info.fileName = Path.GetFileName(path);
                     info.processes = processes;
                     info.dependencies = dependencies;
+                    info.hasPluginAttribute = true;
+                    info.title = meta.title;
+                    info.description = meta.description;
+                    info.company = meta.company;
+                    info.copyright = meta.copyright;
+                    info.product = meta.product;
+                    info.fileVersion = meta.fileVersion;
+                    info.targetFramework = meta.targetFramework;
                     list.Add(info);
                 }
             }
