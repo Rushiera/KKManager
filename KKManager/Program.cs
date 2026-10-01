@@ -108,10 +108,12 @@ namespace KKManager
                     return SortCommand(db, rest);
                 case "plugin-info":
                     return PluginInfoCommand(rest);
+                case "plugin-config":
+                    return PluginConfigCommand(db, rest);
                 case "scan-plugins":
                     return ScanPluginsCommand(db);
                 case "plugins":
-                    return PluginsCommand(db);
+                    return PluginsCommand(db, rest);
                 case "plugin-log":
                     return PluginLogCommand(db);
                 case "plugin-match":
@@ -152,9 +154,9 @@ namespace KKManager
             Console.WriteLine("  thumb     <card.png> <out.jpg>        导出缩略图（离线核对）");
             Console.WriteLine("  scan-mods [目录...]                   扫描 mod 库（无目录则用已配置的库根）");
             Console.WriteLine("  scan-cards [目录...]                  扫描卡片库（无目录则用已配置的库根）");
-            Console.WriteLine("  scan-main                             扫描主要库（预置条目——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio）");
+            Console.WriteLine("  scan-main                             扫描主要库（预置条目——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio + 插件库 BepInEx 连带）");
             Console.WriteLine("  scan-extra                            扫描追加库（使用者添加的库根——mod 冷冻库 + 卡片附加库；离线库跳过）");
-            Console.WriteLine("  scan-plan [set <顺序> [勾选]]          看 / 设扫描步骤（顺序即执行顺序；同侧同档相邻步合并为一次读取）");
+            Console.WriteLine("  scan-plan [set <顺序> [勾选]]          看 / 设扫描步骤（顺序即执行顺序——面板已取消顺序调整，只读展示；CLI 的 set 保留）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
             Console.WriteLine("  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）");
@@ -176,10 +178,11 @@ namespace KKManager
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
             Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
-            Console.WriteLine("  plugins                               列出插件库里的插件（与面板「插件清单」同源）");
+            Console.WriteLine("  plugins [--unnoted]                    列出插件库里的插件（与面板「插件清单」同源；含中文说明 / 配置节数；--unnoted 只列未收录说明的项）");
+            Console.WriteLine("  plugin-config [GUID|插件名]           插件配置文件——无参数列全部 cfg；给键则列出该插件的分节 / 配置项 / 作者注释");
             Console.WriteLine("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）");
             Console.WriteLine("  plugin-log                            解析 BepInEx 日志：加载 / 进程过滤跳过 / 错误");
-            Console.WriteLine("  plugin-info <dll>                     解析单个插件 dll 的元数据（GUID / 名称 / 版本 / 进程过滤 / 依赖）");
+            Console.WriteLine("  plugin-info <dll>                     解析单个插件 dll 的元数据（GUID / 名称 / 版本 / 进程过滤 / 依赖 + 程序集说明）");
             Console.WriteLine("  scan-plugins                          扫描插件库根（BepInEx）下的全部 dll 并落库（只读解析）");
             Console.WriteLine("  roots-list                            列出已配置的库根（插件库 / mod / 卡片三段）");
             Console.WriteLine("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]");
@@ -189,7 +192,7 @@ namespace KKManager
             Console.WriteLine();
             Console.WriteLine("  通用: --db <路径>（默认 exe 目录下 data/kkmanager.db）· --force 全量重扫 · --steps a,b,c 只跑这些步骤");
             Console.WriteLine("  级别: 1=主库（游戏读取）· 2=缓存库（可一键搬入主库）· 3=冷冻库（只读）");
-            Console.WriteLine("  规则: 预置主库（mods / female / coordinate / Studio）锁定——不可改不可删 · 插件库（BepInEx）预置锁定只读——不可增删改 · 缓存库槽位不可删（路径与勾选归使用者）· 新增 mod 库根固定冷冻库、卡片库根固定附加库");
+            Console.WriteLine("  规则: 预置主库（mods / female / coordinate / Studio）锁定——不可改不可删 · 插件库（BepInEx）预置锁定——不可增删改（只读不预置） · 缓存库槽位不可删（路径与勾选归使用者）· 新增 mod 库根固定冷冻库、卡片库根固定附加库");
         }
 
         private static string Take(List<string> rest, string name)
@@ -873,6 +876,10 @@ namespace KKManager
                 Console.WriteLine("  角色名：新读 " + r.NamesRead + "  存量补读 " + r.NamesFilled);
                 Console.WriteLine("  卡类型补正 " + r.TypesFixed);
                 Console.WriteLine("  timeline 读取 " + r.TimelineRead);
+                if (r.PluginDlls > 0)
+                {
+                    Console.WriteLine("  插件库：" + r.PluginDlls + " 个 dll · 插件 " + r.Plugins + " 项 · 配置文件 " + r.PluginConfigs + " 个");
+                }
                 foreach (string e in r.Errors)
                 {
                     Console.WriteLine("  ! " + e);
@@ -1610,31 +1617,82 @@ namespace KKManager
             return 0;
         }
 
-        /// <summary>列出插件库里的插件（与面板「插件清单」同一数据源——非插件 dll 只计数不列出）。</summary>
-        private static int PluginsCommand(string db)
+        /// <summary>列出插件库里的插件（与面板「插件清单」同一数据源；--unnoted 只列未收录说明的项）。</summary>
+        /// <param name="db">主库路径。</param>
+        /// <param name="rest">参数（--unnoted = 只列未收录说明的项）。</param>
+        /// <returns>退出码。</returns>
+        private static int PluginsCommand(string db, List<string> rest)
         {
             using (StoreHub hub = new StoreHub(db))
             {
+                bool onlyUnnoted = rest.Contains("--unnoted");
                 List<PluginRow> rows = hub.Core.LoadPlugins();
+                List<PluginConfigRow> cfgs = hub.Core.LoadPluginConfigs();
+                Dictionary<string, PluginConfigRow> cfgByGuid = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, PluginConfigRow> cfgByName = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
+                foreach (PluginConfigRow cfg in cfgs)
+                {
+                    if (cfg.Guid.Length > 0 && !cfgByGuid.ContainsKey(cfg.Guid))
+                    {
+                        cfgByGuid[cfg.Guid] = cfg;
+                    }
+                    if (cfg.PluginName.Length > 0 && !cfgByName.ContainsKey(cfg.PluginName))
+                    {
+                        cfgByName[cfg.PluginName] = cfg;
+                    }
+                }
                 int withGuid = 0;
+                int noted = 0;
+                List<string> unnoted = new List<string>();
                 foreach (PluginRow row in rows)
                 {
                     if (row.Guid.Length > 0)
                     {
                         withGuid = withGuid + 1;
                     }
+                    if (PluginNoteReader.Lookup(row.Guid, row.Name).Length > 0 || PluginNoteReader.LookupFile(row.FileName).Length > 0)
+                    {
+                        noted = noted + 1;
+                    }
+                    else
+                    {
+                        unnoted.Add(row.Guid + "  |  " + row.Name + (row.Guid.Length == 0 ? "  |  " + row.FileName + "（非插件 dll）" : ""));
+                    }
                 }
                 // 结论前置——统计行先出（列表可能很长被截断，统计不能丢）
-                Console.WriteLine("—— 插件 " + withGuid + " 项 · 非插件 dll " + (rows.Count - withGuid) + " 个");
-                foreach (PluginRow row in rows)
+                Console.WriteLine("—— 插件 " + withGuid + " 项 · 非插件 dll " + (rows.Count - withGuid) + " 个 · 说明收录 " + noted + " / " + rows.Count + " 项（表内 " + PluginNoteReader.Count + " 条）· 配置文件 " + cfgs.Count + " 个");
+                if (PluginNoteReader.Error.Length > 0)
                 {
-                    if (row.Guid.Length == 0)
+                    Console.Error.WriteLine("  ! " + PluginNoteReader.Error);
+                }
+                if (!onlyUnnoted)
+                {
+                    foreach (PluginRow row in rows)
                     {
-                        continue;
+                        if (row.Guid.Length == 0)
+                        {
+                            continue;
+                        }
+                        PluginConfigRow cfg = null;
+                        cfgByGuid.TryGetValue(row.Guid, out cfg);
+                        if (cfg == null && row.Name.Length > 0)
+                        {
+                            cfgByName.TryGetValue(row.Name, out cfg);
+                        }
+                        string note = PluginNoteReader.Lookup(row.Guid, row.Name);
+                        Console.WriteLine(row.Guid + "  |  " + row.Name + " " + row.Version + "  |  " + row.FileName
+                            + (row.Processes.Length > 0 ? "  |  进程 " + row.Processes : "")
+                            + (row.IsIpa ? "  |  [IPA]" : "")
+                            + (cfg == null ? "" : "  |  配置 " + cfg.SectionCount + " 节 " + cfg.OptionCount + " 项")
+                            + "  |  " + (note.Length > 0 ? note : "未收录"));
                     }
-                    Console.WriteLine(row.Guid + "  |  " + row.Name + " " + row.Version + "  |  " + row.FileName
-                        + (row.Processes.Length > 0 ? "  |  进程 " + row.Processes : "")
-                        + (row.IsIpa ? "  |  [IPA]" : ""));
+                }
+                // 未收录清单（结末——供补说明表用；--unnoted 只看它）
+                Console.WriteLine();
+                Console.WriteLine("## 未收录说明（" + unnoted.Count + "）——可在 Web\\wwwroot\\plugin-notes.txt 补一行（键 = GUID 或插件名）");
+                foreach (string u in unnoted)
+                {
+                    Console.WriteLine("  " + u);
                 }
             }
             return 0;
@@ -1649,9 +1707,9 @@ namespace KKManager
                 RootsRules.Normalize(cfg);
                 List<string> errors = new List<string>();
                 DateTime started = DateTime.Now;
-                int count = Scanner.ScanPlugins(hub.Core, cfg, errors);
+                PluginScanResult scan = Scanner.ScanPlugins(hub.Core, cfg, errors, m => Console.WriteLine(m));
                 TimeSpan span = DateTime.Now - started;
-                Console.WriteLine("插件库扫描完成：" + count + " 个 dll · 耗时 " + span.TotalSeconds.ToString("F1") + " 秒");
+                Console.WriteLine("插件库扫描完成：" + scan.Dlls + " 个 dll · 耗时 " + span.TotalSeconds.ToString("F1") + " 秒 · 配置文件 " + scan.Configs + " 个");
                 foreach (string e in errors)
                 {
                     Console.Error.WriteLine("  ! " + e);
@@ -1669,14 +1727,99 @@ namespace KKManager
             }
             return 0;
         }
+        /// <summary>列插件配置文件——无参数列全部 cfg（插件名 / GUID / 节数 / 项数）；给 GUID 或插件名则列出该插件的分节与配置项（含作者写的说明）。</summary>
+        /// <param name="db">主库路径。</param>
+        /// <param name="rest">参数（可选：GUID 或插件名）。</param>
+        /// <returns>退出码。</returns>
+        private static int PluginConfigCommand(string db, List<string> rest)
+        {
+            using (StoreHub hub = new StoreHub(db))
+            {
+                if (rest.Count == 0)
+                {
+                    List<PluginConfigRow> rows = hub.Core.LoadPluginConfigs();
+                    Console.WriteLine("—— 配置文件 " + rows.Count + " 个");
+                    foreach (PluginConfigRow row in rows)
+                    {
+                        Console.WriteLine(row.FileName + "  |  " + row.PluginName + " " + row.PluginVersion
+                            + "  |  GUID " + (row.Guid.Length > 0 ? row.Guid : "(无)")
+                            + "  |  " + row.SectionCount + " 节 " + row.OptionCount + " 项"
+                            + (row.Error.Length > 0 ? "  |  读取失败：" + row.Error : ""));
+                    }
+                    return 0;
+                }
+                string key = rest[0];
+                PluginConfigRow cfg = hub.Core.LoadPluginConfigByGuid(key);
+                if (cfg.FilePath.Length == 0)
+                {
+                    foreach (PluginConfigRow row in hub.Core.LoadPluginConfigs())
+                    {
+                        if (string.Equals(row.PluginName, key, StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg = hub.Core.LoadPluginConfigByGuid(row.Guid);
+                            if (cfg.FilePath.Length == 0)
+                            {
+                                cfg = row;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (cfg.FilePath.Length == 0)
+                {
+                    Console.Error.WriteLine("未找到该插件的配置文件：" + key);
+                    return 1;
+                }
+                PluginConfigFile parsed = PluginConfigReader.FromJson(cfg.Sections);
+                Console.WriteLine("配置: " + cfg.FileName + "  |  " + cfg.PluginName + " " + cfg.PluginVersion
+                    + "  |  GUID " + (cfg.Guid.Length > 0 ? cfg.Guid : "(无)")
+                    + "  |  " + parsed.sections.Count + " 节");
+                foreach (PluginConfigSection section in parsed.sections)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("[" + section.name + "]");
+                    foreach (PluginConfigOption option in section.options)
+                    {
+                        Console.WriteLine("  " + option.key + " = " + option.value
+                            + (option.type.Length > 0 ? "   (" + option.type + (option.def.Length > 0 ? " · 默认 " + option.def : "") + ")" : ""));
+                        if (option.comment.Length > 0)
+                        {
+                            Console.WriteLine("      " + option.comment);
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
 
         /// <summary>解析单个插件 dll 的元数据（一个 dll 可含多个插件）——与插件库扫描同一实现。</summary>
         private static int PluginInfoCommand(List<string> rest)
         {
             RequireArgs(rest, "plugin-info <dll>", 1);
             string error;
-            List<PluginInfo> list = PluginReader.ReadAll(rest[0], out error);
+            PluginReader.AssemblyMeta meta;
+            List<PluginInfo> list = PluginReader.ReadDll(rest[0], out meta, out error);
             Console.WriteLine("文件: " + rest[0]);
+            if (meta.title.Length > 0)
+            {
+                Console.WriteLine("程序集: " + meta.title + (meta.fileVersion.Length > 0 ? " " + meta.fileVersion : ""));
+            }
+            if (meta.description.Length > 0)
+            {
+                Console.WriteLine("说明: " + meta.description);
+            }
+            if (meta.company.Length > 0)
+            {
+                Console.WriteLine("公司: " + meta.company);
+            }
+            if (meta.copyright.Length > 0)
+            {
+                Console.WriteLine("版权: " + meta.copyright);
+            }
+            if (meta.targetFramework.Length > 0)
+            {
+                Console.WriteLine("框架: " + meta.targetFramework);
+            }
             if (list.Count == 0)
             {
                 Console.Error.WriteLine("解析失败: " + error);
@@ -1695,6 +1838,8 @@ namespace KKManager
                 {
                     Console.WriteLine("      依赖: " + string.Join(", ", info.dependencies));
                 }
+                string note = PluginNoteReader.Lookup(info.guid, info.name);
+                Console.WriteLine("      说明: " + (note.Length > 0 ? note : "未收录（可在 plugin-notes.txt 补充）"));
             }
             return 0;
         }
