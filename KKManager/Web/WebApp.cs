@@ -1217,6 +1217,8 @@ namespace KKManager.Web
             {
                 List<PluginRow> rows = _hub.Core.LoadPlugins();
                 List<PluginConfigRow> cfgs = _hub.Core.LoadPluginConfigs();
+                // 上次启动实况（只读解析日志，不入库）——行级标识据此着色（已加载 / 进程过滤跳过 / 有错误 / 未提及）
+                PluginLogSummary log = PluginLogReader.Read(PluginLogReader.LogPathOf(LoadConfig()));
                 // cfg 按 GUID / 插件名建索引——插件行据此挂上「配置文件 / 配置项数」
                 Dictionary<string, PluginConfigRow> cfgByGuid = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
                 Dictionary<string, PluginConfigRow> cfgByName = new Dictionary<string, PluginConfigRow>(StringComparer.OrdinalIgnoreCase);
@@ -1299,7 +1301,8 @@ namespace KKManager.Web
                         note = note,
                         cfgFile = cfg == null ? "" : cfg.FileName,
                         cfgSections = cfg == null ? 0 : cfg.SectionCount,
-                        cfgOptions = cfg == null ? 0 : cfg.OptionCount
+                        cfgOptions = cfg == null ? 0 : cfg.OptionCount,
+                        logState = PluginLogReader.StateOf(log, row.Name)
                     });
                 }
                 int dupGuids = 0;
@@ -1460,7 +1463,7 @@ namespace KKManager.Web
                     }
                 }
                 PluginConfigFile parsed = PluginConfigReader.FromJson(cfg.Sections);
-                // 日志实况——该插件是否出现在「已加载 / 进程过滤跳过」里（只读解析，不入库）
+                // 日志实况——该插件在本次启动日志里的状态（只读解析，不入库；判据与插件清单行级标识同源）
                 RootsConfig roots = LoadConfig();
                 PluginLogSummary log = PluginLogReader.Read(PluginLogReader.LogPathOf(roots));
                 string logState = "日志未提及";
@@ -1476,36 +1479,20 @@ namespace KKManager.Web
                     {
                         continue;
                     }
-                    foreach (string item in log.loaded)
+                    string st = PluginLogReader.StateOf(log, row.Name);
+                    if (st == "error")
                     {
-                        if (string.Equals(NameOfLogItem(item), row.Name, StringComparison.OrdinalIgnoreCase))
-                        {
-                            logState = "本次已加载";
-                            break;
-                        }
+                        logState = "本次启动日志里有错误行";
                     }
-                    if (logState == "本次已加载")
+                    else if (st == "loaded")
                     {
-                        break;
+                        logState = "本次已加载";
                     }
-                    foreach (string item in log.skipped)
+                    else if (st == "skipped")
                     {
-                        string head = item;
-                        int arrow = item.IndexOf("  →  ", StringComparison.Ordinal);
-                        if (arrow > 0)
-                        {
-                            head = item.Substring(0, arrow);
-                        }
-                        if (string.Equals(NameOfLogItem(head), row.Name, StringComparison.OrdinalIgnoreCase))
-                        {
-                            logState = "进程过滤跳过（该插件只在别的进程加载）";
-                            break;
-                        }
+                        logState = "进程过滤跳过（该插件只在别的进程加载）";
                     }
-                    if (logState == "进程过滤跳过（该插件只在别的进程加载）")
-                    {
-                        break;
-                    }
+                    break;
                 }
                 return Results.Json(new
                 {
@@ -3742,18 +3729,6 @@ namespace KKManager.Web
         private static readonly System.Text.RegularExpressions.Regex PluginProgressRx =
             new System.Text.RegularExpressions.Regex(@"^\s*插件库\s+(\d+)\s*/\s*(\d+)",
                 System.Text.RegularExpressions.RegexOptions.Compiled);
-        /// <summary>日志条目（「名 版本」）取名称部分——去掉最后一个空格段（BepInEx 会规范化版本号，故不按版本比）。</summary>
-        /// <param name="item">日志条目文本。</param>
-        /// <returns>名称部分。</returns>
-        private static string NameOfLogItem(string item)
-        {
-            if (string.IsNullOrEmpty(item))
-            {
-                return "";
-            }
-            int at = item.LastIndexOf(' ');
-            return at > 0 ? item.Substring(0, at) : item;
-        }
 
         private static string IndexHtml()
         {

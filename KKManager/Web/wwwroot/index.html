@@ -178,10 +178,16 @@
   .ct-sd{color:#c08cff}
   .ct-none{color:var(--dim)}
   .ctdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:currentColor}
-  /* 插件清单：名称左侧的配置标识——绿点 = 有配置文件（这类排在列表最上面）· 灰点 = 无配置文件 */
+  /* 插件清单标识——左侧圆点 = 上次启动实况（蓝=已加载 · 黄=进程过滤跳过 · 红=有错误 · 灰=日志未提及，
+     与「上次启动实况」那行的配色同源）；名称右侧带框标签 = 配置文件（紫框=有 · 灰框=无） */
   .pldot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:currentColor}
-  .plcfg{color:var(--green)}
-  .plnocfg{color:var(--dim)}
+  .pllog-loaded{color:var(--accent)}
+  .pllog-skipped{color:var(--yellow)}
+  .pllog-error{color:var(--red)}
+  .pllog-none{color:var(--dim)}
+  .pltag{display:inline-block;border:1px solid currentColor;border-radius:4px;padding:0 5px;margin-left:6px;font-size:11px;line-height:16px;vertical-align:middle;white-space:nowrap}
+  .pltagcfg{color:#c08cff}
+  .pltagnone{color:var(--dim)}
   /* 插件分析窗「当前值」列——按类型给控件（下拉 / 数字 / 文本）；改过的行标黄并在行首留痕 */
   table.list.cfgval td{padding:3px 8px}
   table.list.cfgval input,table.list.cfgval select{background:#0b0d10;border:1px solid var(--line);color:var(--fg);border-radius:5px;padding:3px 6px;font-size:12px;font-family:inherit;width:100%;box-sizing:border-box}
@@ -356,7 +362,7 @@
   <div id="viewMissing" class="hidden"><div class="card"><div id="missingList"></div></div></div>
   <div id="viewPlugins" class="hidden">
     <div class="card">
-      <div class="dim" id="plHint" style="font-size:12px;margin-bottom:8px">插件库（<b>BepInEx</b>）下解析出的插件——GUID / 名称 / 中文说明 / 版本 / 文件 / 进程过滤 / 依赖 / 配置，全部<b>只读自 dll 元数据与 cfg</b>，不改动任何文件。一个 dll 可含多项插件（如 <span class="mono">KKAPI.dll</span> 三项）。名称左侧的标识点：<span class="pldot plcfg"></span><b>绿 = 有配置文件</b>（这类恒排在列表最上面）· <span class="pldot plnocfg"></span>灰 = 无配置文件。<b>点任意一行</b>打开插件分析。</div>
+      <div class="dim" id="plHint" style="font-size:12px;margin-bottom:8px">插件库（<b>BepInEx</b>）下解析出的插件——GUID / 名称 / 中文说明 / 版本 / 文件 / 进程过滤 / 依赖 / 配置，全部<b>只读自 dll 元数据与 cfg</b>，不改动任何文件。一个 dll 可含多项插件（如 <span class="mono">KKAPI.dll</span> 三项）。<br>名称左侧圆点 = <b>上次启动实况</b>（配色与下方实况行同源）：<span class="pldot pllog-loaded"></span>蓝 = 本次已加载 · <span class="pldot pllog-skipped"></span>黄 = 进程过滤跳过 · <span class="pldot pllog-error"></span>红 = 日志有错误行 · <span class="pldot pllog-none"></span>灰 = 日志未提及。<br>名称右侧标签 = <b>配置文件</b>：<span class="pltag pltagcfg">[有配置文件]</span> 紫框 = 有（这类恒排在列表最上面）· <span class="pltag pltagnone">[无配置文件]</span> 灰框 = 无。<b>点任意一行</b>打开插件分析。</div>
       <div id="plLog" style="margin-bottom:10px"></div>
       <div class="row" style="margin-bottom:8px">
         <input id="plQ" class="grow" placeholder="搜索插件名 / GUID / 文件名 / 说明…">
@@ -3627,10 +3633,19 @@ function plHasCfg(p){
   if(p.cfgOptions > 0) return true;
   return !!(p.cfgFile);
 }
-/* 名称左侧的配置标识点：绿 = 有配置文件 · 灰 = 无 */
+/* 名称左侧的圆点 = 上次启动实况（配色跟随「上次启动实况」那一行）：蓝=已加载 · 黄=进程过滤跳过 · 红=有错误 · 灰=日志未提及 */
 function plDot(p){
-  if(plHasCfg(p)){ return '<span class="pldot plcfg" title="有配置文件（' + (p.cfgSections || 0) + ' 节 / ' + (p.cfgOptions || 0) + ' 项）"></span>'; }
-  return '<span class="pldot plnocfg" title="无配置文件"></span>';
+  const st = p.nonPlugin ? 'none' : (p.logState || 'none');
+  if(st === 'loaded'){ return '<span class="pldot pllog-loaded" title="上次启动：本次已加载"></span>'; }
+  if(st === 'skipped'){ return '<span class="pldot pllog-skipped" title="上次启动：进程过滤跳过（该插件只在别的进程加载——非故障）"></span>'; }
+  if(st === 'error'){ return '<span class="pldot pllog-error" title="上次启动：日志里有该插件的错误行"></span>'; }
+  if(p.nonPlugin){ return '<span class="pldot pllog-none" title="非插件 dll——不参与插件加载"></span>'; }
+  return '<span class="pldot pllog-none" title="上次启动：日志未提及"></span>';
+}
+/* 名称右侧带框标签 = 配置文件（紫框 = 有 · 灰框 = 无） */
+function plCfgTag(p){
+  if(plHasCfg(p)){ return '<span class="pltag pltagcfg" title="有配置文件（' + (p.cfgSections || 0) + ' 节 / ' + (p.cfgOptions || 0) + ' 项）">[有配置文件]</span>'; }
+  return '<span class="pltag pltagnone" title="无配置文件">[无配置文件]</span>';
 }
 function renderPlugins(){
   const list = plRows();
@@ -3639,7 +3654,7 @@ function renderPlugins(){
   list.forEach(p => {
     if(p.nonPlugin){
       h += '<tr data-nonplugin="1" data-file="' + esc(p.filePath || '') + '">'
-        + '<td>' + plDot(p) + esc(p.title || p.fileName) + ' <span class="dim">[非插件]</span></td>'
+        + '<td>' + plDot(p) + esc(p.title || p.fileName) + ' <span class="pltag pltagnone" title="不是 BepInEx 插件——不参与插件加载">[非插件 dll]</span></td>'
         + '<td style="font-size:12px">' + (p.note ? esc(p.note) : '<span class="dim">' + esc(p.reason || '未解析出插件特性') + '</span>') + '</td>'
         + '<td class="dim">' + esc(p.fileVersion || '') + '</td>'
         + '<td class="mono" style="font-size:11px">' + esc(p.fileName) + '</td>'
@@ -3650,7 +3665,7 @@ function renderPlugins(){
     }
     const cfgTxt = plHasCfg(p) ? ((p.cfgSections || 0) + ' 节 / ' + (p.cfgOptions || 0) + ' 项') : '无';
     h += '<tr data-guid="' + esc(p.guid) + '" data-name="' + esc(p.name) + '" style="cursor:pointer">'
-      + '<td>' + plDot(p) + esc(p.name) + (p.isIpa ? ' <span class="dim">[IPA]</span>' : '') + '</td>'
+      + '<td>' + plDot(p) + esc(p.name) + (p.isIpa ? ' <span class="dim">[IPA]</span>' : '') + plCfgTag(p) + '</td>'
       + '<td>' + (p.note ? esc(p.note) : '<span class="dim">未收录（可补充）</span>') + '</td>'
       + '<td class="dim">' + esc(p.version) + '</td>'
       + '<td class="mono" style="font-size:11px">' + esc(p.fileName) + '</td>'
