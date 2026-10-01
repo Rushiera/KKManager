@@ -329,6 +329,7 @@
   <div class="row" id="sortBar" style="margin:0 0 8px;align-items:center">
     <span class="dim">卡片排序</span>
     <button class="sortbtn on" id="btnSortMtime" title="按文件夹分组 · 组内按游戏内顺序（= 卡片修改时间倒序）">按游戏内顺序</button>
+    <button class="sortbtn" id="btnSortMiss" title="按文件夹分组 · 组内按缺失严重度（黑 全库皆无 → 灰 仅冷冻 → 黄 仅缓存 → 绿 齐备；同级按游戏内顺序；方向固定，不连点切向）">按缺失</button>
     <button class="sortbtn" id="btnSortSize" title="按文件大小降序（再点切升序）">按大小 ▼</button>
     <button class="sortbtn" id="btnSortFile" title="按文件夹分组 · 组内按文件名升序（再点切降序）">按文件名 ▲</button>
     <button class="sortbtn" id="btnSortChara" title="按文件夹分组 · 组内按角色名升序（名字读自卡片数据区；没名字的卡排最后；再点切降序）">按角色名 ▲</button>
@@ -1862,10 +1863,12 @@ function updateCardsInfo(){
     ? `已显示 ${state.rendered} / 共 ${state.cards.length} 张（滚动继续加载）`
     : '无结果') + (state.cardSortHint || '');
 }
-/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——五种排序都按文件夹分组，只换组内主键；
-   「按大小」「按 timeline」首点降序，「按文件名」「按角色名」首点升序；可切向的键连点来回切 */
+/* 卡片排序键（默认「按游戏内顺序」——与卡片修改时间倒序等价）——六种排序都按文件夹分组，只换组内主键；
+   「按大小」「按 timeline」首点降序，「按文件名」「按角色名」首点升序；可切向的键连点来回切；
+   「按缺失」按四色严重度（黑 → 灰 → 黄 → 绿）固定序，方向不可切 */
 function applyCardSort(){
   $('btnSortMtime').classList.toggle('on', state.cardSort === 'mtime');
+  $('btnSortMiss').classList.toggle('on', state.cardSort === 'miss');
   $('btnSortSize').classList.toggle('on', state.cardSort === 'size');
   $('btnSortFile').classList.toggle('on', state.cardSort === 'file');
   $('btnSortChara').classList.toggle('on', state.cardSort === 'chara');
@@ -1909,6 +1912,16 @@ async function loadCards(){
     state.cardSortHint = withTl === 0
       ? ' · 库里还没有 timeline 长度（先跑一次「扫描主要」——只有场景卡有）'
       : ` · 带 timeline 的卡 ${withTl} 张`;
+  }
+  /* 「按缺失」顺带报一句各色分布——缺失口径与卡片边框配色同源（黑 → 灰 → 黄 → 绿） */
+  if(state.cardSort === 'miss' && data.length){
+    let bk = 0, rd = 0, yl = 0;
+    for(let i=0;i<data.length;i++){
+      if(data[i].black > 0){ bk++; }
+      else if(data[i].red > 0){ rd++; }
+      else if(data[i].yellow > 0){ yl++; }
+    }
+    state.cardSortHint = ` · 黑 ${bk} · 灰 ${rd} · 黄 ${yl} · 齐备 ${data.length - bk - rd - yl}`;
   }
   $('cardsGrid').innerHTML = data.length ? '' : '<div class="dim">无结果</div>';
   renderCardsChunk();
@@ -3227,6 +3240,7 @@ $('btnSave').onclick = () => saveSettings(true);
 $('btnAddModRoot').onclick = () => $('modRootsBody').appendChild(rootRow('mods'));
 $('btnAddCardRoot').onclick = () => $('cardRootsBody').appendChild(rootRow('cards'));
 $('btnSortMtime').onclick = () => setCardSort('mtime');
+$('btnSortMiss').onclick = () => setCardSort('miss');
 $('btnSortSize').onclick = () => setCardSort('size');
 $('btnSortFile').onclick = () => setCardSort('file');
 $('btnSortChara').onclick = () => setCardSort('chara');

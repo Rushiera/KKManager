@@ -2385,7 +2385,7 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>分页查询卡片（filter：all / pending / ready / black / nomod / nothumb；folder：文件夹过滤；root：库根过滤；order：排序键——mtime（默认）/ size / file / chara / timeline（timeline 长度，没有 timeline 的卡恒排组内最后）；desc：组内方向，只对可切向的键生效，mtime 恒倒序）；size ≤ 0 = 不限条数。</summary>
+        /// <summary>分页查询卡片（filter：all / pending / ready / black / nomod / nothumb；folder：文件夹过滤；root：库根过滤；order：排序键——mtime（默认）/ size / file / chara / timeline（timeline 长度，没有 timeline 的卡恒排组内最后）/ miss（缺失严重度：黑 → 灰 → 黄 → 绿，同级按修改时间倒序，固定方向不可切）；desc：组内方向，只对可切向的键生效，mtime 与 miss 恒固定序）；size ≤ 0 = 不限条数。</summary>
         public List<CardRow> QueryCards(int page, int size, string filter, string q, string folder, string root, string order, bool desc)
         {
             var list = new List<CardRow>();
@@ -2458,6 +2458,10 @@ namespace KKManager.Data
             else if (order == "timeline")
             {
                 orderBy = "ORDER BY c.folder, CASE WHEN tl.duration IS NULL THEN 1 ELSE 0 END, tl.duration ASC, c.id";
+            }
+            else if (order == "miss")
+            {
+                orderBy = "ORDER BY c.folder, CASE WHEN COALESCE(a.black,0) > 0 THEN 0 WHEN COALESCE(a.red,0) > 0 THEN 1 WHEN COALESCE(a.yellow,0) > 0 THEN 2 ELSE 3 END, c.mtime DESC, c.id";
             }
             string sql = ColorCte + @" SELECT c.id, c.file_name, c.card_type, c.size, c.mtime,
                      c.root_path, c.tier, c.folder, c.mod_count,

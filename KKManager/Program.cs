@@ -159,7 +159,7 @@ namespace KKManager
             Console.WriteLine("  scan-plan [set <顺序> [勾选]]          看 / 设扫描步骤（顺序即执行顺序——面板已取消顺序调整，只读展示；CLI 的 set 保留）");
             Console.WriteLine("  stats                                 库统计：四色（绿/黄/红/黑）+ 就绪卡数");
             Console.WriteLine("  authors                               作者清单（按发布的 mod 数量倒序——与面板「按作者筛选」同一数据源）");
-            Console.WriteLine("  cards [--order mtime|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；timeline 只有场景卡有，需先扫描主要库读到）");
+            Console.WriteLine("  cards [--order mtime|miss|size|file|chara|timeline] [--desc] [--q 关键词] [--limit N]  列出卡片（与面板「卡片排序」同一实现；miss = 按缺失严重度黑→灰→黄→绿固定序；timeline 只有场景卡有，需先扫描主要库读到）");
             Console.WriteLine("  dup                                   列出重复副本组（同 guid 多份文件，含版本 / 作者 / 创建时间 / MD5 + 引用卡片数与前三个卡片名——MD5 只算冲突文件，算过就忽略）");
             Console.WriteLine("  todos                                 待办清单（库已离线 / 卡片 / 手输三类分支——id 供 todo-close 用）");
             Console.WriteLine("  todo-add <文本>                       新建一条手输待办（--card <卡片路径> = 挂到卡片上）");
@@ -1239,7 +1239,7 @@ namespace KKManager
                 RootsRules.Normalize(cfg);
                 hub.EnsureMigrated(cfg);
                 Console.WriteLine("库: " + hub.CorePath);
-                Console.WriteLine("排序: " + order + (order == "mtime" ? "（恒倒序）" : (desc ? " 降序" : " 升序")) + " · 关键词: " + (q.Length > 0 ? q : "（无）"));
+                Console.WriteLine("排序: " + order + (order == "mtime" ? "（恒倒序）" : (order == "miss" ? "（固定序：黑 → 灰 → 黄 → 绿）" : (desc ? " 降序" : " 升序"))) + " · 关键词: " + (q.Length > 0 ? q : "（无）"));
                 Console.WriteLine();
                 List<CardRow> rows = hub.QueryCards(cfg, 1, limit, "all", q, null, null, order, desc);
                 Console.WriteLine("共列 " + rows.Count + " 张");

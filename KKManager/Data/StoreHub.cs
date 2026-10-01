@@ -833,6 +833,14 @@ namespace KKManager.Data
                         }
                     }
                 }
+                else if (_order == "miss")
+                {
+                    c = MissRank(a).CompareTo(MissRank(b));
+                    if (c == 0)
+                    {
+                        c = string.CompareOrdinal(b.Mtime ?? "", a.Mtime ?? "");
+                    }
+                }
                 else
                 {
                     c = string.CompareOrdinal(b.Mtime ?? "", a.Mtime ?? "");
@@ -847,6 +855,24 @@ namespace KKManager.Data
                     return c;
                 }
                 return a.Id.CompareTo(b.Id);
+            }
+
+            /// <summary>缺失严重度排名（0 黑 · 1 灰 · 2 黄 · 3 绿）——与四色优先级同源（红 > 灰 > 黄 > 绿）；无 mod 引用的卡（绿）排最后。</summary>
+            private static int MissRank(CardRow r)
+            {
+                if (r.Black > 0)
+                {
+                    return 0;
+                }
+                if (r.Red > 0)
+                {
+                    return 1;
+                }
+                if (r.Yellow > 0)
+                {
+                    return 2;
+                }
+                return 3;
             }
         }
 

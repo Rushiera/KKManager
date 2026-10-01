@@ -1690,9 +1690,9 @@ namespace KKManager.Web
 
             app.MapGet("/api/cards", (int page, int size, string filter, string q, string folder, string root, string order, bool? desc) =>
             {
-                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "size" && order != "file" && order != "chara" && order != "timeline")
+                if (!string.IsNullOrEmpty(order) && order != "mtime" && order != "miss" && order != "size" && order != "file" && order != "chara" && order != "timeline")
                 {
-                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / size / file / chara / timeline）" });
+                    return Results.BadRequest(new { ok = false, error = "未知的卡片排序键：" + order + "（可用：mtime / miss / size / file / chara / timeline）" });
                 }
                 bool descending = desc == null || desc.Value;
                 if (size <= 0)
