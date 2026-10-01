@@ -44,7 +44,7 @@ namespace KKManager.Core
         /// <summary>卡片库根（级别 1 三条派生 · 级别 2 及以后为使用者添加的附加库）。</summary>
         public List<RootEntry> cardRoots { get; set; } = new List<RootEntry>();
 
-        /// <summary>插件库根（BepInEx 目录）——只有预置锁定只读一条，位于 mod 主库之上。</summary>
+        /// <summary>插件库根（BepInEx 目录）——只有预置锁定一条，位于 mod 主库之上。</summary>
         public List<RootEntry> pluginRoots { get; set; } = new List<RootEntry>();
         /// <summary>是否已预置过推荐库根——首次规范化填入推荐值，之后一律以使用者的列表为准（清空即不再回填）。</summary>
         public bool seeded { get; set; }
@@ -329,11 +329,11 @@ namespace KKManager.Core
             return list;
         }
 
-        /// <summary>推荐插件库根——游戏根\BepInEx（级别 1 · 含子目录 · 只读 · 预置锁定，不可增删改）。</summary>
+        /// <summary>推荐插件库根——游戏根\BepInEx（级别 1 · 含子目录 · 预置锁定，不可增删改）。只读不预置：插件解析本就是只读（不改动任何文件），只读标记在本库根上没有消费点。</summary>
         public static List<RootEntry> RecommendPluginRoots(string gameRoot)
         {
             List<RootEntry> list = new List<RootEntry>();
-            list.Add(new RootEntry { tier = Tier.Main, path = UnderGameRoot(gameRoot, PluginSub), recurse = true, readOnly = true, locked = true });
+            list.Add(new RootEntry { tier = Tier.Main, path = UnderGameRoot(gameRoot, PluginSub), recurse = true, readOnly = false, locked = true });
             return list;
         }
         /// <summary>清洗使用者列表——去空路径、级别夹在合法区间、同路径去重（保留首条，其余设置原样不动）。</summary>
@@ -503,14 +503,18 @@ namespace KKManager.Core
             }
             return warnings;
         }
-        /// <summary>该库根的数据是否落主库文件——预置条目（主库 · 缓存库槽位）与全局索引同处主库 db；使用者添加的库根各自一个 db。</summary>
+        /// <summary>该库根的数据是否落主库文件——mod 侧预置条目（主库 · 缓存库槽位）与全局索引同处主库 db；卡片侧一律自有库文件（可按分片展开——卡片库是扫描写入的主战场，挤在主库单文件里会成串行点）。</summary>
         public static bool UsesCoreDb(RootEntry entry, bool isMods)
         {
             if (entry == null)
             {
                 return true;
             }
-            return entry.locked || (isMods && entry.tier == Tier.Cache);
+            if (!isMods)
+            {
+                return false;
+            }
+            return entry.locked || entry.tier == Tier.Cache;
         }
 
         /// <summary>该库根是否适用离线语义——预置条目（锁定主库 / mod 缓存库槽位）不适用（其存在性由规范裁决，路径不可改也不可删）。</summary>
@@ -531,10 +535,31 @@ namespace KKManager.Core
             return true;
         }
 
-        /// <summary>库文件序号对应的文件名——主库目录下 lib_&lt;序号&gt;.db。</summary>
+        /// <summary>库序号的进位基数——库序号 = 库根序号 × 本值 + 分片序号。</summary>
+        public const int LibShardStride = 1000;
+
+        /// <summary>把库根序号与分片序号合成库序号（分片 0 = 首片）。</summary>
+        public static int LibOfShard(int baseLib, int shard)
+        {
+            return baseLib * LibShardStride + shard;
+        }
+
+        /// <summary>取库序号里的库根序号。</summary>
+        public static int BaseOfLib(int lib)
+        {
+            return lib / LibShardStride;
+        }
+
+        /// <summary>取库序号里的分片序号。</summary>
+        public static int ShardOfLib(int lib)
+        {
+            return lib % LibShardStride;
+        }
+
+        /// <summary>库文件序号对应的文件名——主库目录下 lib_&lt;库根序号&gt;_&lt;分片序号&gt;.db。</summary>
         public static string LibDbFileName(int lib)
         {
-            return "lib_" + lib + ".db";
+            return "lib_" + BaseOfLib(lib) + "_" + ShardOfLib(lib) + ".db";
         }
 
         /// <summary>清掉一组列表里的锁定标记。</summary>

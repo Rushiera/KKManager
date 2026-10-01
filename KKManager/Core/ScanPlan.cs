@@ -353,24 +353,5 @@ namespace KKManager.Core
             }
             return string.Join(",", list);
         }
-
-        /// <summary>把 id 挪到相邻位置（顺序编辑用）——up 为真上移一位，返回是否发生移动。</summary>
-        public static bool Move(ScanPlan p, string id, bool up)
-        {
-            int at = p.Order.IndexOf(id);
-            if (at < 0)
-            {
-                return false;
-            }
-            int to = up ? at - 1 : at + 1;
-            if (to < 0 || to >= p.Order.Count)
-            {
-                return false;
-            }
-            string other = p.Order[to];
-            p.Order[to] = p.Order[at];
-            p.Order[at] = other;
-            return true;
-        }
     }
 }
