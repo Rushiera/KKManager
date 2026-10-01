@@ -228,6 +228,9 @@ namespace KKManager.Core
     {
         private const int MaxErrors = 200;
         private const int BatchSize = 500;
+
+        /// <summary>先导段的小批量提交间隔——比常规段小得多，让面板轮询时能看见卡片陆续出现。</summary>
+        private const int PreludeBatchSize = 8;
         /// <summary>并行 worker 数上限——分片库方案（每 worker 一个独立 db，末尾一次合并）；多连接写同一库已证伪
         /// （451 张 14.9 s → 81.3 s，SQLite 写锁竞争），故并行只在分片库上做。</summary>
         private const int MaxScanWorkers = 32;
@@ -256,6 +259,9 @@ namespace KKManager.Core
         /// <summary>
         /// 统一编排入口——按计划的段顺序执行（跨侧交错：卡片行 → mod 总数 → 声明区 …）。
         /// 两侧库根各枚举一次；收尾（清扫 / 作者索引 / 离线标记）在全部段跑完后执行。
+        /// 全量扫描（only 为空）时，人物卡主库先跑一段「先导」——只扫该库根**本目录**（不含子文件夹）
+        /// 的卡片，只建卡片行（不解析、不出缩略图），按修改时间倒序，让面板在其余扫描开始前就能看见文件名与卡片原图；
+        /// 其余步骤照旧（含子文件夹），先导已写完成戳的会被跳过。
         /// </summary>
         public static ScanResult ScanAll(StoreHub hub, RootsConfig cfg, RootEntry only, ScanScope scope, bool force, int thumbWidth, int thumbQuality, ScanPlan plan, Action<string> log)
         {
@@ -269,7 +275,9 @@ namespace KKManager.Core
             List<ScanRootState> cardStates = CollectRoots(hub, cfg, only, scope, false, result, log);
             List<ScanSegment> segs = plan.Segments();
             bool withPlugins = scope == ScanScope.Preset && only == null;
-            result.StepCount = segs.Count + (withPlugins ? 1 : 0);
+            ScanRootState preludeRoot = only == null ? FindFemaleRoot(cardStates) : null;
+            List<ScanFile> preludeFiles = preludeRoot == null ? null : PreludeFiles(preludeRoot);
+            result.StepCount = segs.Count + (withPlugins ? 1 : 0) + (preludeRoot == null ? 0 : 1);
             int workers = ResolveWorkers(hub);
             bool trace = ResolveTrace(hub);
             if (log != null && workers > 1)
@@ -278,6 +286,16 @@ namespace KKManager.Core
             }
 
             int index = 0;
+            if (preludeRoot != null)
+            {
+                index = 1;
+                result.StepIndex = index;
+                result.StepName = PreludeStepName;
+                result.StepTotal = preludeFiles.Count;
+                result.StepDone = 0;
+                Report(log, "步骤 " + index + "/" + result.StepCount + "：" + PreludeStepName + "（" + preludeFiles.Count + " 个文件）");
+                RunPrelude(hub, preludeRoot, preludeFiles, force, result, log);
+            }
             foreach (ScanSegment seg in segs)
             {
                 index = index + 1;
@@ -832,6 +850,132 @@ namespace KKManager.Core
                 throw;
             }
         }
+        // [段2b] 先导段（人物卡主库）
+
+        /// <summary>先导段步骤名（面板进度行显示）。</summary>
+        public const string PreludeStepName = "人物卡主库先导（只建行 · 不含子文件夹）";
+
+        /// <summary>取人物卡主库那条库根状态（按推荐子路径后缀认定；找不到返回 null）。</summary>
+        private static ScanRootState FindFemaleRoot(List<ScanRootState> states)
+        {
+            string suffix = RootsRules.CardFemaleSub.Replace('/', '\\');
+            foreach (ScanRootState st in states)
+            {
+                if (st.Entry == null || st.Entry.tier != Tier.Main)
+                {
+                    continue;
+                }
+                string path = (st.Entry.path ?? "").TrimEnd('\\', '/');
+                if (path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return st;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>先导段排序——修改时间倒序（面板「按游戏内顺序」即此序）；同刻按路径。</summary>
+        private static int CompareByMtimeDesc(ScanFile a, ScanFile b)
+        {
+            int c = string.CompareOrdinal(b.Mtime ?? "", a.Mtime ?? "");
+            if (c != 0)
+            {
+                return c;
+            }
+            return string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>先导段文件清单——只取该库根**本目录**下的文件（不含子文件夹）：f.Folder 为空即本目录（根目录）。</summary>
+        private static List<ScanFile> PreludeFiles(ScanRootState st)
+        {
+            List<ScanFile> list = new List<ScanFile>();
+            foreach (ScanFile f in st.Files)
+            {
+                if (string.IsNullOrEmpty(f.Folder))
+                {
+                    list.Add(f);
+                }
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// 先导段——人物卡主库本目录（不含子文件夹）先只建「卡片行」，按修改时间倒序、小批量提交。
+        /// 只建行、不做任何解析（不读头段、不出缩略图）——面板先能看见文件名与卡片原图（原图由面板直接贴源文件）；
+        /// 其余解析照旧走后面的步骤；行按路径哈希落各自分片库（与常规段同一路由），不新建第二份记录。
+        /// </summary>
+        private static void RunPrelude(StoreHub hub, ScanRootState st, List<ScanFile> files, bool force, ScanResult result, Action<string> log)
+        {
+            files.Sort(CompareByMtimeDesc);
+            // 分片数按**整库**文件数推导（与常规段同源）——先导只跑其中一部分，不能拿它把分片数缩小
+            EnsureShards(hub, st, st.Files.Count, log);
+            List<Store> shards = st.Shards;
+            List<Dictionary<string, Dictionary<string, ScanStepRow>>> steps = st.ShardSteps;
+            ScanStepDef rowDef = ScanPlanCatalog.Find("row");
+            int total = files.Count;
+            int done = 0;
+            int[] batch = new int[shards.Count];
+            for (int k = 0; k < shards.Count; k = k + 1)
+            {
+                shards[k].Begin();
+            }
+            try
+            {
+                foreach (ScanFile f in files)
+                {
+                    done = done + 1;
+                    result.StepDone = done;
+                    if (log != null && done % ProgressEvery == 0)
+                    {
+                        log("  " + PreludeStepName + " " + done + "/" + total);
+                    }
+                    int k = StoreHub.ShardOfPath(f.Path, shards.Count);
+                    Store store = shards[k];
+                    RunPreludeStep(store, st.Entry, f, rowDef, force, steps[k], result);
+                    batch[k] = batch[k] + 1;
+                    if (batch[k] >= PreludeBatchSize)
+                    {
+                        store.Commit();
+                        store.Begin();
+                        batch[k] = 0;
+                    }
+                }
+                for (int k = 0; k < shards.Count; k = k + 1)
+                {
+                    shards[k].Commit();
+                }
+            }
+            catch
+            {
+                for (int k = 0; k < shards.Count; k = k + 1)
+                {
+                    shards[k].Rollback();
+                }
+                throw;
+            }
+        }
+
+        /// <summary>先导段单步——判步跳过 / 执行 / 落完成戳 / 计数（与常规段同一套语义，只是批次更小）。</summary>
+        private static void RunPreludeStep(Store store, RootEntry root, ScanFile f, ScanStepDef step, bool force, Dictionary<string, Dictionary<string, ScanStepRow>> index, ScanResult result)
+        {
+            if (step == null)
+            {
+                return;
+            }
+            if (!force && StepDoneIn(index, f, step.Id))
+            {
+                result.Skipped = result.Skipped + 1;
+                return;
+            }
+            if (RunCardStep(store, root, f, null, step, 0, 0, result))
+            {
+                store.MarkScanStep(f.Path, step.Id, f.Size, f.Mtime);
+                result.Added = result.Added + 1;
+                return;
+            }
+            result.Failed = result.Failed + 1;
+        }
+
         /// <summary>准备分片库——片数首次按「分片目标」定下并落设置（受每片至少 MinFilesPerWorker 约束裁剪），此后稳定不变；缺片则用「模板建一次 + 文件复制」补齐；分片库**常驻**（不合并、不删），各片各读自己的完成戳索引。</summary>
         private static void EnsureShards(StoreHub hub, ScanRootState st, int total, Action<string> log = null)
         {

@@ -507,6 +507,9 @@ namespace KKManager.Web
         /// <summary>设置表里编辑授权的键。</summary>
         private const string EditAuthKey = "edit_authorized";
 
+        /// <summary>卡片源文件图片区的返回上限（字节）——超限不出图（面板回落占位，不把大图整段塞给浏览器）。</summary>
+        private const long CardSrcMaxBytes = 12L * 1024 * 1024;
+
         /// <summary>是否已取得编辑授权——以设置表为准（前端勾选不作授权依据）；默认不授权。</summary>
         private static bool IsEditAuthorized()
         {
@@ -2675,10 +2678,50 @@ namespace KKManager.Web
                 await context.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, detail = detail, view = LoadSortPlanView(false) }));
             });
 
-            app.MapGet("/api/thumb/{id}", (long id, int lib) =>
+            app.MapGet("/api/thumb/{id}", (long id, int lib, HttpContext context) =>
             {
                 byte[] data = _hub.LoadThumb(lib, id);
-                return data == null ? Results.NotFound() : Results.Bytes(data, "image/jpeg");
+                if (data == null)
+                {
+                    return Results.NotFound();
+                }
+                // 缩略图按卡片 id 定址（同一 id 的图只随重扫变）——扫描中面板会反复重绘网格，让浏览器直接复用缓存，
+                // 否则每补一批行就把整屏缩略图重新拉一遍（先导段边扫边显时尤为明显）
+                context.Response.Headers["Cache-Control"] = "private, max-age=600";
+                return Results.Bytes(data, "image/jpeg");
+            });
+
+            // 卡片源文件图片区（只读）——还没缩略图时面板直接贴它当卡面（先导段只建行、不解码，先把卡看见再说）。
+            // 返回的字节就是 PNG 文件里 IEND 之前那一段，浏览器自己解码；体积上限内才返回，超限 404（面板回落占位）。
+            app.MapGet("/api/card-src/{id}", (long id, int lib, HttpContext context) =>
+            {
+                RootsConfig cfg = LoadConfig();
+                string path = CardPathOf(cfg, lib, id, out string why);
+                if (path == null)
+                {
+                    return Results.NotFound();
+                }
+                long imageEnd;
+                byte[] png;
+                using (CardFileSession session = CardFileSession.Open(path))
+                {
+                    if (session == null)
+                    {
+                        return Results.NotFound();
+                    }
+                    imageEnd = session.ImageEnd;
+                    if (imageEnd <= 0 || imageEnd > CardSrcMaxBytes)
+                    {
+                        return Results.NotFound();
+                    }
+                    png = session.Read(0, (int)imageEnd);
+                }
+                if (png == null)
+                {
+                    return Results.NotFound();
+                }
+                context.Response.Headers["Cache-Control"] = "private, max-age=600";
+                return Results.Bytes(png, "image/png");
             });
 
             // 非卡 / 非 mod 清单——扫描判定为「不是卡片也不是 mod」的文件（含理由与缩略图）

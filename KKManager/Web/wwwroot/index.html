@@ -43,6 +43,8 @@
   .item.s-cold{border-color:var(--gray)}
   .item.s-miss{border-color:var(--red)}
   .item .thumb{width:100%;aspect-ratio:252/352;background:#0e1013 center/cover no-repeat;display:block}
+  /* 卡面源图取不到（超限 / 读失败）——隐藏破图，露出缩略图位的底色 */
+  .item .thumb.bad{visibility:hidden}
   /* 场景卡（sd）是 16:9 横版（实测 1600×900 / 320×180）——按自身比例显示；卡片页网格里占一列（与人物卡同列宽、无留白——约合原两列宽的 48% 宽 / 59% 高）· 矮卡不被行高拉伸 */
   .item.t-sd .thumb{aspect-ratio:16/9}
   .grid .item.t-sd{align-self:start}
@@ -1844,7 +1846,11 @@ function tlSub(c){
   return ' · timeline ' + secText(c.timelineSeconds);
 }
 function cardHtml(c){
-  const thumb = c.hasThumb ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">` : `<div class="thumb"></div>`;
+  /* 有缩略图用缩略图；还没有（先导段只建了行）就直接贴卡片源文件的图片区当卡面——先把卡看见，缩略图后续扫描补上。
+     源图取不到（超限 / 读失败）时标 bad，保留缩略图位的底色占位，不留破图 */
+  const thumb = c.hasThumb
+    ? `<img class="thumb" loading="lazy" draggable="false" src="/api/thumb/${c.id}?lib=${c.lib||0}" alt="">`
+    : `<img class="thumb" loading="lazy" draggable="false" src="/api/card-src/${c.id}?lib=${c.lib||0}" alt="" onerror="this.classList.add('bad')">`;
   return `<div class="${cardItemClass(c)}" data-id="${c.id}" data-lib="${c.lib||0}" data-g="${c.green}" data-y="${c.yellow}" data-c="${c.red}" data-m="${c.black}">${thumb}
       <div class="meta"><div class="name">${esc(c.fileName)}</div>
       <div class="sub">${c.charaName ? esc(c.charaName) + ' · ' : ''}${esc(c.cardType||'')} · ${esc(c.folder||'(根目录)')} · ${(c.size/1048576).toFixed(1)}MB${tlSub(c)}</div></div></div>`;
@@ -3161,12 +3167,74 @@ async function startScan(target, plan){
   const r = await api('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   if(!r.ok){ alert(r.error || '启动失败'); return; }
   $('scanFloat').classList.remove('hidden');
+  /* 主要库扫描：立刻把卡片库的「人物卡主库」展示出来并选中——扫描先导段正读的就是它，边读边往视图里补 */
+  if(target === 'main') await focusCardLiveRoot();
   pollScan();
 }
+/* 人物卡主库（female）的库根路径——按推荐子路径后缀认定；没有则返回 null */
+function femaleRootPath(){
+  const list = ((state.roots||{}).cardRoots)||[];
+  const suffix = '\\userdata\\chara\\female';
+  for(let i=0;i<list.length;i++){
+    const r = list[i];
+    if(Number(r.tier) !== 1) continue;
+    const p = String(r.path||'').replace(/\//g,'\\').toLowerCase();
+    if(p.length > suffix.length && p.slice(-suffix.length) === suffix) return r.path;
+  }
+  return null;
+}
+/* 切到卡片页签并选中人物卡主库的「根目录」——先导段扫的就是这个文件夹（不含子文件夹） */
+async function focusCardLiveRoot(){
+  const p = femaleRootPath();
+  if(!p) return;
+  if(state.tab === 'cards' && state.root === p && state.folder === '') return;
+  state.root = p; state.folder = ''; rememberFolder();
+  await switchTab('cards');
+  await loadFolders();
+  /* 扫描刚开始时这一库根还没有行，loadFolders 会把「根目录」判定成已消失而退回「全部文件夹」——
+     这里按本轮意图钉回「根目录」并重绘一次 chip，保证视图就是先导段扫的那个文件夹 */
+  if(state.folder !== ''){
+    state.folder = ''; rememberFolder();
+    await loadFolders();
+  }
+}
+/* 扫描中的实时补行——只在「卡片页签 + 人物卡主库」时跑；行数没变就不重绘（不打扰正在看的视图） */
+let scanLive = { busy:false };
+async function refreshCardsLive(){
+  if(scanLive.busy || state.tab !== 'cards') return;
+  const p = femaleRootPath();
+  if(!p || state.root !== p) return;
+  scanLive.busy = true;
+  const y = window.scrollY;
+  try{
+    const q = $('q').value, filter = $('filter').value;
+    let url = `/api/cards?page=1&size=0&filter=${encodeURIComponent(filter)}&q=${encodeURIComponent(q)}&order=${encodeURIComponent(state.cardSort)}&desc=${state.cardDesc ? 'true' : 'false'}`;
+    if(state.folder !== null && state.folder !== undefined) url += '&folder=' + encodeURIComponent(state.folder);
+    url += '&root=' + encodeURIComponent(state.root);
+    const data = await api(url);
+    if(!data || data.length === state.cards.length) return;
+    state.cards = data; state.rendered = 0;
+    $('cardsGrid').innerHTML = data.length ? '' : '<div class="dim">无结果</div>';
+    renderCardsChunk();
+    /* 补渲染到「当前阅读位置之下」——先把已看过的部分铺回来，再恢复滚动位置 */
+    while(state.rendered < state.cards.length && document.body.scrollHeight < y + window.innerHeight + 400){
+      renderCardsChunk();
+    }
+    window.scrollTo(0, y);
+    updateCardsInfo();
+  }catch(e){
+    /* 扫描进行中读取失败不打断——下一拍再试 */
+  }finally{
+    scanLive.busy = false;
+  }
+}
 let timer = null;
+let pollTick = 0;
 async function pollScan(){
   if(timer) clearInterval(timer);
-  const tick = async () => {
+  pollTick = 0;
+  const tickFn = async () => {
+    pollTick++;
     const s = await api('/api/scan/status');
     const total = s.seen || 0;
     const done = (s.added||0) + (s.skipped||0) + (s.nonCard||0) + (s.nonMod||0) + (s.failed||0);
@@ -3186,14 +3254,16 @@ async function pollScan(){
     $('scanErrors').textContent = (s.errors && s.errors.length) ? s.errors.slice(0,6).join(' | ') : '';
     $('btnScanMain').disabled = s.running;
     $('btnScanExtra').disabled = s.running;
+    /* 扫描进行中：卡片页签停在人物卡主库时按节奏补行——先导段每 8 个文件一提交，行会陆续冒出来 */
+    if(s.running && pollTick % 2 === 0) refreshCardsLive();
     if(!s.running){
       clearInterval(timer); timer = null;
       await loadStats(); await loadFolders(); await reload();
       setTimeout(() => $('scanFloat').classList.add('hidden'), 20000);   /* 结束 20 秒后自动收起，可手动收起 */
     }
   };
-  await tick();
-  timer = setInterval(tick, 1500);
+  await tickFn();
+  timer = setInterval(tickFn, 1500);
 }
 
 /* ---------- 页签与加载 ---------- */
