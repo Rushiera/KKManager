@@ -87,6 +87,8 @@
   #ovEdit{z-index:59}
   #ovAuth{z-index:60}
   #ovOld{z-index:60}
+  /* 插件配置保存询问窗——压在插件分析窗（基础 50）之上、编辑授权窗（60）之下（授权窗由它拉起） */
+  #ovCfgSave{z-index:59}
   /* 卡片侧「加待办」小窗——压在引用明细（58）之上 */
   #ovTodoAdd{z-index:62}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(920px,94vw);max-height:86vh;display:flex;flex-direction:column}
@@ -176,6 +178,17 @@
   .ct-sd{color:#c08cff}
   .ct-none{color:var(--dim)}
   .ctdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:currentColor}
+  /* 插件清单：名称左侧的配置标识——绿点 = 有配置文件（这类排在列表最上面）· 灰点 = 无配置文件 */
+  .pldot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:currentColor}
+  .plcfg{color:var(--green)}
+  .plnocfg{color:var(--dim)}
+  /* 插件分析窗「当前值」列——按类型给控件（下拉 / 数字 / 文本）；改过的行标黄并在行首留痕 */
+  table.list.cfgval td{padding:3px 8px}
+  table.list.cfgval input,table.list.cfgval select{background:#0b0d10;border:1px solid var(--line);color:var(--fg);border-radius:5px;padding:3px 6px;font-size:12px;font-family:inherit;width:100%;box-sizing:border-box}
+  table.list.cfgval input:focus,table.list.cfgval select:focus{outline:none;border-color:var(--accent)}
+  table.list.cfgval tr.cfgdirty input,table.list.cfgval tr.cfgdirty select{border-color:var(--yellow);color:var(--yellow)}
+  table.list.cfgval tr.cfgdirty td:first-child::before{content:"● ";color:var(--yellow)}
+  .cfgunknown{color:var(--yellow);font-size:10px;margin-left:4px}
   .edimg{display:flex;flex-wrap:wrap;gap:8px}
   .edimg .cell{width:104px;font-size:11px;color:var(--dim);text-align:center;line-height:1.25}
   .edimg img{width:100px;height:100px;object-fit:contain;background:#0b0d10;border:1px solid var(--line);border-radius:6px;display:block;margin-bottom:3px}
@@ -214,7 +227,6 @@
   <button class="primary" id="btnScanMain" title="扫描主要库——mod 主库 + 缓存库槽位 + 卡片 female / coordinate / Studio（预置条目）">扫描主要</button>
   <button class="primary" id="btnScanExtra" title="扫描追加库——使用者自己添加的库根（mod 冷冻库 + 卡片附加库）；离线库跳过">追加库扫描</button>
   <button id="btnSettings">库根设置</button>
-  <button id="btnPlugins">插件清单</button>
   <label class="authbox" id="authBox" title="默认不授权——勾选后须确认声明才授权，随时可撤销"><input type="checkbox" id="chkAuth">编辑授权</label>
   <span class="grow"></span>
   <span id="verInfo" class="dim" style="margin-left:12px"></span>
@@ -232,11 +244,11 @@
       <span class="dim">选定游戏根后自动填入 4 条级别 1：游戏根\mods · UserData 下 female / coordinate / Studio</span>
     </div>
 
-    <h2>库根设置 — 插件库（预置条目锁定不可改 · BepInEx 目录 · 只读 · 含子目录）</h2>
+    <h2>库根设置 — 插件库（预置条目锁定不可改 · BepInEx 目录 · 含子目录）</h2>
     <table class="list"><thead><tr><th style="width:82px">更新</th><th style="width:88px">离线</th><th style="width:96px">级别</th><th>路径 / 备注</th><th style="width:72px">含子目录</th><th style="width:52px">只读</th><th style="width:170px"></th></tr></thead>
       <tbody id="pluginRootsBody"></tbody></table>
     <div style="margin:8px 0 16px">
-      <span class="dim">插件库 = 游戏根\BepInEx（BepInEx 插件 / 配置 / 缓存所在）——预置锁定只读一条，不可增删改；扫描只读元数据，不改动任何文件</span>
+      <span class="dim">插件库 = 游戏根\BepInEx（BepInEx 插件 / 配置 / 缓存所在）——预置锁定一条，不可增删改；扫描只读元数据，不改动任何文件</span>
     </div>
 
     <h2>库根设置 — mod 库（预置条目锁定不可改 · 新增库根一律冷冻库 · 扫描不覆盖未添加的文件夹）</h2>
@@ -277,6 +289,7 @@
     <button id="tabCards" class="active">卡片</button>
     <button id="tabMods">mod 库</button>
     <button id="tabMissing">缺失清单</button>
+    <button id="tabPlugins">插件清单</button>
   </div>
 
   <div class="row card" style="margin-bottom:12px">
@@ -320,9 +333,10 @@
   <div id="viewMods" class="hidden"><div class="card">
     <table class="list fixed" id="modsTable">
       <colgroup>
-        <col style="width:13%"><col style="width:11%"><col style="width:15%"><col style="width:7%">
-        <col style="width:6%"><col style="width:17%"><col style="width:6%"><col style="width:6.5%">
-        <col style="width:8.5%"><col style="width:9.5%">
+        <col style="width:11%"><col style="width:9%"><col style="width:11%"><col style="width:5%">
+        <col style="width:5%"><col style="width:13%"><col style="width:4.5%"><col style="width:4.5%">
+        <col style="width:7%"><col style="width:8%">
+        <col style="width:7.5%"><col style="width:7.5%"><col style="width:7%">
       </colgroup>
       <thead><tr>
         <th>guid</th><th>名称</th>
@@ -332,11 +346,32 @@
         <th style="text-align:right">副本</th><th>旧版</th>
         <th class="sortable" data-sort="used" data-label="被引用" style="text-align:right" title="点击切换升序 / 降序（默认降序）">被引用</th>
         <th class="sortable" data-sort="size" data-label="大小" style="text-align:right" title="点击切换升序 / 降序（默认降序）">大小</th>
+        <th class="sortable" data-sort="usedChara" data-label="角色卡" style="text-align:right" title="引用该 mod 的人物卡张数（点击切换升序 / 降序，默认降序）">角色卡</th>
+        <th class="sortable" data-sort="usedClothes" data-label="服装卡" style="text-align:right" title="引用该 mod 的服装卡张数（点击切换升序 / 降序，默认降序）">服装卡</th>
+        <th class="sortable" data-sort="usedSd" data-label="场景卡" style="text-align:right" title="引用该 mod 的场景卡（sd）张数（点击切换升序 / 降序，默认降序）">场景卡</th>
       </tr></thead>
       <tbody id="modsBody"></tbody>
     </table>
   </div></div>
   <div id="viewMissing" class="hidden"><div class="card"><div id="missingList"></div></div></div>
+  <div id="viewPlugins" class="hidden">
+    <div class="card">
+      <div class="dim" id="plHint" style="font-size:12px;margin-bottom:8px">插件库（<b>BepInEx</b>）下解析出的插件——GUID / 名称 / 中文说明 / 版本 / 文件 / 进程过滤 / 依赖 / 配置，全部<b>只读自 dll 元数据与 cfg</b>，不改动任何文件。一个 dll 可含多项插件（如 <span class="mono">KKAPI.dll</span> 三项）。名称左侧的标识点：<span class="pldot plcfg"></span><b>绿 = 有配置文件</b>（这类恒排在列表最上面）· <span class="pldot plnocfg"></span>灰 = 无配置文件。<b>点任意一行</b>打开插件分析。</div>
+      <div id="plLog" style="margin-bottom:10px"></div>
+      <div class="row" style="margin-bottom:8px">
+        <input id="plQ" class="grow" placeholder="搜索插件名 / GUID / 文件名 / 说明…">
+        <select id="plFilter">
+          <option value="all">全部插件</option>
+          <option value="noted">已收录说明</option>
+          <option value="unnoted">未收录说明</option>
+          <option value="cfg">有配置文件</option>
+          <option value="nocfg">无配置文件</option>
+          <option value="nonplugin">非插件 dll</option>
+        </select>
+      </div>
+      <div id="plBody" style="max-height:70vh;overflow:auto"></div>
+    </div>
+  </div>
 
   <div id="auPanel" class="filterpop hidden">
     <div class="auhead"><b>按作者筛选</b><span class="dim" id="auInfo"></span></div>
@@ -623,19 +658,36 @@
   </div>
 </div>
 
-<div class="overlay hidden" id="ovPlugins">
+<div class="overlay hidden" id="ovPluginDetail">
   <div class="modal wide">
-    <header><b>插件清单</b> <span class="dim" id="plInfo"></span></header>
+    <header><b>插件分析</b> <span class="dim" id="pdTitle"></span></header>
     <div class="body">
-      <div class="dim" id="plHint" style="font-size:12px;margin-bottom:8px">插件库（<b>BepInEx</b>）下解析出的插件——GUID / 名称 / 版本 / 文件 / 进程过滤 / 依赖，全部<b>只读自 dll 元数据</b>，不改动任何文件。一个 dll 可含多项插件（如 <span class="mono">KKAPI.dll</span> 三项）。</div>
-      <div id="plLog" style="margin-bottom:10px"></div>
-      <div id="plBody" style="max-height:52vh;overflow:auto"></div>
+      <div class="cardinfo" id="pdHead"></div>
+      <div id="pdNote" style="margin-bottom:10px"></div>
+      <div id="pdMeta" style="margin-bottom:10px"></div>
+      <div id="pdCfg"></div>
     </div>
     <footer>
-      <span class="dim" id="plFoot"></span>
+      <span class="dim" id="pdFoot"></span>
       <span class="grow"></span>
-      <button id="btnPlReload">重新读取</button>
-      <button id="btnPlClose">关闭</button>
+      <button id="btnPdReveal">打开所在文件夹</button>
+      <button id="btnPdRevert">还原改动</button>
+      <button class="primary" id="btnPdClose">确认</button>
+    </footer>
+  </div>
+</div>
+
+<div class="overlay hidden" id="ovCfgSave">
+  <div class="modal">
+    <header><b>保存配置改动</b> <span class="dim" id="csTitle"></span></header>
+    <div class="body">
+      <div id="csList"></div>
+      <div class="dim" id="csHint" style="font-size:12px;margin-top:10px">回车 = 保存 · Esc = 取消。保存需要编辑授权——未授权会先弹授权窗，授权不成则不写文件。</div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnCfgSaveOk">确定</button>
+      <button id="btnCfgSaveCancel">取消</button>
     </footer>
   </div>
 </div>
@@ -658,9 +710,9 @@
 
 <div class="overlay hidden" id="ovScanPlan">
   <div class="modal wide">
-    <header><b>扫描配置</b> <span class="dim">必选项锁定 · 分项默认不选 · 顺序即执行顺序</span></header>
+    <header><b>扫描配置</b> <span class="dim">必选项锁定 · 分项默认不选 · 顺序固定</span></header>
     <div class="body">
-      <div class="dim" style="font-size:12px;margin-bottom:8px">同一侧、同一读取档的相邻步骤会合并成一次文件读取——把想一起做的步骤排在一起即可减少打开次数。顺序与勾选全局一套，追加库扫描同样适用。</div>
+      <div class="dim" style="font-size:12px;margin-bottom:8px">同一侧、同一读取档的相邻步骤会合并成一次文件读取。步骤顺序固定（不可调整），勾选全局一套，追加库扫描同样适用。</div>
       <div id="spList"></div>
     </div>
     <footer>
@@ -686,6 +738,22 @@ async function api(path, opts){
 }
 const fmt = n => (n===null||n===undefined) ? '-' : Number(n).toLocaleString('en-US');
 const esc = s => String(s===null||s===undefined?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* 字节数 → 可读体积（B / KB / MB / GB） */
+function fmtBytes(n){
+  const v = Number(n || 0);
+  if(v < 1024) return v + ' B';
+  if(v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+  if(v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+  return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+/* UTC 时间戳文本（"o" 格式）→ 本地可读时间；解析不了就原样显示 */
+function fmtTime(s){
+  if(!s) return '';
+  const d = new Date(s);
+  if(isNaN(d.getTime())) return String(s);
+  const p = n => (n < 10 ? '0' + n : '' + n);
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
 const tierName = t => ({1:'主库',2:'缓存库',3:'冷冻库'}[t] || ('级别'+t));
 /* 在资源管理器中打开并选中（受管的 mod 副本）——mod 列表文件名列与引用明细文件名列共用同一出口 */
 function revealPath(p){
@@ -1853,7 +1921,7 @@ const fmtSize = n => {
 async function loadMods(){
   const q = $('q').value, filter = $('filter').value;
   const f = ['tier1','tier2','tier3','dup','unused','used'].includes(filter) ? filter : 'all';
-  $('modsBody').innerHTML = '<tr><td colspan="10" class="dim">加载中…</td></tr>';
+  $('modsBody').innerHTML = '<tr><td colspan="13" class="dim">加载中…</td></tr>';
   const data = await api(`/api/mods?page=1&size=0&filter=${f}&q=${encodeURIComponent(q)}`);
   state.modRows = data || [];
   renderMods(true);
@@ -1866,7 +1934,15 @@ function modsFiltered(){
     const set = new Set(state.modAuthors);
     list = list.filter(m => set.has(modAuthor(m)));
   }
-  const key = state.modSort.key === 'size' ? (m => m.size || 0) : (m => m.used || 0);
+  /* 排序键：大小 / 被引用总数 / 三类型分列（角色卡 / 服装卡 / 场景卡）——未知键回落「被引用」 */
+  const keys = {
+    size: m => m.size || 0,
+    used: m => m.used || 0,
+    usedChara: m => m.usedChara || 0,
+    usedClothes: m => m.usedClothes || 0,
+    usedSd: m => m.usedSd || 0
+  };
+  const key = keys[state.modSort.key] || keys.used;
   const dir = state.modSort.dir === 'asc' ? 1 : -1;
   const arr = list.slice();
   arr.sort((a,b) => {
@@ -1885,7 +1961,8 @@ function modRow(m){
     <td class="dim">${esc(m.version||'')}</td>
     <td>${tierName(m.tier)}${inOfflineRoot(m.filePath)?' <b class="offmark" title="这份副本所在的库已离线——内容取数据库，不再随扫描更新">离线</b>':''}</td><td class="mono dim reveal" data-path="${esc(m.filePath||'')}" title="在资源管理器中打开并选中：${esc(m.filePath||m.fileName||'')}">${esc(m.fileName||'')}</td>
     <td style="text-align:right">${dup}</td><td>${old}</td>
-    <td style="text-align:right">${fmt(m.used)}</td><td class="dim" style="text-align:right">${fmtSize(m.size)}</td></tr>`;
+    <td style="text-align:right">${fmt(m.used)}</td><td class="dim" style="text-align:right">${fmtSize(m.size)}</td>
+    <td style="text-align:right">${fmt(m.usedChara)}</td><td style="text-align:right">${fmt(m.usedClothes)}</td><td style="text-align:right">${fmt(m.usedSd)}</td></tr>`;
 }
 /* mod 的副本落在离线库（冷冻库）里——标记用黑色（离线库内容取数据库，不随扫描更新） */
 function inOfflineRoot(path){
@@ -1912,7 +1989,7 @@ function renderMods(reset){
     return;
   }
   if(!list.length){
-    $('modsBody').innerHTML = '<tr><td colspan="10" class="dim">没有符合条件的 mod</td></tr>';
+    $('modsBody').innerHTML = '<tr><td colspan="13" class="dim">没有符合条件的 mod</td></tr>';
     state.modShown = 0;
   }else{
     const end = Math.min(list.length, state.modShown + state.modBatch);
@@ -2755,15 +2832,33 @@ function renderCompRows(reset){
       ? `<img class="compThumb" loading="lazy" draggable="false" alt="" src="/api/mod/${encodeURIComponent(compState.guid)}/entry?path=${encodeURIComponent(p)}">`
       : '<span style="width:18px;flex:0 0 auto"></span>';
     const cls = 'comprow' + (hasText ? ' hastext' : '') + (isU3d ? ' u3d' : '') + (isU3d && compState.u3dMap[p] ? ' parsed' : '');
+    const gated = isU3d && u3dGated(p, sz);
     const title = isU3d
-      ? (compState.u3dMap[p] ? '已解析——悬停看贴图，点击固定浮层（' + p + '）' : '点击解析 unity3d 看内部贴图（' + p + '）')
+      ? (gated ? U3D_GATE_HINT + '（' + p + '）' : (compState.u3dMap[p] ? '已解析——悬停看贴图，点击固定浮层（' + p + '）' : '点击解析 unity3d 看内部贴图（' + p + '）'))
       : (hasText ? '悬停查看内容（' + p + '）' : p);
-    return `<div class="${cls}" style="display:flex;gap:8px;align-items:center;font-size:12px;padding:1px 4px" data-path="${esc(p)}" title="${esc(title)}">${thumb}<span class="mono grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p)}</span><span class="dim" style="white-space:nowrap">${fmtSize(sz)}</span></div>`;
+    return `<div class="${cls}" style="display:flex;gap:8px;align-items:center;font-size:12px;padding:1px 4px" data-path="${esc(p)}" data-size="${sz}" title="${esc(title)}">${thumb}<span class="mono grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p)}</span><span class="dim" style="white-space:nowrap">${fmtSize(sz)}</span></div>`;
   }).join('');
   if(compState.shown === 0) box.innerHTML = html;
   else box.insertAdjacentHTML('beforeend', html);
   compState.shown = end;
   $('compInfo').textContent = `已显示 ${fmt(compState.shown)} / ${fmt(list.length)} 项`;
+}
+/* ---------- unity3d 大条目扫描闸门（>200MB 需双击才开扫）---------- */
+/* 判据 = 条目原始字节（组成档案 size 列——解压后大小，解析成本的实际量度）；已有解析档案的条目不受闸门约束（读档案不读容器） */
+const U3D_SCAN_GATE_BYTES = 200 * 1024 * 1024;
+const U3D_GATE_HINT = '文件大小大于200MB，坚持扫描请双击';
+/* 是否命中扫描闸门（唯一判据）——行版（事件处理用）与值版（渲染标题用）同源 */
+function u3dGated(path, size){
+  if(!/\.unity3d$/i.test(path || '')) return false;
+  if(compState.u3dMap && compState.u3dMap[path]) return false;
+  return Number(size || 0) > U3D_SCAN_GATE_BYTES;
+}
+function u3dRowGated(row){
+  if(!row) return false;
+  return u3dGated(row.dataset.path || '', row.dataset.size);
+}
+function u3dRowSize(row){
+  return row && row.dataset ? Number(row.dataset.size || 0) : 0;
 }
 /* 文本条目悬停预览（内容已在档案里，不再读文件）；图片条目悬停看大图 */
 function bindCompHover(){
@@ -2779,11 +2874,16 @@ function bindCompHover(){
     const text = compState.textMap ? compState.textMap[p] : null;
     const isImg = /\.(png|jpe?g|gif|bmp)$/i.test(p);
     if(/\.unity3d$/i.test(p)){
-      tip.classList.add('hidden');
-      showU3dTip(row, p, e);
-      return;
-    }
-    if(text){
+      if(!u3dRowGated(row)){
+        tip.classList.add('hidden');
+        showU3dTip(row, p, e);
+        return;
+      }
+      /* 扫描闸门：大条目（>200MB）悬停只提示，双击条目行才开始扫描 */
+      scheduleHideU3d();
+      tip.className = 'tip comp';
+      tip.innerHTML = `<div>${esc(U3D_GATE_HINT)}</div><div class="dim mono" style="font-size:11px">${esc(p)} · ${fmtSize(u3dRowSize(row))}</div>`;
+    }else if(text){
       tip.className = 'tip comp';
       tip.textContent = p + '\n' + '─'.repeat(30) + '\n' + text;
     }else if(isImg){
@@ -2808,6 +2908,17 @@ function bindCompHover(){
     if(!row) return;
     const p = row.dataset.path;
     if(!/\.unity3d$/i.test(p)) return;
+    if(u3dRowGated(row)) return; /* 扫描闸门：单击不开扫（悬停有提示，双击才扫） */
+    pinU3dTip(p);
+  });
+  /* 扫描闸门：大条目（>200MB）双击条目行才开始扫描 */
+  box.addEventListener('dblclick', e => {
+    const row = e.target.closest ? e.target.closest('.comprow') : null;
+    if(!row) return;
+    const p = row.dataset.path;
+    if(!/\.unity3d$/i.test(p)) return;
+    if(!u3dRowGated(row)) return;
+    $('tip').classList.add('hidden');
     pinU3dTip(p);
   });
 }
@@ -3019,23 +3130,11 @@ function renderScanPlan(){
       <span class="dim" style="width:64px;font-size:11px;white-space:nowrap">${tag}·${side}</span>
       ${box}
       <span style="flex:1;${s.grayed ? 'opacity:.5' : ''}">${esc(s.name)}<span class="dim" style="font-size:11px"> · ${esc(s.note)}</span></span>
-      <button class="spUp" data-id="${id}" style="padding:1px 7px;font-size:12px" title="上移">↑</button>
-      <button class="spDown" data-id="${id}" style="padding:1px 7px;font-size:12px" title="下移">↓</button>
     </div>`;
   }).join('');
   $('spList').innerHTML = rows;
   const onCount = spState.order.filter(id => { const s = spDef(id); return s && !s.grayed && (s.required || spState.on.indexOf(id) >= 0); }).length;
   $('spFoot').textContent = `启用 ${onCount} / ${spState.order.length} 步`;
-}
-function spMove(id, up){
-  const at = spState.order.indexOf(id);
-  if(at < 0) return;
-  const to = up ? at - 1 : at + 1;
-  if(to < 0 || to >= spState.order.length) return;
-  const t = spState.order[to];
-  spState.order[to] = spState.order[at];
-  spState.order[at] = t;
-  renderScanPlan();
 }
 async function startScan(target, plan){
   const body = { target };
@@ -3057,6 +3156,7 @@ async function pollScan(){
       + (((s.namesRead||0) + (s.namesFilled||0)) > 0 ? ` · 角色名 新读 ${s.namesRead||0} / 补读 ${s.namesFilled||0}` : '')
       + ((s.typesFixed||0) > 0 ? ` · 卡类型补正 ${s.typesFixed}` : '')
       + ((s.timelineRead||0) > 0 ? ` · timeline 读 ${s.timelineRead}` : '')
+      + ((s.pluginDlls||0) > 0 ? ` · 插件 dll ${s.pluginDlls} / 插件 ${s.plugins||0} 项 / 配置 ${s.pluginConfigs||0} 个` : '')
       + ((s.nonCard||0) > 0 ? ` · 非卡 ${s.nonCard}` : '')
       + ((s.nonMod||0) > 0 ? ` · 非 mod 文件 ${s.nonMod}` : '');
     $('scanStatus').textContent = s.running
@@ -3080,16 +3180,17 @@ async function pollScan(){
 /* ---------- 页签与加载 ---------- */
 async function switchTab(tab){
   state.tab = tab; state.page = 1;
-  ['Cards','Mods','Missing'].forEach(t => $('tab'+t).classList.toggle('active', t.toLowerCase()===tab));
+  ['Cards','Mods','Missing','Plugins'].forEach(t => $('tab'+t).classList.toggle('active', t.toLowerCase()===tab));
   $('viewCards').classList.toggle('hidden', tab!=='cards');
   $('viewMods').classList.toggle('hidden', tab!=='mods');
   $('viewMissing').classList.toggle('hidden', tab!=='missing');
+  $('viewPlugins').classList.toggle('hidden', tab!=='plugins');
   $('folderBar').classList.toggle('hidden', tab!=='cards');
   $('foldRow').classList.toggle('hidden', tab!=='cards');
   $('modToolRow').classList.toggle('hidden', tab!=='mods');
   $('sortBar').classList.toggle('hidden', tab!=='cards');
   const f = $('filter');
-  f.classList.toggle('hidden', tab==='missing');
+  f.classList.toggle('hidden', tab==='missing' || tab==='plugins');
   f.value = 'all';
   await reload();
 }
@@ -3097,6 +3198,7 @@ async function reload(){
   try{
     if(state.tab === 'cards') await loadCards();
     else if(state.tab === 'mods') await loadMods();
+    else if(state.tab === 'plugins') await loadPlugins();
     else await loadMissing();
   }catch(e){ $('footInfo').textContent = '加载失败：' + e.message; }
 }
@@ -3137,12 +3239,6 @@ $('btnSpRun').onclick = () => {
   $('ovScanPlan').classList.add('hidden');
   startScan(spState.target, { order: spState.order.join(','), on: spState.on.join(',') });
 };
-$('spList').addEventListener('click', e => {
-  const up = e.target.closest('button.spUp');
-  if(up){ spMove(up.dataset.id, true); return; }
-  const dn = e.target.closest('button.spDown');
-  if(dn){ spMove(dn.dataset.id, false); }
-});
 $('spList').addEventListener('change', e => {
   const cb = e.target;
   if(!cb.classList.contains('spOn')) return;
@@ -3171,6 +3267,7 @@ $('btnNext').disabled = true;
 $('tabCards').onclick = () => switchTab('cards');
 $('tabMods').onclick = () => switchTab('mods');
 $('tabMissing').onclick = () => switchTab('missing');
+$('tabPlugins').onclick = () => switchTab('plugins');
 $('btnCloseModal').onclick = () => $('overlay').classList.add('hidden');
 $('btnMove').onclick = doMove;
 $('btnCheckAll').onclick = () => { document.querySelectorAll('#mBody .rowchk').forEach(c=>c.checked=true); updateSel(); };
@@ -3466,20 +3563,10 @@ $('ovTodo').addEventListener('click', async e => {
 });
 $('btnTdClose').onclick = () => $('ovTodo').classList.add('hidden');
 $('btnTdReload').onclick = () => loadTodos();
-/* ---------- 插件清单（插件库只读视图——数据面 /api/plugins） ---------- */
-let plState = { items: [] };
-$('btnPlugins').onclick = async () => { $('ovPlugins').classList.remove('hidden'); await loadPlugins(); };
-$('btnPlClose').onclick = () => $('ovPlugins').classList.add('hidden');
-$('btnPlReload').onclick = () => loadPlugins();
-async function loadPlugins(){
-  $('plBody').innerHTML = '<div class="dim" style="padding:6px">读取中…</div>';
-  const r = await api('/api/plugins');
-  plState.items = (r && r.items) ? r.items : [];
-  $('plInfo').textContent = ((r && r.plugins) || 0) + ' 项';
-  $('plFoot').textContent = '插件 ' + ((r && r.plugins) || 0) + ' 项 · 非插件 dll ' + ((r && r.nonPlugin) || 0) + ' 个 · 同 GUID 多份 ' + ((r && r.dupGuids) || 0) + ' 组';
-  renderPlugins();
-  loadPluginLog();
-}
+/* ---------- 插件清单（页签第四位 · 插件库只读视图——数据面 /api/plugins） ---------- */
+let plState = { items: [], nonPlugins: [], stat: {} };
+$('plQ').addEventListener('input', () => renderPlugins());
+$('plFilter').addEventListener('change', () => renderPlugins());
 /* 上次启动实况——BepInEx 日志只读解析（待加载 / 已加载 / 进程过滤跳过 / 错误） */
 async function loadPluginLog(){
   $('plLog').innerHTML = '<div class="dim" style="font-size:12px">读日志…</div>';
@@ -3498,23 +3585,320 @@ async function loadPluginLog(){
   h += '</div>';
   $('plLog').innerHTML = h;
 }
+async function loadPlugins(){
+  $('plBody').innerHTML = '<div class="dim" style="padding:6px">读取中…</div>';
+  const r = await api('/api/plugins');
+  plState.items = (r && r.items) ? r.items : [];
+  plState.nonPlugins = (r && r.nonPluginItems) ? r.nonPluginItems : [];
+  plState.stat = r || {};
+  $('pageInfo').textContent = '插件 ' + (plState.stat.plugins || 0) + ' 项 · 非插件 dll ' + (plState.stat.nonPlugin || 0) + ' 个 · 说明收录 ' + (plState.stat.noted || 0) + ' / ' + ((plState.stat.plugins || 0) + (plState.stat.nonPlugin || 0)) + ' 条';
+  renderPlugins();
+  loadPluginLog();
+}
+/* 一行插件：中文说明列优先，缺说明给「未收录」；有 cfg 的显示节 / 项数 */
+function plRows(){
+  const q = ($('plQ').value || '').trim().toLowerCase();
+  const mode = $('plFilter').value;
+  let list = [];
+  if(mode === 'nonplugin'){
+    list = (plState.nonPlugins || []).map(p => ({ nonPlugin: true, fileName: p.fileName, title: p.title, note: p.note, reason: p.reason, company: p.company, fileVersion: p.fileVersion, size: p.size, filePath: p.filePath }));
+  }else{
+    list = (plState.items || []).filter(p => {
+      if(mode === 'noted' && !p.note) return false;
+      if(mode === 'unnoted' && p.note) return false;
+      if(mode === 'cfg' && !plHasCfg(p)) return false;
+      if(mode === 'nocfg' && plHasCfg(p)) return false;
+      return true;
+    });
+  }
+  if(q){
+    list = list.filter(p => {
+      const hay = [p.guid, p.name, p.title, p.fileName, p.note, p.description, p.company, p.cfgFile].join(' ').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+  }
+  /* 有配置文件的排最上面——只分组、组内保持原顺序（Array.sort 稳定） */
+  list.sort((a, b) => ((plHasCfg(b) ? 1 : 0) - (plHasCfg(a) ? 1 : 0)));
+  return list;
+}
+/* 这一行有没有配置文件——非插件 dll 恒无；cfg 文件存在或有解析出的配置项即算（宽松兜底） */
+function plHasCfg(p){
+  if(p.nonPlugin) return false;
+  if(p.cfgOptions > 0) return true;
+  return !!(p.cfgFile);
+}
+/* 名称左侧的配置标识点：绿 = 有配置文件 · 灰 = 无 */
+function plDot(p){
+  if(plHasCfg(p)){ return '<span class="pldot plcfg" title="有配置文件（' + (p.cfgSections || 0) + ' 节 / ' + (p.cfgOptions || 0) + ' 项）"></span>'; }
+  return '<span class="pldot plnocfg" title="无配置文件"></span>';
+}
 function renderPlugins(){
-  const list = plState.items || [];
-  if(!list.length){ $('plBody').innerHTML = '<div class="dim" style="padding:6px">还没有插件数据——先在「库根设置」的插件库行点「更新本库」跑一次扫描。</div>'; return; }
-  let h = '<table class="list"><thead><tr><th>GUID</th><th>名称</th><th style="width:90px">版本</th><th>文件</th><th>进程过滤</th><th>依赖</th></tr></thead><tbody>';
+  const list = plRows();
+  if(!list.length){ $('plBody').innerHTML = '<div class="dim" style="padding:6px">没有匹配的插件——先在「库根设置」的插件库行点「更新本库」跑一次扫描；或清掉搜索 / 筛选条件。</div>'; return; }
+  let h = '<table class="list"><thead><tr><th style="width:20%">名称</th><th style="width:30%">说明</th><th style="width:90px">版本</th><th>文件</th><th style="width:120px">进程过滤</th><th style="width:110px">配置</th></tr></thead><tbody>';
   list.forEach(p => {
-    h += '<tr>'
-      + '<td class="mono" style="font-size:11px">' + esc(p.guid) + (p.isIpa ? ' <span class="dim">[IPA]</span>' : '') + '</td>'
-      + '<td>' + esc(p.name) + '</td>'
+    if(p.nonPlugin){
+      h += '<tr data-nonplugin="1" data-file="' + esc(p.filePath || '') + '">'
+        + '<td>' + plDot(p) + esc(p.title || p.fileName) + ' <span class="dim">[非插件]</span></td>'
+        + '<td style="font-size:12px">' + (p.note ? esc(p.note) : '<span class="dim">' + esc(p.reason || '未解析出插件特性') + '</span>') + '</td>'
+        + '<td class="dim">' + esc(p.fileVersion || '') + '</td>'
+        + '<td class="mono" style="font-size:11px">' + esc(p.fileName) + '</td>'
+        + '<td class="dim" style="font-size:11px">—</td>'
+        + '<td class="dim" style="font-size:11px">—</td>'
+        + '</tr>';
+      return;
+    }
+    const cfgTxt = plHasCfg(p) ? ((p.cfgSections || 0) + ' 节 / ' + (p.cfgOptions || 0) + ' 项') : '无';
+    h += '<tr data-guid="' + esc(p.guid) + '" data-name="' + esc(p.name) + '" style="cursor:pointer">'
+      + '<td>' + plDot(p) + esc(p.name) + (p.isIpa ? ' <span class="dim">[IPA]</span>' : '') + '</td>'
+      + '<td>' + (p.note ? esc(p.note) : '<span class="dim">未收录（可补充）</span>') + '</td>'
       + '<td class="dim">' + esc(p.version) + '</td>'
       + '<td class="mono" style="font-size:11px">' + esc(p.fileName) + '</td>'
       + '<td class="dim" style="font-size:11px">' + esc(p.processes || '（全部进程）') + '</td>'
-      + '<td class="dim" style="font-size:11px">' + esc(p.dependencies || '') + '</td>'
+      + '<td class="dim" style="font-size:11px">' + esc(cfgTxt) + '</td>'
       + '</tr>';
   });
   h += '</tbody></table>';
   $('plBody').innerHTML = h;
 }
+/* 点一行 → 插件分析窗（dll 元数据 + 中文说明 + 配置文件全量分节 / 选项 / 作者注释 + 日志状态） */
+$('plBody').addEventListener('click', e => {
+  const tr = e.target.closest ? e.target.closest('tr[data-guid]') : null;
+  if(tr){ openPluginDetail(tr.dataset.guid, tr.dataset.name); return; }
+  const np = e.target.closest ? e.target.closest('tr[data-nonplugin]') : null;
+  if(np && np.dataset.file){ revealPath(np.dataset.file); }
+});
+let pdCtx = { file:'', guid:'', name:'', cfgPath:'', cfgFile:'', sections:[], dirty:false };
+/* ---------- 插件配置编辑（插件分析窗「当前值」列——按类型给控件，改完点确认才谈保存） ---------- */
+/* 可选值清单——cfg 的「# Acceptable values:」按逗号切；空则返回空数组（无枚举约束） */
+function cfgAcceptable(o){
+  const a = (o.acceptable || '').trim();
+  if(!a) return [];
+  return a.split(',').map(s => s.trim()).filter(s => s.length > 0);
+}
+/* 一个配置项该用什么控件——判据 = cfg 的「# Setting type」；类型缺失或未收录时回落文本框并在界面出声 */
+function cfgKind(o){
+  const low = (o.type || '').trim().toLowerCase();
+  if(low === 'boolean') return 'bool';
+  if(cfgAcceptable(o).length > 0) return 'enum';
+  if(low === 'keyboardshortcut') return 'key';
+  if(low.indexOf('int') === 0 || low.indexOf('single') === 0 || low.indexOf('float') === 0 || low.indexOf('double') === 0) return 'num';
+  return 'text';
+}
+/* 一行配置项的「当前值」单元格——按类型渲染控件；行上带分节 / 键 / 原值，供改动比对 */
+function cfgRowHtml(s, o, si, oi){
+  const kind = cfgKind(o);
+  const cur = o.value || '';
+  const ctlId = 'cf' + si + '_' + oi;
+  let ctl = '';
+  if(kind === 'bool'){
+    const on = cur.trim().toLowerCase() === 'true';
+    ctl = '<select data-cfg="' + ctlId + '"><option value="true"' + (on ? ' selected' : '') + '>true</option>'
+      + '<option value="false"' + (on ? '' : ' selected') + '>false</option></select>';
+  }else if(kind === 'enum'){
+    const list = cfgAcceptable(o).slice();
+    if(cur !== '' && list.indexOf(cur) < 0) list.unshift(cur);
+    ctl = '<select data-cfg="' + ctlId + '">' + list.map(v =>
+      '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select>';
+  }else if(kind === 'num'){
+    ctl = '<input type="number" step="any" data-cfg="' + ctlId + '" value="' + esc(cur) + '">';
+  }else{
+    ctl = '<input type="text" data-cfg="' + ctlId + '" value="' + esc(cur) + '">';
+  }
+  const typeTxt = esc(o.type || '') + (o.def ? ' · 默认 ' + esc(o.def) : '') + (o.acceptable ? '<br>可选 ' + esc(o.acceptable) : '');
+  const unknown = (o.type || '').trim() ? '' : '<span class="cfgunknown" title="cfg 里没有「# Setting type」——按文本处理">类型未收录</span>';
+  return '<tr data-cfgrow="1" data-section="' + esc(s.name) + '" data-key="' + esc(o.key) + '" data-orig="' + esc(cur) + '">'
+    + '<td class="mono" style="font-size:11px">' + esc(o.key) + unknown + '</td>'
+    + '<td>' + ctl + '</td>'
+    + '<td class="dim" style="font-size:11px">' + typeTxt + '</td>'
+    + '<td style="font-size:12px">' + (o.comment ? esc(o.comment) : '<span class="dim">（作者未写说明）</span>') + '</td></tr>';
+}
+/* 收集改动——控件值与行上的原值不等即为一项改动 */
+function pdCollect(){
+  const out = [];
+  document.querySelectorAll('#pdCfg tr[data-cfgrow]').forEach(tr => {
+    const el = tr.querySelector('[data-cfg]');
+    if(!el) return;
+    if(el.value !== tr.dataset.orig){
+      out.push({ section: tr.dataset.section, key: tr.dataset.key, oldValue: tr.dataset.orig, value: el.value });
+    }
+  });
+  return out;
+}
+/* 标记改动行（黄框 + 行首圆点）并更新底栏计数 */
+function pdMarkDirty(){
+  let n = 0;
+  document.querySelectorAll('#pdCfg tr[data-cfgrow]').forEach(tr => {
+    const el = tr.querySelector('[data-cfg]');
+    if(!el) return;
+    const d = el.value !== tr.dataset.orig;
+    tr.classList.toggle('cfgdirty', d);
+    if(d) n = n + 1;
+  });
+  pdCtx.dirty = n > 0;
+  pdUpdateFoot();
+  return n;
+}
+/* 底栏——dll 名 + 改动计数 */
+function pdUpdateFoot(){
+  const n = document.querySelectorAll('#pdCfg tr[data-cfgrow].cfgdirty').length;
+  const base = pdCtx.file ? ('dll ' + pdCtx.file.replace(/^.*[\\\/]/, '')) : '';
+  $('pdFoot').textContent = n > 0 ? (base + (base ? ' · ' : '') + '已改 ' + n + ' 项（未保存）') : base;
+}
+/* 配置文件区渲染——读面数据（detail 端点 / 保存回执）共用同一渲染 */
+function pdRenderCfg(r){
+  pdCtx.cfgPath = r.cfgPath || '';
+  pdCtx.cfgFile = r.cfgFile || '';
+  pdCtx.sections = r.sections || [];
+  let c = '';
+  if(r.cfgFile){
+    c += '<div class="cardinfo"><b>配置文件</b> <span class="mono" style="font-size:11px">' + esc(r.cfgFile) + '</span> <span class="dim">' + r.sectionCount + ' 节 · ' + fmtBytes(r.cfgSize) + ' · ' + esc(fmtTime(r.cfgMtime)) + '</span>';
+    if(r.cfgError) c += ' <span style="color:var(--red)">读取失败：' + esc(r.cfgError) + '</span>';
+    c += '<div class="dim" style="margin-top:4px;font-size:11px">配置管理器在游戏内渲染的设置页就是这个文件——下面是它的全量分节与配置项（含作者写的说明）。<b>当前值可直接改</b>：改完点右下「确认」——有改动会先问是否保存，保存需要编辑授权。</div></div>';
+    (pdCtx.sections || []).forEach((s, si) => {
+      c += '<div style="margin:10px 0 4px"><b>[' + esc(s.name) + ']</b> <span class="dim">' + (s.options || []).length + ' 项</span></div>';
+      c += '<table class="list cfgval"><thead><tr><th style="width:26%">配置项</th><th style="width:16%">当前值</th><th style="width:14%">类型 / 默认</th><th>作者写的说明</th></tr></thead><tbody>';
+      (s.options || []).forEach((o, oi) => { c += cfgRowHtml(s, o, si, oi); });
+      c += '</tbody></table>';
+    });
+  }else{
+    c = '<div class="cardinfo"><b>配置文件</b> <span class="dim">这个插件没有 cfg 文件——要么它不需要配置，要么设置存在别处（如场景 / 卡片内的插件数据）。</span></div>';
+  }
+  $('pdCfg').innerHTML = c;
+  pdUpdateFoot();
+}
+/* 保存后重新读取这个插件的详情——只刷新配置区（窗口不关，改动状态归零） */
+async function pdReloadCfg(){
+  const r = await api('/api/plugin/detail?guid=' + encodeURIComponent(pdCtx.guid) + '&name=' + encodeURIComponent(pdCtx.name));
+  if(r){ pdRenderCfg(r); }
+}
+/* 「确认」——有改动先问是否保存；没改动直接关窗 */
+function pdConfirm(){
+  const changed = pdCollect();
+  if(!changed.length){ $('ovPluginDetail').classList.add('hidden'); return; }
+  showCfgSaveAsk(changed);
+}
+/* 「还原改动」——全部控件退回打开时的值 */
+function pdRevert(){
+  document.querySelectorAll('#pdCfg tr[data-cfgrow]').forEach(tr => {
+    const el = tr.querySelector('[data-cfg]');
+    if(el) el.value = tr.dataset.orig;
+  });
+  pdMarkDirty();
+}
+async function openPluginDetail(guid, name){
+  $('ovPluginDetail').classList.remove('hidden');
+  $('pdTitle').textContent = name || guid;
+  $('pdHead').innerHTML = '<div class="dim">读取中…</div>';
+  $('pdNote').innerHTML = '';
+  $('pdMeta').innerHTML = '';
+  $('pdCfg').innerHTML = '';
+  pdCtx.guid = guid || '';
+  pdCtx.name = name || '';
+  const r = await api('/api/plugin/detail?guid=' + encodeURIComponent(guid || '') + '&name=' + encodeURIComponent(name || ''));
+  if(!r){ $('pdHead').innerHTML = '<div class="dim">读取失败</div>'; return; }
+  pdCtx.file = (r.items && r.items.length) ? r.items[0].filePath : '';
+  let h = '';
+  h += '<div><b>' + esc(name || guid) + '</b> <span class="dim mono" style="font-size:11px">' + esc(guid) + '</span></div>';
+  h += '<div class="dim" style="margin-top:4px">日志状态：' + esc(r.logState || '') + (r.logTime ? '（日志时刻 ' + esc(r.logTime) + '）' : '') + '</div>';
+  if(r.note){ h += '<div style="margin-top:6px">' + esc(r.note) + '</div>'; }
+  else{ h += '<div class="dim" style="margin-top:6px">说明未收录——可在 <span class="mono">plugin-notes.txt</span> 里补一行（键 = GUID 或插件名）</div>'; }
+  $('pdHead').innerHTML = h;
+  (r.items || []).forEach((it, idx) => {
+    let m = '<div class="cardinfo" style="margin-bottom:8px">';
+    m += '<div><b>' + esc(it.name) + '</b> <span class="dim">' + esc(it.version) + '</span>' + (it.isIpa ? ' <span class="dim">[IPA]</span>' : '') + '</div>';
+    m += '<table class="list" style="margin-top:6px"><tbody>';
+    m += '<tr><td style="width:120px" class="dim">GUID</td><td class="mono" style="font-size:11px">' + esc(it.guid) + '</td></tr>';
+    m += '<tr><td class="dim">文件</td><td class="mono" style="font-size:11px">' + esc(it.filePath) + '</td></tr>';
+    m += '<tr><td class="dim">大小 / 时间</td><td class="dim" style="font-size:11px">' + fmtBytes(it.size) + ' · ' + esc(fmtTime(it.mtime)) + '</td></tr>';
+    if(it.processes) m += '<tr><td class="dim">进程过滤</td><td class="dim" style="font-size:11px">' + esc(it.processes) + '</td></tr>';
+    if(it.dependencies) m += '<tr><td class="dim">依赖</td><td class="mono" style="font-size:11px">' + esc(it.dependencies) + '</td></tr>';
+    if(it.title) m += '<tr><td class="dim">程序集标题</td><td style="font-size:12px">' + esc(it.title) + '</td></tr>';
+    if(it.description) m += '<tr><td class="dim">程序集说明</td><td style="font-size:12px">' + esc(it.description) + '</td></tr>';
+    if(it.company) m += '<tr><td class="dim">公司 / 作者</td><td style="font-size:12px">' + esc(it.company) + '</td></tr>';
+    if(it.copyright) m += '<tr><td class="dim">版权</td><td style="font-size:12px">' + esc(it.copyright) + '</td></tr>';
+    if(it.product) m += '<tr><td class="dim">产品名</td><td style="font-size:12px">' + esc(it.product) + '</td></tr>';
+    if(it.fileVersion) m += '<tr><td class="dim">程序集版本</td><td class="dim" style="font-size:11px">' + esc(it.fileVersion) + '</td></tr>';
+    if(it.targetFramework) m += '<tr><td class="dim">目标框架</td><td class="dim" style="font-size:11px">' + esc(it.targetFramework) + '</td></tr>';
+    m += '</tbody></table></div>';
+    $('pdMeta').innerHTML += m;
+  });
+  pdRenderCfg(r);
+}
+/* 配置改动有变化时实时标记（输入 / 下拉共用同一出口） */
+$('pdCfg').addEventListener('input', () => pdMarkDirty());
+$('pdCfg').addEventListener('change', () => pdMarkDirty());
+/* ---------- 保存询问窗（有改动时点「确认」弹出 · 回车 = 保存 · Esc = 取消） ---------- */
+let cfgSaveCtx = { changes: [] };
+function showCfgSaveAsk(changes){
+  cfgSaveCtx.changes = changes;
+  $('csTitle').textContent = (pdCtx.cfgFile || '') + '（' + changes.length + ' 项）';
+  let h = '<table class="list"><thead><tr><th style="width:22%">分节</th><th style="width:26%">配置项</th><th>原值 → 新值</th></tr></thead><tbody>';
+  changes.forEach(c => {
+    h += '<tr><td class="dim" style="font-size:11px">[' + esc(c.section) + ']</td>'
+      + '<td class="mono" style="font-size:11px">' + esc(c.key) + '</td>'
+      + '<td style="font-size:12px">' + esc(c.oldValue || '（空）') + ' → <b style="color:var(--yellow)">' + esc(c.value || '（空）') + '</b></td></tr>';
+  });
+  h += '</tbody></table>';
+  $('csList').innerHTML = h;
+  $('csHint').textContent = '回车 = 保存 · Esc = 取消。保存需要编辑授权——未授权会先弹授权窗，授权不成则不写文件。';
+  $('ovCfgSave').classList.remove('hidden');
+  $('btnCfgSaveOk').focus();
+}
+function hideCfgSaveAsk(){ $('ovCfgSave').classList.add('hidden'); }
+async function doCfgSave(){
+  // [闸门] 编辑授权——没有先弹授权窗（授权判定在服务端，这里只是提前拦一道）；授权不成则原样退回，不写任何文件
+  if(!editAuth){
+    $('csHint').textContent = '未授权——先在授权窗里确认（授权不成则不写文件）';
+    askEditAuth(() => { continueCfgSave(); });
+    $('btnAuthCancel').onclick = () => {
+      $('ovAuth').classList.add('hidden');
+      $('csHint').textContent = '未授权——本次不改动配置文件（点「取消」关掉本窗，改动仍在）';
+    };
+    return;
+  }
+  continueCfgSave();
+}
+/* 真正落盘——逐项写回（每项一次调用，失败逐项出声，不静默吞） */
+async function continueCfgSave(){
+  $('btnCfgSaveOk').disabled = true;
+  $('csHint').textContent = '写入中…';
+  const done = [];
+  const failed = [];
+  for(const c of cfgSaveCtx.changes){
+    try{
+      const r = await api('/api/plugin/config/save', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ path: pdCtx.cfgPath, section: c.section, key: c.key, value: c.value })});
+      if(r && r.ok){ done.push(c); } else { failed.push(c.key + '：' + ((r && r.error) || '未知原因')); }
+    }catch(e){ failed.push(c.key + '：' + e.message); }
+  }
+  $('btnCfgSaveOk').disabled = false;
+  await pdReloadCfg();
+  if(failed.length){
+    $('csHint').textContent = '部分未写入（' + failed.length + ' 项）：' + failed.join('；');
+    return;
+  }
+  hideCfgSaveAsk();
+  $('pdFoot').textContent = (pdCtx.file ? ('dll ' + pdCtx.file.replace(/^.*[\\\/]/, '')) : '') + ' · 已保存 ' + done.length + ' 项';
+}
+$('btnCfgSaveOk').onclick = () => { doCfgSave(); };
+$('btnCfgSaveCancel').onclick = () => hideCfgSaveAsk();
+$('btnPdRevert').onclick = () => pdRevert();
+/* 键盘：插件分析窗——Esc = 确认；保存询问窗——回车 = 保存、Esc = 取消（授权窗开着时让位给它） */
+document.addEventListener('keydown', e => {
+  if(!$('ovCfgSave').classList.contains('hidden')){
+    if(!$('ovAuth').classList.contains('hidden')) return;
+    if(e.key === 'Escape'){ e.preventDefault(); hideCfgSaveAsk(); return; }
+    if(e.key === 'Enter'){ e.preventDefault(); doCfgSave(); }
+    return;
+  }
+  if(!$('ovPluginDetail').classList.contains('hidden')){
+    if(!$('ovAuth').classList.contains('hidden')) return;
+    if(e.key === 'Escape'){ e.preventDefault(); pdConfirm(); }
+  }
+});
+$('btnPdClose').onclick = () => pdConfirm();
+$('btnPdReveal').onclick = () => { if(pdCtx.file) revealPath(pdCtx.file); };
 /* 新建待办——手输（cardId 缺省）与卡片侧共用同一端点；卡片路径由服务端按 cardId 取，前端不拼路径 */
 async function addTodo(text, cardId, lib){
   const r = await api('/api/todos/add', {method:'POST', headers:{'Content-Type':'application/json'},
