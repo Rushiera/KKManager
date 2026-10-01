@@ -24,6 +24,12 @@ namespace KKManager.Core
 
         /// <summary>被进程过滤跳过的插件（「名 版本 → 原因」）。</summary>
         public List<string> skipped { get; set; } = new List<string>();
+        /// <summary>已加载插件的名称集合（去版本——供行级标识查表）。</summary>
+        public HashSet<string> loadedNames { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>被进程过滤跳过插件的名称集合（去版本——供行级标识查表）。</summary>
+        public HashSet<string> skippedNames { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>错误行里点名的插件名集合（「[Error :名] ...」——供行级标识查表）。</summary>
+        public HashSet<string> errorNames { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>错误行（[Error ...] 原文收下，不做二次解释）。</summary>
         public List<string> errors { get; set; } = new List<string>();
