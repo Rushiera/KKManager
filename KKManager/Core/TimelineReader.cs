@@ -121,20 +121,19 @@ namespace KKManager.Core
                 long far = size - TailFar > from ? size - TailFar : from;
                 long hit = -1;
                 string stage = null;
-                if (far < near)
+                // [段1] 近窗优先——条目实测恒落在文件尾 16 MB 内（最大 ~12.5 MB），先扫近窗即命中；
+                // 旧序先扫 16–64 MB 那一带，每次白读 48 MB 才轮到近窗。
+                hit = ScanFor(fs, size, near);
+                if (hit >= 0)
+                {
+                    stage = "尾部 16MB";
+                }
+                if (hit < 0 && far < near)
                 {
                     hit = ScanFor(fs, near, far);
                     if (hit >= 0)
                     {
                         stage = "尾部 64MB";
-                    }
-                }
-                if (hit < 0)
-                {
-                    hit = ScanFor(fs, size, near);
-                    if (hit >= 0)
-                    {
-                        stage = "尾部 16MB";
                     }
                 }
                 if (hit < 0 && from < far)
@@ -289,12 +288,11 @@ namespace KKManager.Core
                 long baseOff = consumed - carry;
                 consumed = consumed + read;
                 int total = carry + read;
-                for (int i = 0; i <= total - KeyAnchor.Length; i = i + 1)
+                // 锚点定位用 Span.IndexOf（SIMD 向量化）——逐字节循环在 64 MB 级尾窗上是 CPU 主成本
+                int at = buf.AsSpan(0, total).IndexOf(KeyAnchor);
+                if (at >= 0)
                 {
-                    if (buf[i] == KeyAnchor[0] && MatchAt(buf, i, KeyAnchor))
-                    {
-                        return baseOff + i;
-                    }
+                    return baseOff + at;
                 }
                 int newCarry = total < 15 ? total : 15;
                 Array.Copy(buf, total - newCarry, buf, 0, newCarry);
