@@ -1519,17 +1519,6 @@ namespace KKManager
             return 0;
         }
 
-        /// <summary>日志条目（「名 版本」）取名称部分——去掉最后一个空格段（BepInEx 会规范化版本号，故不按版本比）。</summary>
-        private static string NameOfLogItem(string item)
-        {
-            if (string.IsNullOrEmpty(item))
-            {
-                return "";
-            }
-            int at = item.LastIndexOf(' ');
-            return at > 0 ? item.Substring(0, at) : item;
-        }
-
         /// <summary>解析 BepInEx 日志（LogOutput.log）——插件加载 / 进程过滤跳过 / 错误三类实况。</summary>
         private static int PluginLogCommand(string db)
         {
@@ -1574,38 +1563,11 @@ namespace KKManager
                     {
                         continue;
                     }
-                    string tag = row.Name + " " + row.Version;
-                    bool mentioned = false;
-                    foreach (string item in s.loaded)
+                    if (PluginLogReader.StateOf(s, row.Name) != "none")
                     {
-                        if (string.Equals(NameOfLogItem(item), row.Name, StringComparison.OrdinalIgnoreCase))
-                        {
-                            mentioned = true;
-                            break;
-                        }
+                        continue;
                     }
-                    if (!mentioned)
-                    {
-                        foreach (string item in s.skipped)
-                        {
-                            // 跳过条目形态「名 版本  →  原因」——先切掉「→」之后，再取名称
-                            string head = item;
-                            int arrow = item.IndexOf("  →  ", StringComparison.Ordinal);
-                            if (arrow > 0)
-                            {
-                                head = item.Substring(0, arrow);
-                            }
-                            if (string.Equals(NameOfLogItem(head), row.Name, StringComparison.OrdinalIgnoreCase))
-                            {
-                                mentioned = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!mentioned)
-                    {
-                        unmentioned.Add(row.Guid + "  |  " + tag + "  |  " + row.FileName);
-                    }
+                    unmentioned.Add(row.Guid + "  |  " + row.Name + " " + row.Version + "  |  " + row.FileName);
                 }
                 Console.WriteLine();
                 Console.WriteLine("## 装了但本次日志没提（" + unmentioned.Count + "）——可疑：可能没被 BepInEx 扫到");

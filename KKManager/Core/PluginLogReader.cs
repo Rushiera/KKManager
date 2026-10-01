@@ -59,6 +59,30 @@ namespace KKManager.Core
             }
             return "";
         }
+        /// <summary>某个插件在某次日志里的加载实况——取键值（供面板行级标识着色；呈现归前端）。</summary>
+        /// <param name="summary">日志实况（可为 null）。</param>
+        /// <param name="name">插件名（BepInEx 插件名，非 dll 名）。</param>
+        /// <returns>loaded（本次已加载）· skipped（进程过滤跳过）· error（日志点名有错误）· none（日志未提及）。</returns>
+        public static string StateOf(PluginLogSummary summary, string name)
+        {
+            if (summary == null || string.IsNullOrEmpty(name))
+            {
+                return "none";
+            }
+            if (summary.errorNames.Contains(name))
+            {
+                return "error";
+            }
+            if (summary.loadedNames.Contains(name))
+            {
+                return "loaded";
+            }
+            if (summary.skippedNames.Contains(name))
+            {
+                return "skipped";
+            }
+            return "none";
+        }
 
         /// <summary>解析日志——逐行扫关键行（待加载总数 / 加载 / 进程过滤跳过 / 错误）。</summary>
         /// <param name="path">日志绝对路径。</param>
