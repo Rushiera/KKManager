@@ -163,7 +163,17 @@ namespace KKManager.Probe
                 case "dbbench":
                     return DbBench(args[1], int.Parse(args[2]), args.Length > 3 && args[3] == "noa");
                 case "mktpl":
-                    return MakeTemplate(args[1]);
+                    return MakeTemplate(args[1], args.Length > 2 ? args[2] : null);
+                case "openbench":
+                    return OpenBench(args[1]);
+                case "opendiag":
+                    return OpenDiag(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 4, args.Length > 4 && args[4] == "fresh");
+                case "openhold":
+                    return OpenHold(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 4, args.Length > 4 && args[4] == "fresh");
+                case "setshards":
+                    return SetShards(args[1], int.Parse(args[2]));
+                case "jmode":
+                    return JMode(args[1], args[2]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
@@ -4732,6 +4742,181 @@ namespace KKManager.Probe
             }
             return 0;
         }
+        /// <summary>面板访问链分段计时——打开主库 / 载配置 / 建库 / 统计快照 / 重复副本 / 文件夹 / 卡片首页 / 关闭（含 WAL checkpoint）。用于定位「保存库根后卡一会」落在哪一段。</summary>
+        private static int OpenBench(string dbPath)
+        {
+            System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+            StoreHub hub = new StoreHub(dbPath);
+            Console.WriteLine("A 打开主库：" + w.ElapsedMilliseconds.ToString() + " ms");
+            w.Restart();
+            RootsConfig cfg = hub.Core.LoadRoots();
+            RootsRules.Normalize(cfg);
+            Console.WriteLine("B 载库根配置：" + w.ElapsedMilliseconds.ToString() + " ms（mod " + cfg.modRoots.Count.ToString() + " · card " + cfg.cardRoots.Count.ToString() + "）");
+            w.Restart();
+            hub.EnsureMigrated(cfg);
+            Console.WriteLine("C 建库 EnsureMigrated：" + w.ElapsedMilliseconds.ToString() + " ms");
+            w.Restart();
+            List<Store> all = hub.AllStores(cfg);
+            Console.WriteLine("D0 打开全部库连接：" + w.ElapsedMilliseconds.ToString() + " ms · " + all.Count.ToString() + " 个");
+            w.Restart();
+            Snapshot snap = hub.Snapshot(cfg);
+            Console.WriteLine("D 统计快照（含跨库查询）：" + w.ElapsedMilliseconds.ToString() + " ms · 卡片 " + snap.Cards.ToString());
+            w.Restart();
+            long dupGroups = 0;
+            long dupPending = 0;
+            hub.DupCounts(cfg, out dupGroups, out dupPending);
+            Console.WriteLine("E 重复副本计数：" + w.ElapsedMilliseconds.ToString() + " ms · 组 " + dupGroups.ToString());
+            w.Restart();
+            List<FolderRow> folders = hub.QueryFolders(cfg);
+            Console.WriteLine("F 文件夹清单：" + w.ElapsedMilliseconds.ToString() + " ms · 行 " + folders.Count.ToString());
+            w.Restart();
+            List<CardRow> cards = hub.QueryCards(cfg, 1, 50, "all", "", null, null, "mtime", false);
+            Console.WriteLine("G 卡片首页：" + w.ElapsedMilliseconds.ToString() + " ms · 行 " + cards.Count.ToString());
+            w.Restart();
+            hub.Dispose();
+            Console.WriteLine("H 关闭（含 WAL checkpoint）：" + w.ElapsedMilliseconds.ToString() + " ms");
+            return 0;
+        }
+        /// <summary>诊断用：在给定连接上执行一条语句。</summary>
+        private static void DiagExec(Microsoft.Data.Sqlite.SqliteConnection conn, string sql)
+        {
+            using (Microsoft.Data.Sqlite.SqliteCommand cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>诊断用：在给定连接上取一个标量。</summary>
+        private static object DiagScalar(Microsoft.Data.Sqlite.SqliteConnection conn, string sql)
+        {
+            using (Microsoft.Data.Sqlite.SqliteCommand cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = sql;
+                return cmd.ExecuteScalar();
+            }
+        }
+        /// <summary>分片库打开分步计时——把 Store 构造的每一步拆开（连接 / PRAGMA / 版本校验 / 事务补列 / ATTACH / 关闭），定位首次打开慢在哪一步。fresh=true 时先删掉各片边车（模拟「模板刚复制、从未打开」）。</summary>
+        private static int OpenDiag(string corePath, string dir, int n, bool fresh)
+        {
+            string core = Path.GetFullPath(corePath);
+            Console.WriteLine("主库 " + core);
+            long total = 0;
+            for (int i = 0; i < n; i = i + 1)
+            {
+                string p = Path.Combine(dir, "lib_1000_" + i.ToString() + ".db");
+                if (!File.Exists(p))
+                {
+                    continue;
+                }
+                if (fresh)
+                {
+                    DeleteFileAndSidecars(p);
+                    File.Copy(core, p, true);
+                }
+                System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+                Microsoft.Data.Sqlite.SqliteConnection conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = p, Pooling = false }.ToString());
+                conn.Open();
+                long m1 = w.ElapsedMilliseconds;
+                DiagExec(conn, "PRAGMA synchronous=NORMAL");
+                DiagExec(conn, "PRAGMA busy_timeout=15000");
+                long m2 = w.ElapsedMilliseconds;
+                DiagScalar(conn, "PRAGMA user_version");
+                long m3 = w.ElapsedMilliseconds;
+                Microsoft.Data.Sqlite.SqliteTransaction tx = conn.BeginTransaction(deferred: true);
+                DiagScalar(conn, "SELECT COUNT(*) FROM pragma_table_info('card') WHERE name='chara_name'");
+                tx.Commit();
+                long m4 = w.ElapsedMilliseconds;
+                DiagExec(conn, "ATTACH DATABASE '" + core.Replace("'", "''") + "' AS core");
+                long m5 = w.ElapsedMilliseconds;
+                conn.Dispose();
+                long m6 = w.ElapsedMilliseconds;
+                total = total + m6;
+                Console.WriteLine("片 " + i.ToString() + "：连接 " + m1.ToString() + " · PRAGMA " + (m2 - m1).ToString() + " · 版本 " + (m3 - m2).ToString() + " · 补列事务 " + (m4 - m3).ToString() + " · ATTACH " + (m5 - m4).ToString() + " · 关闭 " + (m6 - m5).ToString());
+            }
+            Console.WriteLine("合计 " + total.ToString() + " ms");
+            return 0;
+        }
+        /// <summary>同时持有 N 个分片连接的开 / 关计时——复现面板 AllStores 一次打开全部分片的成本（fresh=true 时先删边车并重建片文件，模拟「模板刚复制、从未打开」）。</summary>
+        private static int OpenHold(string corePath, string dir, int n, bool fresh)
+        {
+            string core = Path.GetFullPath(corePath);
+            Store coreStore = new Store(core);
+            Console.WriteLine("主库已打开 " + core);
+            string[] files = Directory.GetFiles(dir, "lib_*.db");
+            Array.Sort(files, StringComparer.Ordinal);
+            bool generated = false;
+            if (files.Length == 0)
+            {
+                List<string> made = new List<string>();
+                for (int i = 0; i < n; i = i + 1)
+                {
+                    string np = Path.Combine(dir, "lib_1000_" + i.ToString() + ".db");
+                    DeleteFileAndSidecars(np);
+                    File.Copy(core, np, true);
+                    made.Add(np);
+                }
+                files = made.ToArray();
+                generated = true;
+                Console.WriteLine("目录为空——按 " + n.ToString() + " 片复制主库为片文件");
+            }
+            List<Store> list = new List<Store>();
+            System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < files.Length && list.Count < n; i = i + 1)
+            {
+                string p = files[i];
+                if (fresh && !generated)
+                {
+                    DeleteFileAndSidecars(p);
+                    File.Copy(core, p, true);
+                }
+                System.Diagnostics.Stopwatch one = System.Diagnostics.Stopwatch.StartNew();
+                list.Add(new Store(p, core, true));
+                Console.WriteLine("片 " + Path.GetFileName(p) + " 打开 " + one.ElapsedMilliseconds.ToString() + " ms（累计 " + w.ElapsedMilliseconds.ToString() + "）");
+            }
+            Console.WriteLine("打开合计 " + w.ElapsedMilliseconds.ToString() + " ms（" + list.Count.ToString() + " 片）");
+            w.Restart();
+            foreach (Store s in list)
+            {
+                s.Dispose();
+            }
+            Console.WriteLine("关闭合计 " + w.ElapsedMilliseconds.ToString() + " ms");
+            coreStore.Dispose();
+            return 0;
+        }
+        /// <summary>给全部卡片库根定下分片数（对照实验用——预建与打开成本随分片数的变化）。</summary>
+        private static int SetShards(string dbPath, int n)
+        {
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                foreach (RootEntry e in cfg.cardRoots)
+                {
+                    int baseLib = hub.CardBaseOf(e);
+                    hub.SetShardCount(baseLib, n);
+                    Console.WriteLine("库根 " + e.path + " → 库号 " + baseLib.ToString() + " 分片 " + n.ToString());
+                }
+            }
+            return 0;
+        }
+        /// <summary>把目录下全部分片库的 journal 模式改成指定值（对照实验用——WAL 的边车文件在慢卷上代价高）。</summary>
+        private static int JMode(string dir, string mode)
+        {
+            string[] files = Directory.GetFiles(dir, "lib_*.db");
+            System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+            foreach (string p in files)
+            {
+                Microsoft.Data.Sqlite.SqliteConnection conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = p, Pooling = false }.ToString());
+                conn.Open();
+                object got = DiagScalar(conn, "PRAGMA journal_mode=" + mode);
+                conn.Dispose();
+                Console.WriteLine(Path.GetFileName(p) + " → " + (got == null ? "?" : got.ToString()));
+            }
+            Console.WriteLine("改 " + files.Length.ToString() + " 个库为 " + mode + "：共 " + w.ElapsedMilliseconds.ToString() + " ms");
+            return 0;
+        }
 
         /// <summary>建库方式基准——比较备齐 N 个分片库的四条路径耗时（同目录同卷）：A 逐片建表（现状懒开路径）· B 模板建一次 + 复制（现状扫描路径）· C 预置模板纯复制（零 DDL）· D 打开成本（含 ATTACH 主库）。skipA = 跳过 A 组（逐片建表极慢，测大片数时单独跑）。</summary>
         private static int DbBench(string dir, int shards, bool skipA)
@@ -4834,12 +5019,21 @@ namespace KKManager.Probe
         }
 
         /// <summary>生成空结构模板库（主库结构 + user_version）——预建 db 的复制源；产物入库为嵌入资源。</summary>
-        private static int MakeTemplate(string path)
+        private static int MakeTemplate(string path, string mode)
         {
             DeleteFileAndSidecars(path);
             using (Store s = new Store(path))
             {
                 s.Checkpoint();
+            }
+            if (mode != null && mode.Length > 0)
+            {
+                Microsoft.Data.Sqlite.SqliteConnection conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = Path.GetFullPath(path), Pooling = false }.ToString());
+                conn.Open();
+                object got = DiagScalar(conn, "PRAGMA journal_mode=" + mode);
+                conn.Dispose();
+                Console.WriteLine("journal_mode → " + (got == null ? "?" : got.ToString()));
             }
             FileInfo fi = new FileInfo(path);
             Console.WriteLine("模板已生成 " + Path.GetFullPath(path) + " · " + fi.Length.ToString() + " 字节");
