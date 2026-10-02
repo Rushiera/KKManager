@@ -949,7 +949,8 @@ namespace KKManager
                 {
                     mark = "[ ]";
                 }
-                Console.WriteLine("  " + mark + " " + id + " —— " + d.Name + (d.Required ? "（必选）" : "") + " · " + d.Note);
+                string group = string.IsNullOrEmpty(d.Group) ? "" : "（组 " + d.Group + "）";
+                Console.WriteLine("  " + mark + " " + id + " —— " + d.Name + (d.Required ? "（必选）" : "") + group + " · " + d.Note);
             }
             Console.WriteLine("段（同段共用一次文件打开）：");
             foreach (ScanSegment seg in plan.Segments())

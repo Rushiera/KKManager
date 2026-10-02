@@ -719,9 +719,9 @@
 
 <div class="overlay hidden" id="ovScanPlan">
   <div class="modal wide">
-    <header><b>扫描配置</b> <span class="dim">必选项锁定 · 分项默认不选 · 顺序固定</span></header>
+    <header><b>扫描配置</b> <span class="dim">统一扫描必选 · 卡片分析可选 · 顺序固定</span></header>
     <div class="body">
-      <div class="dim" style="font-size:12px;margin-bottom:8px">同一侧、同一读取档的相邻步骤会合并成一次文件读取。步骤顺序固定（不可调整），勾选全局一套，追加库扫描同样适用。</div>
+      <div class="dim" style="font-size:12px;margin-bottom:8px">组是勾选单元——组内步骤同进同出。同一侧、同一读取档的相邻步骤会合并成一次文件读取；步骤顺序固定（不可调整），勾选全局一套，追加库扫描同样适用。</div>
       <div id="spList"></div>
     </div>
     <footer>
@@ -3123,14 +3123,15 @@ function renderModCards(){
 
 /* ---------- 扫描 ---------- */
 const SCAN_TARGET = {main:'主要库', extra:'追加库', mods:'mod 库', cards:'卡片库'};
-/* 扫描配置窗——必选项锁定、分项默认不选、顺序可调（全局一套） */
-let spState = { target:'main', steps:[], order:[], on:[] };
+/* 扫描配置窗——组为勾选单元（统一扫描必选 · 卡片分析可选）、顺序固定（全局一套） */
+let spState = { target:'main', steps:[], groups:[], order:[], on:[] };
 async function openScanPlan(target){
   try{
     const d = await api('/api/scan/plan');
     if(!d || !d.steps){ alert('读取扫描计划失败'); return; }
     spState.target = target;
     spState.steps = d.steps;
+    spState.groups = d.groups || [];
     spState.order = d.order || [];
     spState.on = d.on || [];
     renderScanPlan();
@@ -3141,22 +3142,58 @@ function spDef(id){
   for(const s of spState.steps){ if(s.id === id) return s; }
   return null;
 }
+/* 组内步骤（按 order 顺序） */
+function spGroupSteps(g){
+  return ((g && g.steps) || []).map(spDef).filter(s => !!s);
+}
+/* 组是否启用——必选组恒真；可选组要求组内步骤全开 */
+function spGroupOn(g){
+  if(g.required) return true;
+  const steps = spGroupSteps(g);
+  return steps.length > 0 && steps.every(s => spState.on.indexOf(s.id) >= 0);
+}
+/* 组外步骤行（可单独勾选） */
+function spStepRow(s){
+  const tag = s.grayed ? '灰置' : (s.required ? '必选' : (s.defaultOn ? '可选' : '分项'));
+  const side = s.mods ? 'mod' : '卡片';
+  let box;
+  if(s.grayed) box = '<input type="checkbox" disabled title="本轮占位，不参与扫描">';
+  else if(s.required) box = '<input type="checkbox" checked disabled title="必选，不可取消">';
+  else box = `<input type="checkbox" class="spOn" data-id="${s.id}"${spState.on.indexOf(s.id) >= 0 ? ' checked' : ''}>`;
+  return `<div class="spRow" data-id="${s.id}" style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)">
+    <span class="dim" style="width:64px;font-size:11px;white-space:nowrap">${tag}·${side}</span>
+    ${box}
+    <span style="flex:1;${s.grayed ? 'opacity:.5' : ''}">${esc(s.name)}<span class="dim" style="font-size:11px"> · ${esc(s.note)}</span></span>
+  </div>`;
+}
 function renderScanPlan(){
-  const rows = spState.order.map(id => {
-    const s = spDef(id);
-    if(!s) return '';
-    const tag = s.grayed ? '灰置' : (s.required ? '必选' : (s.defaultOn ? '可选' : '分项'));
-    const side = s.mods ? 'mod' : '卡片';
-    let box;
-    if(s.grayed) box = '<input type="checkbox" disabled title="本轮占位，不参与扫描">';
-    else if(s.required) box = '<input type="checkbox" checked disabled title="必选，不可取消">';
-    else box = `<input type="checkbox" class="spOn" data-id="${id}"${spState.on.indexOf(id) >= 0 ? ' checked' : ''}>`;
-    return `<div class="spRow" data-id="${id}" style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)">
-      <span class="dim" style="width:64px;font-size:11px;white-space:nowrap">${tag}·${side}</span>
+  const groups = spState.groups || [];
+  const inGroup = {};
+  let rows = '';
+  /* 先出组——组是勾选单元（统一扫描在最上），组内步骤只列明细、不单独勾选 */
+  for(const g of groups){
+    const steps = spGroupSteps(g);
+    if(!steps.length) continue;
+    for(const s of steps) inGroup[s.id] = true;
+    const tag = g.required ? '必选' : '可选';
+    const box = g.required
+      ? '<input type="checkbox" checked disabled title="必选，不可取消">'
+      : `<input type="checkbox" class="spGrp" data-g="${g.id}"${spGroupOn(g) ? ' checked' : ''}>`;
+    rows += `<div class="spRow spGrpRow" data-g="${g.id}" style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)">
+      <span class="dim" style="width:64px;font-size:11px;white-space:nowrap">${tag}·组</span>
       ${box}
-      <span style="flex:1;${s.grayed ? 'opacity:.5' : ''}">${esc(s.name)}<span class="dim" style="font-size:11px"> · ${esc(s.note)}</span></span>
+      <span style="flex:1"><b>${esc(g.name)}</b><span class="dim" style="font-size:11px"> · ${esc(g.note)}</span></span>
     </div>`;
-  }).join('');
+    rows += steps.map(s => `<div class="spSub" data-id="${s.id}" style="display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--line)">
+      <span class="dim" style="flex:1;font-size:11px;padding-left:96px">${esc(s.name)} · ${esc(s.note)}</span>
+    </div>`).join('');
+  }
+  /* 再出组外步骤（原样——可单独勾选 / 灰置） */
+  for(const id of spState.order){
+    const s = spDef(id);
+    if(!s || inGroup[s.id]) continue;
+    rows += spStepRow(s);
+  }
   $('spList').innerHTML = rows;
   const onCount = spState.order.filter(id => { const s = spDef(id); return s && !s.grayed && (s.required || spState.on.indexOf(id) >= 0); }).length;
   $('spFoot').textContent = `启用 ${onCount} / ${spState.order.length} 步`;
@@ -3331,6 +3368,18 @@ $('btnSpRun').onclick = () => {
 };
 $('spList').addEventListener('change', e => {
   const cb = e.target;
+  /* 组勾选——组内步骤同进同出（组是唯一勾选单元） */
+  if(cb.classList.contains('spGrp')){
+    const g = (spState.groups || []).filter(x => x.id === cb.dataset.g)[0];
+    if(!g) return;
+    for(const id of (g.steps || [])){
+      const at = spState.on.indexOf(id);
+      if(cb.checked){ if(at < 0) spState.on.push(id); }
+      else if(at >= 0){ spState.on.splice(at, 1); }
+    }
+    renderScanPlan();
+    return;
+  }
   if(!cb.classList.contains('spOn')) return;
   const id = cb.dataset.id;
   const at = spState.on.indexOf(id);

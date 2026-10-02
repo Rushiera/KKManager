@@ -48,6 +48,31 @@ namespace KKManager.Core
 
         /// <summary>界面提示（一句话说明这步读什么 / 干什么用）。</summary>
         public string Note { get; set; }
+
+        /// <summary>所属扫描组 id（空 = 不属于任何组——配置窗里单独勾选）。</summary>
+        public string Group { get; set; }
+    }
+
+    /// <summary>
+    /// 扫描组——配置窗的勾选单元：组内步骤同进同出（组勾 = 组内全部步骤启用）。
+    /// 必选组不可取消；可选组默认勾选由 DefaultOn 定。
+    /// </summary>
+    public class ScanGroupDef
+    {
+        /// <summary>组 id（稳定标识）。</summary>
+        public string Id { get; set; }
+
+        /// <summary>界面显示名。</summary>
+        public string Name { get; set; }
+
+        /// <summary>界面提示（一句话说明这组做什么）。</summary>
+        public string Note { get; set; }
+
+        /// <summary>必选——界面勾选框锁定不可取消。</summary>
+        public bool Required { get; set; }
+
+        /// <summary>默认勾选（可选组用）。</summary>
+        public bool DefaultOn { get; set; }
     }
 
     /// <summary>扫描段——同侧同档的连续步骤，段内共用一次文件打开。</summary>
@@ -174,31 +199,46 @@ namespace KKManager.Core
         /// <summary>设置键——启用集合。</summary>
         public const string OnKey = "scan_plan_on";
 
+        /// <summary>组 id——统一扫描（必选：卡片行 + mod 行 + 卡头段 + 声明区 + 角色名 + 时间轴 + 缩略图）。</summary>
+        public const string GroupCore = "core";
+
+        /// <summary>组 id——卡片分析（可选：服装槽位 + 卡片分析 + 场景深度）。</summary>
+        public const string GroupAnalyze = "analyze";
+
+        /// <summary>内置组定义（数组顺序即配置窗展示顺序——统一扫描在最上）。</summary>
+        private static readonly ScanGroupDef[] GroupDefs = new ScanGroupDef[]
+        {
+            MakeGroup(GroupCore, "统一扫描", true, true,
+                "卡片行 + mod 行 + 卡头段 + 声明区 + 角色名 + 时间轴 + 缩略图 + 插件库（插件库随主要库扫描）——必选，一次跑完"),
+            MakeGroup(GroupAnalyze, "卡片分析", false, false,
+                "服装槽位 + 卡片分析 + 场景深度——整段数据区读取，耗时与卡片体积成正比")
+        };
+
         private static readonly ScanStepDef[] Defs = new ScanStepDef[]
         {
-            Make("row", "卡片行", false, ScanReadTier.None, true, true, false,
+            Make("row", "卡片行", false, ScanReadTier.None, true, true, false, GroupCore,
                 "只记文件与文件夹——卡片视图先能看见卡（不读文件内容）"),
-            Make("modrow", "mod 行", true, ScanReadTier.None, true, true, false,
+            Make("modrow", "mod 行", true, ScanReadTier.None, true, true, false, GroupCore,
                 "manifest 的 guid / 名称 / 版本 / 作者——mod 总数与关联主键（库内能读到 manifest.xml 的文件都算）"),
-            Make("head", "卡头段", false, ScanReadTier.Local, true, true, false,
+            Make("head", "卡头段", false, ScanReadTier.Local, true, true, false, GroupCore,
                 "卡类型与图片区终点——其余数据区步骤的前置"),
-            Make("refs", "声明区", false, ScanReadTier.Local, true, true, false,
+            Make("refs", "声明区", false, ScanReadTier.Local, true, true, false, GroupCore,
                 "卡片引用的 mod——四色与缺失清单的依据"),
-            Make("name", "角色名", false, ScanReadTier.Local, false, true, false,
-                "Parameter 块的姓 / 名——按角色名排序用（可取消）"),
-            Make("timeline", "时间轴", false, ScanReadTier.Local, false, true, false,
-                "场景卡的 Timeline 时长——按时间轴排序用（可取消）"),
-            Make("coord", "服装槽位", false, ScanReadTier.Local, false, false, false,
+            Make("name", "角色名", false, ScanReadTier.Local, true, true, false, GroupCore,
+                "Parameter 块的姓 / 名——按角色名排序用"),
+            Make("timeline", "时间轴", false, ScanReadTier.Local, true, true, false, GroupCore,
+                "场景卡的 Timeline 时长——按时间轴排序用"),
+            Make("coord", "服装槽位", false, ScanReadTier.Local, false, false, false, GroupAnalyze,
                 "人物卡七套 coordinate（服装 / 饰品 / 化妆）——只读分析"),
-            Make("thumb", "缩略图", false, ScanReadTier.Image, true, true, false,
+            Make("thumb", "缩略图", false, ScanReadTier.Image, true, true, false, GroupCore,
                 "卡片视图的图（图片区解码）"),
-            Make("detail", "卡片分析", false, ScanReadTier.Full, false, false, false,
+            Make("detail", "卡片分析", false, ScanReadTier.Full, false, false, false, GroupAnalyze,
                 "整个数据区的结构全字段（耗时与卡片体积成正比）"),
-            Make("scene", "场景深度", false, ScanReadTier.Full, false, false, false,
+            Make("scene", "场景深度", false, ScanReadTier.Full, false, false, false, GroupAnalyze,
                 "场景插件条目 / 道具 / 轨道组 / 内嵌角色数据（sd 专用）"),
-            Make("composition", "组成档案", true, ScanReadTier.Local, false, false, false,
+            Make("composition", "组成档案", true, ScanReadTier.Local, false, false, false, null,
                 "zipmod 条目清单与文本条目内容（打开 mod 时的组成视图）"),
-            Make("u3d", "unity3d 贴图", true, ScanReadTier.Full, false, false, true,
+            Make("u3d", "unity3d 贴图", true, ScanReadTier.Full, false, false, true, null,
                 "容器内 unity3d 贴图解析——本轮占位，不参与扫描")
         };
 
@@ -208,7 +248,48 @@ namespace KKManager.Core
             get { return Defs; }
         }
 
-        private static ScanStepDef Make(string id, string name, bool mods, ScanReadTier tier, bool required, bool defaultOn, bool grayed, string note)
+        /// <summary>内置组定义（数组顺序即配置窗展示顺序——统一扫描在最上）。</summary>
+        public static IReadOnlyList<ScanGroupDef> Groups
+        {
+            get { return GroupDefs; }
+        }
+
+        /// <summary>按 id 找组（未知返回 null）。</summary>
+        public static ScanGroupDef FindGroup(string id)
+        {
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+            foreach (ScanGroupDef g in GroupDefs)
+            {
+                if (g.Id == id)
+                {
+                    return g;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>某组的步骤（按内置顺序；空 id 返回空表）。</summary>
+        public static List<ScanStepDef> StepsOf(string groupId)
+        {
+            List<ScanStepDef> list = new List<ScanStepDef>();
+            if (string.IsNullOrEmpty(groupId))
+            {
+                return list;
+            }
+            foreach (ScanStepDef d in Defs)
+            {
+                if (d.Group == groupId)
+                {
+                    list.Add(d);
+                }
+            }
+            return list;
+        }
+
+        private static ScanStepDef Make(string id, string name, bool mods, ScanReadTier tier, bool required, bool defaultOn, bool grayed, string group, string note)
         {
             ScanStepDef d = new ScanStepDef();
             d.Id = id;
@@ -218,8 +299,21 @@ namespace KKManager.Core
             d.Required = required;
             d.DefaultOn = defaultOn;
             d.Grayed = grayed;
+            d.Group = group;
             d.Note = note;
             return d;
+        }
+
+        /// <summary>构造组定义。</summary>
+        private static ScanGroupDef MakeGroup(string id, string name, bool required, bool defaultOn, string note)
+        {
+            ScanGroupDef g = new ScanGroupDef();
+            g.Id = id;
+            g.Name = name;
+            g.Required = required;
+            g.DefaultOn = defaultOn;
+            g.Note = note;
+            return g;
         }
 
         /// <summary>按 id 找定义（未知返回 null）。</summary>
@@ -324,6 +418,31 @@ namespace KKManager.Core
                 if (d.DefaultOn)
                 {
                     p.On.Add(d.Id);
+                }
+            }
+            // 组归一——可选组只有「全开 / 全关」两态：组内步骤并非全部启用时按全关处理（旧设置里只勾了组内一部分）
+            foreach (ScanGroupDef g in GroupDefs)
+            {
+                if (g.Required)
+                {
+                    continue;
+                }
+                List<ScanStepDef> steps = StepsOf(g.Id);
+                bool all = steps.Count > 0;
+                foreach (ScanStepDef d in steps)
+                {
+                    if (!p.On.Contains(d.Id))
+                    {
+                        all = false;
+                        break;
+                    }
+                }
+                if (!all)
+                {
+                    foreach (ScanStepDef d in steps)
+                    {
+                        p.On.Remove(d.Id);
+                    }
                 }
             }
             return p;

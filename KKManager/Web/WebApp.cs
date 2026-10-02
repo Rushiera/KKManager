@@ -1139,10 +1139,30 @@ namespace KKManager.Web
                         defaultOn = d.DefaultOn,
                         grayed = d.Grayed,
                         note = d.Note,
+                        group = d.Group,
                         on = plan.IsOn(d.Id)
                     });
                 }
-                return Results.Json(new { order = plan.Order, on = plan.On, steps = steps });
+                // 扫描组——配置窗的勾选单元（组内步骤同进同出）
+                List<object> groups = new List<object>();
+                foreach (ScanGroupDef g in ScanPlanCatalog.Groups)
+                {
+                    List<string> ids = new List<string>();
+                    foreach (ScanStepDef d in ScanPlanCatalog.StepsOf(g.Id))
+                    {
+                        ids.Add(d.Id);
+                    }
+                    groups.Add(new
+                    {
+                        id = g.Id,
+                        name = g.Name,
+                        note = g.Note,
+                        required = g.Required,
+                        defaultOn = g.DefaultOn,
+                        steps = ids
+                    });
+                }
+                return Results.Json(new { order = plan.Order, on = plan.On, steps = steps, groups = groups });
             });
 
             app.MapGet("/api/stats", () =>
