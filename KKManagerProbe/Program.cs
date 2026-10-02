@@ -85,9 +85,9 @@ namespace KKManager.Probe
 
         private static int Main(string[] args)
         {
-            if (args.Length < 3)
+            if (args.Length < 2)
             {
-                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB] | tlscan <card.png> <out.txt> | folders <db>");
+                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB] | tlscan <card.png> <out.txt> | folders <db> | dbbench <dir> <shards> [noa] | mktpl <path>");
                 return 2;
             }
 
@@ -160,6 +160,10 @@ namespace KKManager.Probe
                     return TlScanCommand(args[1], args[2]);
                 case "folders":
                     return FoldersCommand(args[1]);
+                case "dbbench":
+                    return DbBench(args[1], int.Parse(args[2]), args.Length > 3 && args[3] == "noa");
+                case "mktpl":
+                    return MakeTemplate(args[1]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
@@ -4727,6 +4731,136 @@ namespace KKManager.Probe
                 }
             }
             return 0;
+        }
+
+        /// <summary>建库方式基准——比较备齐 N 个分片库的四条路径耗时（同目录同卷）：A 逐片建表（现状懒开路径）· B 模板建一次 + 复制（现状扫描路径）· C 预置模板纯复制（零 DDL）· D 打开成本（含 ATTACH 主库）。skipA = 跳过 A 组（逐片建表极慢，测大片数时单独跑）。</summary>
+        private static int DbBench(string dir, int shards, bool skipA)
+        {
+            if (shards < 1)
+            {
+                shards = 1;
+            }
+            string root = Path.GetFullPath(dir);
+            Directory.CreateDirectory(root);
+            string core = Path.Combine(root, "core.db");
+            DeleteFileAndSidecars(core);
+            using (Store s = new Store(core))
+            {
+                s.Checkpoint();
+            }
+            Console.WriteLine("基准目录 " + root + " · 片数 " + shards.ToString());
+
+            // A：逐片建表——库文件缺片时 StoreByLib 走的路径（各自 EnsureSchema）
+            string aDir = Path.Combine(root, "a");
+            Directory.CreateDirectory(aDir);
+            System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+            if (skipA)
+            {
+                Console.WriteLine("A 逐片建表：跳过");
+            }
+            else
+            {
+                for (int i = 0; i < shards; i = i + 1)
+                {
+                    string p = Path.Combine(aDir, "lib_" + i.ToString() + ".db");
+                    DeleteFileAndSidecars(p);
+                    System.Diagnostics.Stopwatch sw1 = System.Diagnostics.Stopwatch.StartNew();
+                    using (Store s1 = new Store(p, core))
+                    {
+                        s1.Checkpoint();
+                    }
+                    if (i < 3)
+                    {
+                        Console.WriteLine("  A 第 " + (i + 1).ToString() + " 片 " + sw1.ElapsedMilliseconds.ToString() + " ms");
+                    }
+                }
+                long aMs = w.ElapsedMilliseconds;
+                Console.WriteLine("A 逐片建表：" + aMs.ToString() + " ms（每片 " + (aMs / shards).ToString() + " ms）");
+            }
+
+            // B：模板建一次 + 文件复制——EnsureShards 现状路径
+            string bDir = Path.Combine(root, "b");
+            Directory.CreateDirectory(bDir);
+            string tpl = Path.Combine(bDir, "tpl.db");
+            DeleteFileAndSidecars(tpl);
+            w.Restart();
+            using (Store t = new Store(tpl))
+            {
+                t.Checkpoint();
+            }
+            long tplMs = w.ElapsedMilliseconds;
+            long copyMs = 0;
+            for (int i = 0; i < shards; i = i + 1)
+            {
+                string p = Path.Combine(bDir, "lib_" + i.ToString() + ".db");
+                DeleteFileAndSidecars(p);
+                System.Diagnostics.Stopwatch c = System.Diagnostics.Stopwatch.StartNew();
+                File.Copy(tpl, p, true);
+                copyMs = copyMs + c.ElapsedMilliseconds;
+            }
+            Console.WriteLine("B 模板+复制：模板 " + tplMs.ToString() + " ms · 复制 " + copyMs.ToString() + " ms · 合计 " + (tplMs + copyMs).ToString() + " ms");
+
+            // C：预置模板纯复制——模板已就位（程序自带 / 上次运行留下的缓存），运行时零 DDL
+            string cDir = Path.Combine(root, "c");
+            Directory.CreateDirectory(cDir);
+            w.Restart();
+            for (int i = 0; i < shards; i = i + 1)
+            {
+                string p = Path.Combine(cDir, "lib_" + i.ToString() + ".db");
+                DeleteFileAndSidecars(p);
+                File.Copy(tpl, p, true);
+            }
+            long cMs = w.ElapsedMilliseconds;
+            Console.WriteLine("C 预置模板复制：" + cMs.ToString() + " ms（每片 " + (cMs / shards).ToString() + " ms）");
+
+            // D：打开成本——schemaReady 打开（含 ATTACH 主库），模拟面板首次访问库根
+            w.Restart();
+            List<Store> opened = new List<Store>();
+            for (int i = 0; i < shards; i = i + 1)
+            {
+                string p = Path.Combine(cDir, "lib_" + i.ToString() + ".db");
+                opened.Add(new Store(p, core, true));
+            }
+            long openMs = w.ElapsedMilliseconds;
+            foreach (Store one in opened)
+            {
+                one.Dispose();
+            }
+            Console.WriteLine("D 打开（含 ATTACH）：" + openMs.ToString() + " ms（每片 " + (openMs / shards).ToString() + " ms）");
+
+            FileInfo fi = new FileInfo(Path.Combine(cDir, "lib_0.db"));
+            Console.WriteLine("单片体积 " + fi.Length.ToString() + " 字节");
+            return 0;
+        }
+
+        /// <summary>生成空结构模板库（主库结构 + user_version）——预建 db 的复制源；产物入库为嵌入资源。</summary>
+        private static int MakeTemplate(string path)
+        {
+            DeleteFileAndSidecars(path);
+            using (Store s = new Store(path))
+            {
+                s.Checkpoint();
+            }
+            FileInfo fi = new FileInfo(path);
+            Console.WriteLine("模板已生成 " + Path.GetFullPath(path) + " · " + fi.Length.ToString() + " 字节");
+            return 0;
+        }
+
+        /// <summary>删文件与其 SQLite 边车（-wal / -shm）——不存在跳过（预建复制前必须清边车，残留 WAL 会让复制件按旧 WAL 恢复）。</summary>
+        private static void DeleteFileAndSidecars(string path)
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+            if (File.Exists(path + "-wal"))
+            {
+                File.Delete(path + "-wal");
+            }
+            if (File.Exists(path + "-shm"))
+            {
+                File.Delete(path + "-shm");
+            }
         }
     }
 }
