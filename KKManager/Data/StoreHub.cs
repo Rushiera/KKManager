@@ -38,7 +38,9 @@ namespace KKManager.Data
                 dir = ".";
             }
             _dir = dir;
-            Core = new Store(_corePath);
+            // 主库不存在（首次运行 / 干净数据目录）——从内嵌模板释放（零 DDL）；释放失败回落常规建表
+            bool coreReady = !File.Exists(_corePath) && Store.ReleaseTemplate(_corePath);
+            Core = new Store(_corePath, null, coreReady);
             LoadLibMap();
         }
 
@@ -143,13 +145,20 @@ namespace KKManager.Data
             {
                 return Core;
             }
+            return OpenLibStore(lib);
+        }
+
+        /// <summary>打开一个库文件 Store（缓存复用）——文件不存在先从内嵌模板释放（零 DDL），释放失败回落常规建表；库文件须 ATTACH 主库。</summary>
+        private Store OpenLibStore(int lib)
+        {
             Store s = null;
             if (_libStores.TryGetValue(lib, out s))
             {
                 return s;
             }
             string path = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
-            s = new Store(path, _corePath);
+            bool ready = !File.Exists(path) && Store.ReleaseTemplate(path);
+            s = new Store(path, _corePath, ready);
             _libStores[lib] = s;
             _libByDb[s.DbPath] = lib;
             return s;
@@ -212,15 +221,7 @@ namespace KKManager.Data
             for (int k = 0; k < shards; k = k + 1)
             {
                 int lib = RootsRules.LibOfShard(baseLib, k);
-                Store s = null;
-                if (!_libStores.TryGetValue(lib, out s))
-                {
-                    string path = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
-                    s = new Store(path, _corePath, true);
-                    _libStores[lib] = s;
-                    _libByDb[s.DbPath] = lib;
-                }
-                list.Add(s);
+                list.Add(OpenLibStore(lib));
             }
             return list;
         }
@@ -401,11 +402,12 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>全库扫描前按库根配置准备库文件（含首次迁移：把主库里的附加库 / 冷藏库数据搬进各自的库文件；卡片侧预置库根也各自独立成库）。</summary>
+        /// <summary>全库扫描前按库根配置准备库文件——含首次迁移（把主库里的附加库 / 冷藏库数据搬进各自的库文件；卡片侧预置库根也各自独立成库）+ 预建全部库文件（缺文件从内嵌模板释放，零 DDL）。</summary>
         public void EnsureMigrated(RootsConfig cfg)
         {
             if (Core.GetSetting("dbSplit") == "1")
             {
+                EnsureDatabases(cfg);
                 return;
             }
             MigrateRoots(cfg == null ? null : cfg.modRoots, true);
@@ -417,6 +419,90 @@ namespace KKManager.Data
             }
             Core.Vacuum();
             Console.WriteLine("[迁移] 按库拆分完成——各库根已独立为库文件");
+            EnsureDatabases(cfg);
+        }
+
+        /// <summary>预建全部库文件（首次打开一次性备齐）——先收集缺文件清单，第一个从内嵌模板释放一次，其余直接文件复制（全程不开数据库连接、不跑 DDL）。返回新建文件数。</summary>
+        public int EnsureDatabases(RootsConfig cfg)
+        {
+            if (cfg == null)
+            {
+                return 0;
+            }
+            List<string> missing = MissingLibFiles(cfg);
+            if (missing.Count == 0)
+            {
+                return 0;
+            }
+            System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+            // 第一个缺文件 = 复制源（从内嵌模板释放一次）；其余全部走文件系统复制
+            if (!Store.ReleaseTemplate(missing[0]))
+            {
+                return 0;
+            }
+            int built = 1;
+            for (int i = 1; i < missing.Count; i = i + 1)
+            {
+                File.Copy(missing[0], missing[i], true);
+                built = built + 1;
+            }
+            Console.WriteLine("[库数据] 预建库文件 " + built.ToString() + " 个 · " + watch.ElapsedMilliseconds.ToString() + " ms");
+            return built;
+        }
+
+        /// <summary>列出缺失的库文件路径——卡片侧按分片数展开（未定则按分片目标定下并落盘），mod 侧单片（文件名与 StoreByLib 同源）。</summary>
+        private List<string> MissingLibFiles(RootsConfig cfg)
+        {
+            List<string> list = new List<string>();
+            CollectMissing(cfg.cardRoots, false, list);
+            CollectMissing(cfg.modRoots, true, list);
+            return list;
+        }
+
+        /// <summary>收集一组库根下缺失的库文件路径（已有的跳过）。</summary>
+        private void CollectMissing(List<RootEntry> roots, bool isMods, List<string> list)
+        {
+            if (roots == null)
+            {
+                return;
+            }
+            foreach (RootEntry e in roots)
+            {
+                int lib = LibOfEntry(e, isMods);
+                if (lib <= 0)
+                {
+                    continue;
+                }
+                if (isMods)
+                {
+                    // mod 侧不分片——文件名与 StoreByLib 同源（库序号直接成文件名）
+                    string p = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
+                    if (!File.Exists(p))
+                    {
+                        list.Add(p);
+                    }
+                    continue;
+                }
+                int shards = ShardCountOf(lib);
+                if (shards <= 0)
+                {
+                    // 卡片侧按分片目标定下片数（此后稳定不变）
+                    shards = ShardTarget();
+                    if (shards < 1)
+                    {
+                        shards = 1;
+                    }
+                    SetShardCount(lib, shards);
+                }
+                for (int k = 0; k < shards; k = k + 1)
+                {
+                    string p = Path.Combine(_dir, RootsRules.LibDbFileName(RootsRules.LibOfShard(lib, k)));
+                    if (!File.Exists(p))
+                    {
+                        list.Add(p);
+                    }
+                }
+            }
         }
 
         /// <summary>把一组库根的数据从主库搬进各自的库文件。</summary>
@@ -432,7 +518,9 @@ namespace KKManager.Data
                 {
                     continue;
                 }
-                Store target = StoreByLib(LibOf(e.path));
+                // 卡片侧的目标库是「分片 0」（与读面 / 扫描同一路径）；mod 侧不分片（库序号直接成文件名）
+                int baseLib = LibOf(e.path);
+                Store target = StoreByLib(isMods ? baseLib : RootsRules.LibOfShard(baseLib, 0));
                 target.AdoptRootFromCore(e.path);
                 Console.WriteLine("[迁移] " + e.path + " → " + Path.GetFileName(target.DbPath));
             }

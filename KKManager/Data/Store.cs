@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using KKManager.Core;
 using Microsoft.Data.Sqlite;
 
@@ -813,6 +814,9 @@ namespace KKManager.Data
     {
         private const int SchemaVersion = 2;
         private const string StampFormat = "yyyy-MM-ddTHH:mm:ss.fff";
+
+        /// <summary>内嵌空结构模板库的资源名（预建库文件的复制源——由探针 `mktpl` 生成后入库）。</summary>
+        private const string TemplateResource = "KKManager.Resources.db-template.db";
         private readonly SqliteConnection _conn;
 
         /// <summary>是否为主库连接（库文件连接会 ATTACH 主库为 core）。</summary>
@@ -837,9 +841,22 @@ namespace KKManager.Data
             _conn.Open();
             if (schemaReady)
             {
-                // 预建分片库的复制件——结构已就绪（模板建过一次），只补连接级 PRAGMA
+                // 预建库文件的复制件——结构已就绪（模板建过一次），只补连接级 PRAGMA
                 Exec("PRAGMA synchronous=NORMAL");
                 Exec("PRAGMA busy_timeout=15000");
+                // 模板可能与当前 schema 版本不符（代码升级后模板未重生成）——校验不过即回落完整建表（失败可见，不静默用旧结构）
+                if (Convert.ToInt64(ExecScalar("PRAGMA user_version"), CultureInfo.InvariantCulture) != SchemaVersion)
+                {
+                    Console.WriteLine("[库数据] 复制件结构版本不符（" + full + "）——按常规重建");
+                    EnsureSchema();
+                }
+                else
+                {
+                    // 模板可能落后于代码的增量补列（版本号未变）——幂等补齐（无改动时事务零成本，不写盘）
+                    Begin();
+                    EnsureColumns();
+                    Commit();
+                }
             }
             else
             {
@@ -972,11 +989,6 @@ namespace KKManager.Data
                              tier INTEGER, root_path TEXT, folder TEXT,
                              card_type TEXT, data_version TEXT, image_end INTEGER, uar_blocks INTEGER,
                              mod_count INTEGER, thumb BLOB, scan_time TEXT, error TEXT, chara_name TEXT)");
-            // 增量补列：旧库（本版之前建的 card 表）没有 chara_name 列——按列存在性判定后补上，不重建整库
-            if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('card') WHERE name='chara_name'"), CultureInfo.InvariantCulture) == 0)
-            {
-                Exec("ALTER TABLE card ADD COLUMN chara_name TEXT");
-            }
             Exec(@"CREATE TABLE IF NOT EXISTS card_mod(
                              card_id INTEGER, mod_guid TEXT,
                              property TEXT, slot INTEGER, local_slot INTEGER, category_no INTEGER,
@@ -1014,22 +1026,10 @@ namespace KKManager.Data
                                  guid TEXT PRIMARY KEY, file_path TEXT, file_name TEXT, size INTEGER, mtime TEXT,
                                  entry_count INTEGER, total_size INTEGER, total_compressed INTEGER,
                                  entries TEXT, analyzed_at TEXT)");
-                // 增量补列：旧库（v0.17.3 建的 mod_composition）没有 texts 列——按列存在性判定后补上，不重建整库
-                if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('mod_composition') WHERE name='texts'"), CultureInfo.InvariantCulture) == 0)
-                {
-                    Exec("ALTER TABLE mod_composition ADD COLUMN texts TEXT");
-                }
                 Exec(@"CREATE TABLE IF NOT EXISTS todo(
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                                  kind TEXT, key TEXT, created_at TEXT,
                                  UNIQUE(kind, key))");
-                // 增量迁移（v0.20.2）：手动待办要正文 / 关联对象，且卡片待办允许一卡多条——
-                // 旧表带表级 UNIQUE(kind, key)（SQLite 删不掉表级约束），故建新表搬运后重建，
-                // 唯一性只在 offline 上保留（部分唯一索引）；manual 的重复由应用层出声拒绝
-                if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('todo') WHERE name='text'"), CultureInfo.InvariantCulture) == 0)
-                {
-                    MigrateTodoTable();
-                }
                 Exec(@"CREATE TABLE IF NOT EXISTS mod_u3d(
                                  guid TEXT, entry_path TEXT,
                                  file_path TEXT, size INTEGER, mtime TEXT,
@@ -1048,15 +1048,6 @@ namespace KKManager.Data
                                  product TEXT, file_version TEXT, target_framework TEXT, note TEXT,
                                  PRIMARY KEY(file_path, guid))");
                 Exec("CREATE INDEX IF NOT EXISTS ix_plugin_guid ON plugin_file(guid)");
-                // 增量补列（v0.20.10）：dll 元数据扩项——旧库按列存在性逐列补，不重建整库
-                EnsureColumn("plugin_file", "title", "TEXT");
-                EnsureColumn("plugin_file", "description", "TEXT");
-                EnsureColumn("plugin_file", "company", "TEXT");
-                EnsureColumn("plugin_file", "copyright", "TEXT");
-                EnsureColumn("plugin_file", "product", "TEXT");
-                EnsureColumn("plugin_file", "file_version", "TEXT");
-                EnsureColumn("plugin_file", "target_framework", "TEXT");
-                EnsureColumn("plugin_file", "note", "TEXT");
                 Exec(@"CREATE TABLE IF NOT EXISTS plugin_config(
                                  file_path TEXT PRIMARY KEY, file_name TEXT,
                                  plugin_name TEXT, plugin_version TEXT, guid TEXT,
@@ -1082,9 +1073,37 @@ namespace KKManager.Data
                 Exec("CREATE INDEX IF NOT EXISTS ix_sort_item_plan ON mod_sort_plan_item(plan_id)");
                 Exec("CREATE INDEX IF NOT EXISTS ix_sort_item_src ON mod_sort_plan_item(plan_id, src_path)");
             }
+            // 增量补列 / 表迁移统一在此——完整建表与模板复制件共用（复制件结构落后于代码时自愈）
+            EnsureColumns();
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mtime ON card(mtime)");
             Exec("PRAGMA user_version=" + SchemaVersion);
             Commit();
+        }
+
+        /// <summary>增量补列与表迁移（幂等：只读检查 + 必要时 ALTER / 建新表搬运行）——完整建表与模板复制件共用；模板落后于代码（新增列未升 schema 版本）时在此自愈，不静默用旧结构。</summary>
+        private void EnsureColumns()
+        {
+            // card.chara_name（v0.18.24 角色名）——主库与库文件两侧都有 card 表
+            EnsureColumn("card", "chara_name", "TEXT");
+            if (_isCore)
+            {
+                // mod_composition.texts（v0.17.3 组成档案文本条目）
+                EnsureColumn("mod_composition", "texts", "TEXT");
+                // plugin_file 程序集元数据八列（v0.20.10）
+                EnsureColumn("plugin_file", "title", "TEXT");
+                EnsureColumn("plugin_file", "description", "TEXT");
+                EnsureColumn("plugin_file", "company", "TEXT");
+                EnsureColumn("plugin_file", "copyright", "TEXT");
+                EnsureColumn("plugin_file", "product", "TEXT");
+                EnsureColumn("plugin_file", "file_version", "TEXT");
+                EnsureColumn("plugin_file", "target_framework", "TEXT");
+                EnsureColumn("plugin_file", "note", "TEXT");
+                // todo 表迁移（v0.20.2）：旧表带表级 UNIQUE(kind, key)（SQLite 删不掉表级约束），故建新表搬运后重建
+                if (Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM pragma_table_info('todo') WHERE name='text'"), CultureInfo.InvariantCulture) == 0)
+                {
+                    MigrateTodoTable();
+                }
+            }
         }
 
         /// <summary>把 todo 表迁到 v0.20.2 结构——补 text / ref_path / ref_name 三列，并把「同类型同键只留一条」的唯一性缩到只对 offline 生效（卡片待办允许一卡多条）。行数不一致即抛——失败可见，不静默丢待办。</summary>
@@ -4102,10 +4121,61 @@ namespace KKManager.Data
                 cmd.ExecuteNonQuery();
             }
         }
-        /// <summary>把 WAL 内容归位到主库文件（预建分片库的模板复制前调用——只复制主文件时结构才完整）。</summary>
+        /// <summary>把 WAL 内容归位到主库文件（预建库文件的模板复制前调用——只复制主文件时结构才完整）。</summary>
         public void Checkpoint()
         {
             Exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+
+        /// <summary>把内嵌的空结构模板库写到目标路径（预建库文件的复制源）——已存在返回 false 不覆盖；资源缺失 / 写失败出声并返回 false（调用方回落常规建表，不静默）。</summary>
+        public static bool ReleaseTemplate(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (File.Exists(full))
+            {
+                return false;
+            }
+            string dir = Path.GetDirectoryName(full);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            Assembly asm = typeof(Store).Assembly;
+            using (Stream src = asm.GetManifestResourceStream(TemplateResource))
+            {
+                if (src == null)
+                {
+                    Console.WriteLine("[库数据] 内嵌模板缺失（" + TemplateResource + "）——该库按常规建表");
+                    return false;
+                }
+                string tmp = full + ".tmp";
+                try
+                {
+                    // 先写临时文件再改名——写一半中断不留下半截库文件（改名原子）
+                    using (FileStream dst = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        src.CopyTo(dst);
+                    }
+                    File.Move(tmp, full, true);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[库数据] 模板释放失败（" + full + "）：" + ex.Message + "——该库按常规建表");
+                    try
+                    {
+                        if (File.Exists(tmp))
+                        {
+                            File.Delete(tmp);
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        Console.WriteLine("[库数据] 临时模板清理失败（" + tmp + "）：" + ex2.Message);
+                    }
+                    return false;
+                }
+            }
         }
     }
 }

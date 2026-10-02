@@ -10,7 +10,7 @@
     <AssemblyName>KMR</AssemblyName>
     <RootNamespace>KKManager</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>0.21.3</Version>
+    <Version>0.21.4</Version>
   </PropertyGroup>
 
   <!-- 发布版专用编译开关（发布规范 → WorkSpace:KKManager/revealer/RELEASE.md §三）：
@@ -27,6 +27,10 @@
   <ItemGroup>
     <EmbeddedResource Include="Web\wwwroot\index.html" />
     <EmbeddedResource Include="Web\wwwroot\plugin-notes.txt" />
+    <!-- 空结构模板库——预建库文件的复制源（首次打开零 DDL 建库）。
+         🔴 改 Store.EnsureSchema 的表 / 列定义后必须重新生成：
+            KKManagerProbe mktpl KKManager\Resources\db-template.db -->
+    <EmbeddedResource Include="Resources\db-template.db" />
   </ItemGroup>
 
   <ItemGroup>
