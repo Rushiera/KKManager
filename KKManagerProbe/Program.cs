@@ -87,7 +87,7 @@ namespace KKManager.Probe
         {
             if (args.Length < 3)
             {
-                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB] | tlscan <card.png> <out.txt>");
+                Console.Error.WriteLine("用法: scan <card.png> <outDir> | hex <file> <out.txt> <start> <len> | find <file> <out.txt> <text> <before> <after> | copy <src> <dest> | cmp <a> <b> <offA> <offB> <len> | u3ddump <zipmod> <entry> <outFile> | htmlcheck <html> <out.txt> | extractjs <html> <out.js> | tlinfo <file|目录> <out.txt> [最大MB] | tlscan <card.png> <out.txt> | folders <db>");
                 return 2;
             }
 
@@ -158,6 +158,8 @@ namespace KKManager.Probe
                     return ModUseCommand(args[1], int.Parse(args[2]));
                 case "tlscan":
                     return TlScanCommand(args[1], args[2]);
+                case "folders":
+                    return FoldersCommand(args[1]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
@@ -4690,6 +4692,38 @@ namespace KKManager.Probe
                     {
                         Console.WriteLine("    卡类型 " + kv.Key + " : " + kv.Value.ToString());
                     }
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>验证用：文件夹清单跨分片合并后的对账——同键唯一性 + 各库根合计张数（与库内卡片数比对）。</summary>
+        private static int FoldersCommand(string dbPath)
+        {
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                List<FolderRow> rows = hub.QueryFolders(cfg);
+                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, long> byRoot = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                int dup = 0;
+                foreach (FolderRow f in rows)
+                {
+                    string key = (f.RootPath ?? "") + "\n" + (f.Folder ?? "");
+                    if (!seen.Add(key))
+                    {
+                        dup = dup + 1;
+                        Console.WriteLine("!! 重复键: " + f.RootPath + " | " + f.Folder);
+                    }
+                    long n = 0;
+                    byRoot.TryGetValue(f.RootPath ?? "", out n);
+                    byRoot[f.RootPath ?? ""] = n + f.Count;
+                }
+                Console.WriteLine("文件夹行 " + rows.Count.ToString() + " · 重复键 " + dup.ToString());
+                foreach (KeyValuePair<string, long> kv in byRoot)
+                {
+                    Console.WriteLine("  " + kv.Key + " 合计 " + kv.Value.ToString() + " 张");
                 }
             }
             return 0;
