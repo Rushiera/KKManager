@@ -155,7 +155,7 @@ namespace KKManager.Data
             return s;
         }
 
-        /// <summary>分片数目标（库设置 scan_shards → 环境变量 KKM_SCAN_SHARDS；无记录按默认 8）——与并发度（scan_workers）解耦：布局稳定，并发度可随时调。</summary>
+        /// <summary>分片数目标（库设置 scan_shards → 环境变量 KKM_SCAN_SHARDS；无记录按默认 32）——与并发度（scan_workers）解耦：布局稳定，并发度可随时调。</summary>
         public int ShardTarget()
         {
             int n = ReadCount(Environment.GetEnvironmentVariable("KKM_SCAN_SHARDS"));
@@ -166,8 +166,8 @@ namespace KKManager.Data
             return n <= 0 ? DefaultShardTarget : n;
         }
 
-        /// <summary>分片数目标的默认值——本机 16 逻辑核，取 8 片（每片一个库文件，合并已取消）。</summary>
-        public const int DefaultShardTarget = 8;
+        /// <summary>分片数目标的默认值——取 32 片（每片一个库文件，合并已取消）；片数一经确定不再变化。</summary>
+        public const int DefaultShardTarget = 32;
 
         /// <summary>某个卡片库根的分片数（落主库设置 libshards:&lt;库根序号&gt;；无记录返回 0 = 尚未定）。🔴 分片数一经确定必须稳定——变更即需整库重扫（行按路径哈希落片，片数变了旧行会留在错片）。</summary>
         public int ShardCountOf(int baseLib)

@@ -235,14 +235,11 @@ namespace KKManager.Core
         /// （451 张 14.9 s → 81.3 s，SQLite 写锁竞争），故并行只在分片库上做。</summary>
         private const int MaxScanWorkers = 32;
 
-        /// <summary>并行 worker 数的默认值（无环境变量 / 库设置时的回落——1 = 串行，关闭并行）。</summary>
-        private const int DefaultScanWorkers = 1;
+        /// <summary>并行 worker 数的默认值（无环境变量 / 库设置时的回落——与分片数目标同值，把分片铺满）。</summary>
+        private const int DefaultScanWorkers = 32;
 
         /// <summary>启用并行的最小文件数——小库不值得为分片库付建库成本。</summary>
         private const int MinFilesForParallel = 200;
-
-        /// <summary>每个 worker 至少承担的文件数——分片库建库成本与单 worker 工作量的平衡点。</summary>
-        private const int MinFilesPerWorker = 100;
 
         /// <summary>进度出声的文件间隔（并行时按全局计数，串行时按本 worker 计数）——面板进度条按日志行解析，本值即进度刷新粒度。</summary>
         private const int ProgressEvery = 5;
@@ -984,21 +981,12 @@ namespace KKManager.Core
             {
                 return;
             }
-            // [段1] 片数——首次按「分片目标」定下并落盘（受每片至少 MinFilesPerWorker 约束裁剪）；此后稳定不变。
+            // [段1] 片数——首次按「分片目标」定下并落盘；此后稳定不变（固定片数，不随文件数变化）。
             // 🔴 片数与并发度解耦（布局稳定，并发度随时可调）；变更片数会让已落库的行留在错片（行按路径哈希落片）⇒ 改数需整库重扫
             int shards = hub.ShardCountOf(baseLib);
             if (shards <= 0)
             {
                 shards = hub.ShardTarget();
-                int byBatch = total / MinFilesPerWorker;
-                if (byBatch < 1)
-                {
-                    byBatch = 1;
-                }
-                if (shards > byBatch)
-                {
-                    shards = byBatch;
-                }
                 if (shards < 1)
                 {
                     shards = 1;
