@@ -123,6 +123,25 @@ namespace KKManager.Data
         public bool HasThumb { get; set; }
     }
 
+    /// <summary>卡片文件夹行（本库按库根 + 文件夹分组的计数）——跨分片合并前的一行；合并口径见 StoreHub.QueryFolders。</summary>
+    public class FolderRow
+    {
+        /// <summary>所属库根路径。</summary>
+        public string RootPath { get; set; }
+
+        /// <summary>相对库根的文件夹（根目录为空串）。</summary>
+        public string Folder { get; set; }
+
+        /// <summary>卡片数。</summary>
+        public long Count { get; set; }
+
+        /// <summary>就绪卡片数（有 mod 引用且无黄 / 红 / 黑）。</summary>
+        public long Ready { get; set; }
+
+        /// <summary>含缺失（黑）的卡片数。</summary>
+        public long Black { get; set; }
+    }
+
     /// <summary>非卡 / 非 mod 文件行（各库本地表 non_card）——扫描判定为「不是卡片也不是 mod」的文件，供面板清单与一键搬到缓存库。</summary>
     public class NonCardRow
     {
@@ -2522,9 +2541,9 @@ namespace KKManager.Data
         }
 
         /// <summary>卡片文件夹清单（含数量与未就绪数），供前端分类展示。</summary>
-        public List<object> QueryFolders()
+        public List<FolderRow> QueryFolders()
         {
-            var list = new List<object>();
+            var list = new List<FolderRow>();
             string sql = ColorCte + @" SELECT c.root_path, c.folder, COUNT(*) AS n,
                      SUM(CASE WHEN c.mod_count > 0 AND (COALESCE(a.yellow,0)+COALESCE(a.red,0)+COALESCE(a.black,0))=0 THEN 1 ELSE 0 END) AS ready,
                      SUM(CASE WHEN COALESCE(a.black,0) > 0 THEN 1 ELSE 0 END) AS black
@@ -2535,13 +2554,13 @@ namespace KKManager.Data
             {
                 while (r.Read())
                 {
-                    list.Add(new
+                    list.Add(new FolderRow
                     {
-                        rootPath = r.IsDBNull(0) ? "" : r.GetString(0),
-                        folder = r.IsDBNull(1) ? "" : r.GetString(1),
-                        count = r.GetInt64(2),
-                        ready = r.GetInt64(3),
-                        black = r.GetInt64(4)
+                        RootPath = r.IsDBNull(0) ? "" : r.GetString(0),
+                        Folder = r.IsDBNull(1) ? "" : r.GetString(1),
+                        Count = r.GetInt64(2),
+                        Ready = r.GetInt64(3),
+                        Black = r.GetInt64(4)
                     });
                 }
             }

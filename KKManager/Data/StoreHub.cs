@@ -901,13 +901,44 @@ namespace KKManager.Data
         }
 
         /// <summary>卡片文件夹清单（跨库拼接，同库根的多分片合并计数）。</summary>
-        public List<object> QueryFolders(RootsConfig cfg)
+        public List<FolderRow> QueryFolders(RootsConfig cfg)
         {
-            List<object> list = new List<object>();
+            Dictionary<string, FolderRow> map = new Dictionary<string, FolderRow>(StringComparer.OrdinalIgnoreCase);
             foreach (Store s in AllStores(cfg))
             {
-                list.AddRange(s.QueryFolders());
+                foreach (FolderRow one in s.QueryFolders())
+                {
+                    string key = (one.RootPath ?? "") + "\n" + (one.Folder ?? "");
+                    FolderRow cur;
+                    if (map.TryGetValue(key, out cur))
+                    {
+                        cur.Count = cur.Count + one.Count;
+                        cur.Ready = cur.Ready + one.Ready;
+                        cur.Black = cur.Black + one.Black;
+                    }
+                    else
+                    {
+                        map[key] = new FolderRow
+                        {
+                            RootPath = one.RootPath,
+                            Folder = one.Folder,
+                            Count = one.Count,
+                            Ready = one.Ready,
+                            Black = one.Black
+                        };
+                    }
+                }
             }
+            List<FolderRow> list = new List<FolderRow>(map.Values);
+            list.Sort(delegate (FolderRow a, FolderRow b)
+            {
+                int c = string.Compare(a.RootPath ?? "", b.RootPath ?? "", StringComparison.OrdinalIgnoreCase);
+                if (c != 0)
+                {
+                    return c;
+                }
+                return string.Compare(a.Folder ?? "", b.Folder ?? "", StringComparison.OrdinalIgnoreCase);
+            });
             return list;
         }
 
