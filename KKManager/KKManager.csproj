@@ -10,7 +10,7 @@
     <AssemblyName>KMR</AssemblyName>
     <RootNamespace>KKManager</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>0.21.4</Version>
+    <Version>0.21.5</Version>
   </PropertyGroup>
 
   <!-- 发布版专用编译开关（发布规范 → WorkSpace:KKManager/revealer/RELEASE.md §三）：

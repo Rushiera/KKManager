@@ -38,8 +38,13 @@ namespace KKManager.Data
                 dir = ".";
             }
             _dir = dir;
-            // 主库不存在（首次运行 / 干净数据目录）——从内嵌模板释放（零 DDL）；释放失败回落常规建表
-            bool coreReady = !File.Exists(_corePath) && Store.ReleaseTemplate(_corePath);
+            // 主库不存在（首次运行 / 干净数据目录）——从内嵌模板释放（零 DDL）；释放失败回落常规建表；
+            // 文件已在 = 结构已就绪（版本校验与增量补列在 Store 构造里兜底）——不再每次打开都重跑建表事务
+            bool coreReady = true;
+            if (!File.Exists(_corePath))
+            {
+                coreReady = Store.ReleaseTemplate(_corePath);
+            }
             Core = new Store(_corePath, null, coreReady);
             LoadLibMap();
         }
@@ -148,7 +153,7 @@ namespace KKManager.Data
             return OpenLibStore(lib);
         }
 
-        /// <summary>打开一个库文件 Store（缓存复用）——文件不存在先从内嵌模板释放（零 DDL），释放失败回落常规建表；库文件须 ATTACH 主库。</summary>
+        /// <summary>打开一个库文件 Store（缓存复用）——缺文件先从内嵌模板释放（零 DDL），释放失败回落常规建表；文件已在则按「结构已就绪」打开（版本校验与增量补列兜底），不再重跑建表事务；库文件须 ATTACH 主库。</summary>
         private Store OpenLibStore(int lib)
         {
             Store s = null;
@@ -157,7 +162,15 @@ namespace KKManager.Data
                 return s;
             }
             string path = Path.Combine(_dir, RootsRules.LibDbFileName(lib));
-            bool ready = !File.Exists(path) && Store.ReleaseTemplate(path);
+            // 文件不存在先从内嵌模板释放（零 DDL）；释放失败回落常规建表；
+            // 文件已在 = 结构已就绪（Store 构造里的 user_version 校验与增量补列兜底）——
+            // 🔴 不再让已存在的库走完整建表：EnsureSchema 每次都会写 user_version（一个写事务 + 提交），
+            // 96 个分片库逐个提交在慢卷上 = 秒级到分钟级卡顿（实测 13 片冷开 4.4 s / 96 片 101 s）。
+            bool ready = true;
+            if (!File.Exists(path))
+            {
+                ready = Store.ReleaseTemplate(path);
+            }
             s = new Store(path, _corePath, ready);
             _libStores[lib] = s;
             _libByDb[s.DbPath] = lib;
