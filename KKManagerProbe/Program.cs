@@ -174,6 +174,14 @@ namespace KKManager.Probe
                     return SetShards(args[1], int.Parse(args[2]));
                 case "jmode":
                     return JMode(args[1], args[2]);
+                case "scanbench":
+                    return ScanBench(args);
+                case "warmup":
+                    return WarmUpCommand(args[1]);
+                case "wbench":
+                    return WBench(args[1], args.Length > 2 ? int.Parse(args[2]) : 0);
+                case "warmscan":
+                    return WarmScan(args[1]);
                 default:
                     Console.Error.WriteLine("未知命令: " + args[0]);
                     return 2;
@@ -4777,6 +4785,225 @@ namespace KKManager.Probe
             Console.WriteLine("H 关闭（含 WAL checkpoint）：" + w.ElapsedMilliseconds.ToString() + " ms");
             return 0;
         }
+        /// <summary>扫描分段计时——按真实扫描链跑一轮（Scanner.ScanAll），以「步骤 N/M」出声为界逐步记时，
+        /// 汇总各步用时与占比（附扫描计数），用于定位扫描耗时的突破口。force = 全量重扫（所有步骤都跑）。
+        /// 用法：scanbench &lt;db&gt; [force] [main|extra|all]</summary>
+        private static int ScanBench(string[] args)
+        {
+            string dbPath = args[1];
+            bool force = false;
+            bool verbose = false;
+            string scopeText = "main";
+            string stepsText = null;
+            string workersText = null;
+            for (int i = 2; i < args.Length; i = i + 1)
+            {
+                string a = args[i];
+                if (a == "force")
+                {
+                    force = true;
+                }
+                else if (a == "verbose")
+                {
+                    verbose = true;
+                }
+                else if (a.StartsWith("scope=", StringComparison.Ordinal))
+                {
+                    scopeText = a.Substring(6);
+                }
+                else if (a.StartsWith("steps=", StringComparison.Ordinal))
+                {
+                    stepsText = a.Substring(6);
+                }
+                else if (a.StartsWith("workers=", StringComparison.Ordinal))
+                {
+                    workersText = a.Substring(8);
+                }
+            }
+            ScanScope scope = ScanScope.Preset;
+            if (string.Equals(scopeText, "extra", StringComparison.OrdinalIgnoreCase))
+            {
+                scope = ScanScope.Extra;
+            }
+            else if (string.Equals(scopeText, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                scope = ScanScope.All;
+            }
+            System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                if (workersText != null)
+                {
+                    hub.Core.SetSetting("scan_workers", workersText);
+                    Console.WriteLine("并行 worker 数已设为 " + workersText);
+                }
+                ScanPlan plan;
+                if (stepsText == null)
+                {
+                    plan = ScanPlanCatalog.Load(hub.Core.GetSetting(ScanPlanCatalog.OrderKey), hub.Core.GetSetting(ScanPlanCatalog.OnKey));
+                }
+                else
+                {
+                    // 步骤集由命令行给定——只在本轮内存里生效，不落 setting（不动使用者的扫描配置）
+                    plan = ScanPlanCatalog.Load(stepsText, stepsText);
+                }
+                Console.WriteLine("库: " + hub.CorePath);
+                Console.WriteLine("范围: " + scope.ToString() + " · 全量重扫: " + (force ? "是" : "否"));
+                Console.WriteLine("步骤(卡片): " + string.Join(" , ", plan.Enabled(false)));
+                Console.WriteLine("步骤(mod): " + string.Join(" , ", plan.Enabled(true)));
+                List<string> names = new List<string>();
+                List<long> times = new List<long>();
+                string cur = null;
+                long last = 0;
+                Action<string> log = delegate (string m)
+                {
+                    if (m != null && m.StartsWith("步骤 ", StringComparison.Ordinal))
+                    {
+                        long now = w.ElapsedMilliseconds;
+                        if (cur != null)
+                        {
+                            names.Add(cur);
+                            times.Add(now - last);
+                        }
+                        cur = m;
+                        last = now;
+                        Console.WriteLine("[" + (now / 1000.0).ToString("F1") + "s] " + m);
+                        return;
+                    }
+                    if (verbose)
+                    {
+                        Console.WriteLine("[" + (w.ElapsedMilliseconds / 1000.0).ToString("F1") + "s] " + m);
+                    }
+                };
+                ScanResult r = Scanner.ScanAll(hub, cfg, null, scope, force, 256, 82, plan, log);
+                long end = w.ElapsedMilliseconds;
+                if (cur != null)
+                {
+                    names.Add(cur);
+                    times.Add(end - last);
+                }
+                Console.WriteLine();
+                Console.WriteLine("== 分段计时（总 " + (end / 1000.0).ToString("F1") + " 秒）==");
+                for (int i = 0; i < names.Count; i = i + 1)
+                {
+                    long ms = times[i];
+                    double pct = 0;
+                    if (end > 0)
+                    {
+                        pct = ms * 100.0 / end;
+                    }
+                    Console.WriteLine("  " + ms.ToString().PadLeft(8) + " ms  " + pct.ToString("F1").PadLeft(5) + "%  " + names[i]);
+                }
+                Console.WriteLine("  枚举 " + r.Seen + "  新增/更新 " + r.Added + "  跳过 " + r.Skipped + "  非卡 " + r.NonCard
+                    + "  非 mod " + r.NonMod + "  失败 " + r.Failed + "  清理 " + r.Removed);
+                Console.WriteLine("  角色名 新读 " + r.NamesRead + " 补读 " + r.NamesFilled + " · 卡类型补正 " + r.TypesFixed
+                    + " · timeline " + r.TimelineRead);
+                Console.WriteLine("  缩略图字节 " + r.ThumbBytes + " · 引用条目 " + r.RefEntries);
+                if (r.PluginDlls > 0)
+                {
+                    Console.WriteLine("  插件库 " + r.PluginDlls + " dll · 插件 " + r.Plugins + " 项 · cfg " + r.PluginConfigs + " 个");
+                }
+                foreach (string e in r.Errors)
+                {
+                    Console.WriteLine("  ! " + e);
+                }
+            }
+            Console.WriteLine("  含关闭（WAL checkpoint / 删边车）总用时 " + w.ElapsedMilliseconds + " ms");
+            return 0;
+        }
+
+        /// <summary>预热对照——跑一遍预热（与面板 /api/warmup 同一实现：PlanFiles + Start），等它结束再返回。
+        /// 用法：warmup &lt;db&gt;</summary>
+        private static int WarmUpCommand(string dbPath)
+        {
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                List<int> libs = WarmUp.PlanLibs(hub, cfg);
+                Console.WriteLine("预热清单：" + libs.Count + " 个库文件");
+                System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+                bool started = WarmUp.Start(hub.CorePath, libs, null);
+                Console.WriteLine("启动：" + (started ? "是" : "否（已在跑 / 已跑过 / 清单为空）"));
+                while (started && WarmUp.LastMs == 0 && w.ElapsedMilliseconds < 600000)
+                {
+                    System.Threading.Thread.Sleep(200);
+                }
+                Console.WriteLine("预热用时 " + WarmUp.LastMs + " ms · 常驻连接 " + WarmUp.KeptCount + " 个");
+            }
+            return 0;
+        }
+
+        /// <summary>预热分步计时——对每个分片库拆开测「打开 / 写入 / 关闭」三段（定位预热代价落在哪一段）。
+        /// 用法：wbench &lt;db&gt; [片数上限]</summary>
+        private static int WBench(string dbPath, int limit)
+        {
+            using (StoreHub hub = new StoreHub(dbPath))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                List<string> files = new List<string>();
+                string dir = Path.GetDirectoryName(hub.CorePath);
+                foreach (int lib in WarmUp.PlanLibs(hub, cfg))
+                {
+                    files.Add(Path.Combine(dir, RootsRules.LibDbFileName(lib)));
+                }
+                if (limit > 0 && limit < files.Count)
+                {
+                    files = files.GetRange(0, limit);
+                }
+                Console.WriteLine("分片库 " + files.Count + " 个 · 主库 " + hub.CorePath);
+                long openSum = 0;
+                long writeSum = 0;
+                long closeSum = 0;
+                int i = 0;
+                foreach (string path in files)
+                {
+                    i = i + 1;
+                    System.Diagnostics.Stopwatch w = System.Diagnostics.Stopwatch.StartNew();
+                    bool ready = true;
+                    if (!File.Exists(path))
+                    {
+                        ready = Store.ReleaseTemplate(path);
+                    }
+                    Store one = new Store(path, hub.CorePath, ready);
+                    long openMs = w.ElapsedMilliseconds;
+                    w.Restart();
+                    one.WarmShard();
+                    long writeMs = w.ElapsedMilliseconds;
+                    w.Restart();
+                    one.Dispose();
+                    long closeMs = w.ElapsedMilliseconds;
+                    openSum = openSum + openMs;
+                    writeSum = writeSum + writeMs;
+                    closeSum = closeSum + closeMs;
+                    if (i <= 5 || openMs + writeMs + closeMs > 200)
+                    {
+                        Console.WriteLine("  " + Path.GetFileName(path) + " 打开 " + openMs + " · 写 " + writeMs + " · 关 " + closeMs);
+                    }
+                }
+                Console.WriteLine("合计：打开 " + openSum + " ms · 写 " + writeSum + " ms · 关 " + closeSum + " ms");
+            }
+            return 0;
+        }
+
+        /// <summary>预热 + 同进程扫描——预热的价值只能在「常驻连接还在」的同进程内兑现（探针验证用）。用法：warmscan &lt;db&gt;</summary>
+        private static int WarmScan(string dbPath)
+        {
+            int rc = WarmUpCommand(dbPath);
+            if (rc != 0)
+            {
+                return rc;
+            }
+            Console.WriteLine("--- 同进程接着扫描（常驻连接 " + WarmUp.KeptCount + " 个仍在）---");
+            return ScanBench(new string[] { "scanbench", dbPath });
+        }
+
         /// <summary>诊断用：在给定连接上执行一条语句。</summary>
         private static void DiagExec(Microsoft.Data.Sqlite.SqliteConnection conn, string sql)
         {
