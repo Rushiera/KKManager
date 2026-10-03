@@ -4127,6 +4127,40 @@ namespace KKManager.Data
             Exec("PRAGMA wal_checkpoint(TRUNCATE)");
         }
 
+        /// <summary>预热哨兵行的路径——不是合法的 Windows 文件名（含尖括号），不可能与真实文件相撞。</summary>
+        public const string WarmSentinelPath = "<warmup>";
+
+        /// <summary>
+        /// 预热一片分片库——用一次真实写入事务（插一行哨兵再删）把「新建库文件的首次写入」代价先付掉。
+        /// 实测（D 卷 exFAT）：新建分片库的首次写入 ≈ 0.5–0.7 s/片，与文件数、并发度无关；付过一次后该文件不再付。
+        /// 哨兵行与删除在同一事务内完成——提交后不留痕，页已写过（文件已扩展）即达到预热目的。
+        /// </summary>
+        public void WarmShard()
+        {
+            Begin();
+            try
+            {
+                using (SqliteCommand cmd = NewCommand("INSERT OR REPLACE INTO scan_state(file_path,step,size,mtime,done_at) VALUES($p,$s,0,'',$d)"))
+                {
+                    cmd.Parameters.AddWithValue("$p", WarmSentinelPath);
+                    cmd.Parameters.AddWithValue("$s", "warmup");
+                    cmd.Parameters.AddWithValue("$d", Now());
+                    cmd.ExecuteNonQuery();
+                }
+                using (SqliteCommand cmd = NewCommand("DELETE FROM scan_state WHERE file_path=$p"))
+                {
+                    cmd.Parameters.AddWithValue("$p", WarmSentinelPath);
+                    cmd.ExecuteNonQuery();
+                }
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+        }
+
         /// <summary>把内嵌的空结构模板库写到目标路径（预建库文件的复制源）——已存在返回 false 不覆盖；资源缺失 / 写失败出声并返回 false（调用方回落常规建表，不静默）。</summary>
         public static bool ReleaseTemplate(string path)
         {

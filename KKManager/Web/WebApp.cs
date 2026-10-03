@@ -767,6 +767,56 @@ namespace KKManager.Web
             return cfg;
         }
 
+        /// <summary>扫描任务是否在跑（预热让路判据——扫描进行中不预热、不释放扫描 hub）。</summary>
+        private static bool ScanBusy()
+        {
+            lock (ScanLock)
+            {
+                return _scan.Running;
+            }
+        }
+
+        /// <summary>
+        /// 扫描专用 StoreHub（进程级常驻）——扫描在后台线程跑，用自己的连接集，与请求面的 _hub 隔离（SqliteConnection 非线程安全）。
+        /// 扫描结束**不关闭**：关闭要对每个分片库逐个 WAL checkpoint + 删边车，D 卷上 5–40 s，且关闭期间面板仍显示「扫描中」；
+        /// 常驻后下次扫描直接复用（连接与文件都是热的）。只有会删库文件的操作才释放它——占用中的文件删不掉。
+        /// </summary>
+        private static StoreHub _scanHub;
+
+        /// <summary>扫描 hub 的建 / 释放锁。</summary>
+        private static readonly object ScanHubLock = new object();
+
+        /// <summary>取扫描专用 hub（懒建、常驻；同一时刻只有一个扫描任务，故可安全复用）。</summary>
+        private static StoreHub ScanHub()
+        {
+            lock (ScanHubLock)
+            {
+                if (_scanHub == null)
+                {
+                    _scanHub = new StoreHub(_dbPath);
+                }
+                return _scanHub;
+            }
+        }
+
+        /// <summary>释放扫描专用 hub（库文件将被删除前调用）——扫描进行中不动（那会拆掉在跑的扫描），由调用方按失败出声处理。</summary>
+        private static void ReleaseScanHub()
+        {
+            if (ScanBusy())
+            {
+                Console.WriteLine("[库数据] 扫描进行中——扫描 hub 暂不释放（要删的库文件可能被占用）");
+                return;
+            }
+            lock (ScanHubLock)
+            {
+                if (_scanHub != null)
+                {
+                    _scanHub.Dispose();
+                    _scanHub = null;
+                }
+            }
+        }
+
         /// <summary>保存配置时消费「原行改地址」标记——同一行换了地址 = 用新地址完全替换原来的：旧库数据彻底删除（含待办）。</summary>
         private static void ApplyReplacedRoots(RootsConfig cfg)
         {
@@ -797,6 +847,8 @@ namespace KKManager.Web
                 {
                     continue;
                 }
+                ReleaseScanHub();
+                WarmUp.ReleaseLibs(_hub, from);
                 if (_hub.DropLibByPath(from))
                 {
                     _hub.Core.CloseTodoByKey("offline", from.ToLowerInvariant());
@@ -874,6 +926,8 @@ namespace KKManager.Web
                 return "预置条目不可删除数据：" + hit.path;
             }
             string key = hit.path.Trim().ToLowerInvariant();
+            ReleaseScanHub();
+            WarmUp.ReleaseLibs(_hub, hit.path);
             _hub.DropLib(hit, isMods);
             list.Remove(hit);
             _hub.Core.SaveRoots(cfg);
@@ -1119,6 +1173,20 @@ namespace KKManager.Web
                     finishedAt = s.FinishedAt,
                     errors = s.Errors
                 });
+            });
+
+            // 静默预热——前端页面加载完成后调一次：把「新建分片库的首次写入」代价（实测 ≈ 0.6 s/片）挪到后台空闲时段。
+            // 本请求只算文件清单（走共享连接，快）；预热在后台另开自己的连接，不占请求串行门、不碰共享连接、无界面提示。
+            // 扫描进行中不启动（扫描按现有方式跑）；同一进程只跑一次；让路 / 失败都只落服务端日志。
+            app.MapPost("/api/warmup", () =>
+            {
+                if (ScanBusy())
+                {
+                    return Results.Json(new { ok = true, started = false, reason = "scan-running" });
+                }
+                List<int> libs = WarmUp.PlanLibs(_hub, LoadConfig());
+                bool started = WarmUp.Start(_hub.CorePath, libs, ScanBusy);
+                return Results.Json(new { ok = true, started = started, files = libs.Count });
             });
 
             // 扫描计划（步骤定义 + 当前顺序与勾选）——面板「扫描配置」窗用
@@ -3555,7 +3623,10 @@ namespace KKManager.Web
             {
                 try
                 {
-                    using (StoreHub hub = new StoreHub(_dbPath))
+                    // 扫描用**进程级常驻** hub（ScanHub）——扫描结束不关闭：关闭要对每个分片库逐个 WAL checkpoint +
+                    // 删边车（D 卷上 5–40 s），且这段时间面板仍显示「扫描中」；常驻后下次扫描直接复用热连接与热文件。
+                    // 与请求面的 _hub 隔离（后台线程不与请求面共用连接）；只有会删库文件的操作才释放它。
+                    StoreHub hub = ScanHub();
                     {
                         RootsConfig cfg = hub.Core.LoadRoots();
                         RootsRules.Normalize(cfg);

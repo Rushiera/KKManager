@@ -4524,6 +4524,12 @@ $('ovSortPlan').querySelector('.body').addEventListener('scroll', e => {
   pollScan();
   restoreMove();               /* 后台搬运任务还在跑就把进度窗拉回来 */
 })();
+
+/* 静默预热——页面加载完成后让服务端在后台把「新建分片库的首次写入」代价先付掉：
+   无提示、失败静默、不占请求门、扫描进行中自动让路（扫描照现有方式跑）。 */
+window.addEventListener('load', () => {
+  fetch('/api/warmup', {method:'POST'}).catch(() => {});
+});
 </script>
 </body>
 </html>
