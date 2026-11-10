@@ -106,6 +106,8 @@ namespace KKManager
                     return OldOpCommand(db, rest, "promote");
                 case "sort":
                     return SortCommand(db, rest);
+                case "card-sort":
+                    return CardSortCommand(rest);
                 case "plugin-info":
                     return PluginInfoCommand(rest);
                 case "plugin-config":
@@ -178,6 +180,11 @@ namespace KKManager
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
             Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
+            Console.WriteLine("  card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]  扫卡片 / mod / 其它文件出整理计划（卡片按卡类型归位、zipmod 归 mod、其余保源内路径；重名自动跳过或加 [dupN]）");
+            Console.WriteLine("  card-sort show [--out <计划.tsv>]     读整理计划并核对实况（逐条看源在不在、目标在不在）");
+            Console.WriteLine("  card-sort exec [--out <计划.tsv>] --yes  执行整理计划（同盘改名搬运；逐条落状态，中断安全）");
+            Console.WriteLine("  card-sort rules [--write <规则.tsv>]  看 / 导出分类规则模板（内置规则 + 外部规则文件合并后的全量）");
+            Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从既有索引学「角色名 → 作品」规则并写进规则文件（整理过的索引成为下一轮的判据）");
             Console.WriteLine("  plugins [--unnoted]                    列出插件库里的插件（与面板「插件清单」同源；含中文说明 / 配置节数；--unnoted 只列未收录说明的项）");
             Console.WriteLine("  plugin-config [GUID|插件名]           插件配置文件——无参数列全部 cfg；给键则列出该插件的分节 / 配置项 / 作者注释");
             Console.WriteLine("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）");
@@ -1492,6 +1499,207 @@ namespace KKManager
 
                 Console.Error.WriteLine("未知子命令: " + sub + "（可用：plan / show / exec）");
                 return 2;
+            }
+        }
+
+        /// <summary>卡片整理命令行——plan 扫源目录出计划 / show 核对 / exec 执行 / rules 导出规则模板。</summary>
+        private static int CardSortCommand(List<string> rest)
+        {
+            string sub = rest.Count > 0 ? rest[0] : "show";
+            if (rest.Count > 0)
+            {
+                rest.RemoveAt(0);
+            }
+            string outPath = Take(rest, "--out") ?? Path.Combine(AppContext.BaseDirectory, "data", "card-plan.tsv");
+            string rulesPath = Take(rest, "--rules") ?? Path.Combine(AppContext.BaseDirectory, "data", "card-rules.tsv");
+            string dest = Take(rest, "--dest");
+            bool yes = rest.Remove("--yes");
+
+            if (sub == "rules")
+            {
+                string write = Take(rest, "--write");
+                List<CardRule> merged = CardOrganizer.MergeRules(CardOrganizer.BuiltinRules(), CardOrganizer.LoadRules(rulesPath, m => Console.WriteLine(m)));
+                if (write != null)
+                {
+                    CardOrganizer.WriteRules(write, merged);
+                    Console.WriteLine("已写出规则模板：" + write + "（" + merged.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                    return 0;
+                }
+                Console.WriteLine("规则文件：" + rulesPath + (File.Exists(rulesPath) ? "" : "（不存在——只用内置规则）"));
+                Console.WriteLine("合并后共 " + merged.Count.ToString(CultureInfo.InvariantCulture) + " 条：");
+                foreach (CardRule r in merged)
+                {
+                    string kind = r.Kind == CardRuleKind.Dir ? "dir"
+                        : (r.Kind == CardRuleKind.Author ? "author"
+                        : (r.Kind == CardRuleKind.Chara ? "chara" : "kw"));
+                    Console.WriteLine("  " + kind + "\t" + r.Match + "\t" + r.Value);
+                }
+                return 0;
+            }
+
+            if (sub == "learn")
+            {
+                string from = Take(rest, "--from");
+                string write = Take(rest, "--write") ?? rulesPath;
+                if (string.IsNullOrEmpty(from))
+                {
+                    Console.Error.WriteLine("用法: card-sort learn --from <索引.tsv> [--write <规则.tsv>]");
+                    return 2;
+                }
+                List<CardRule> learned = CardOrganizer.LearnRules(from, m => Console.WriteLine(m));
+                if (learned.Count == 0)
+                {
+                    Console.WriteLine("没有学到规则（索引里没有可用的「角色名 + 作品」行）");
+                    return 0;
+                }
+                CardOrganizer.AppendRules(write, learned);
+                Console.WriteLine("已写入规则文件：" + write + "（学 " + learned.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                return 0;
+            }
+
+            if (sub == "plan")
+            {
+                List<string> srcs = new List<string>(rest);
+                if (srcs.Count == 0)
+                {
+                    Console.Error.WriteLine("用法: card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]");
+                    return 2;
+                }
+                if (string.IsNullOrEmpty(dest))
+                {
+                    Console.Error.WriteLine("缺少 --dest <目标根>（归位到哪个整理库根）");
+                    return 2;
+                }
+                List<CardRule> rules = CardOrganizer.MergeRules(CardOrganizer.BuiltinRules(), CardOrganizer.LoadRules(rulesPath, m => Console.WriteLine(m)));
+                CardPlan plan = CardOrganizer.BuildPlan(srcs, dest, rules, m => Console.WriteLine(m));
+                CardOrganizer.WritePlan(outPath, plan);
+                PrintCardPlan(plan);
+                Console.WriteLine();
+                Console.WriteLine("计划已写出：" + outPath);
+                Console.WriteLine("核对后执行：card-sort exec --out \"" + outPath + "\" --yes");
+                return 0;
+            }
+
+            CardPlan loaded = CardOrganizer.ReadPlan(outPath);
+            if (loaded.Items.Count == 0)
+            {
+                Console.WriteLine("还没有整理计划——先跑 card-sort plan");
+                return 0;
+            }
+
+            if (sub == "show")
+            {
+                int srcGone = 0;
+                int destThere = 0;
+                foreach (CardPlanItem it in loaded.Items)
+                {
+                    if (!it.Move || it.State != CardOrganizer.StatePending)
+                    {
+                        continue;
+                    }
+                    if (!File.Exists(it.SrcPath))
+                    {
+                        srcGone = srcGone + 1;
+                    }
+                    if (File.Exists(it.DestPath))
+                    {
+                        destThere = destThere + 1;
+                    }
+                }
+                PrintCardPlan(loaded);
+                Console.WriteLine();
+                Console.WriteLine("核对：源已不在 " + srcGone.ToString(CultureInfo.InvariantCulture) + " 条 · 目标已存在 " + destThere.ToString(CultureInfo.InvariantCulture) + " 条");
+                return 0;
+            }
+
+            if (sub == "exec")
+            {
+                if (!yes)
+                {
+                    Console.Error.WriteLine("执行会移动磁盘文件——请加 --yes 确认（并确保游戏 / 面板已关闭）");
+                    return 2;
+                }
+                CardOrganizer.Execute(loaded, m => Console.WriteLine(m));
+                CardOrganizer.WritePlan(outPath, loaded);
+                PrintCardPlan(loaded);
+                Console.WriteLine();
+                Console.WriteLine("状态已回写：" + outPath);
+                return loaded.Count(CardOrganizer.StateFailed) > 0 ? 1 : 0;
+            }
+
+            Console.Error.WriteLine("未知子命令: " + sub + "（可用：plan / show / exec / rules）");
+            return 2;
+        }
+
+        /// <summary>打印整理计划摘要（类型 / 状态 / 作品分布 + 待搬样例）。</summary>
+        private static void PrintCardPlan(CardPlan plan)
+        {
+            SortedDictionary<string, int> kinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
+            SortedDictionary<string, int> works = new SortedDictionary<string, int>(StringComparer.Ordinal);
+            SortedDictionary<string, int> states = new SortedDictionary<string, int>(StringComparer.Ordinal);
+            long bytes = 0;
+            foreach (CardPlanItem it in plan.Items)
+            {
+                string k = it.Kind ?? "";
+                kinds[k] = (kinds.ContainsKey(k) ? kinds[k] : 0) + 1;
+                string w = string.IsNullOrEmpty(it.Work) ? "（无）" : it.Work;
+                works[w] = (works.ContainsKey(w) ? works[w] : 0) + 1;
+                string s = it.State ?? "";
+                states[s] = (states.ContainsKey(s) ? states[s] : 0) + 1;
+                if (it.Move)
+                {
+                    bytes = bytes + it.Size;
+                }
+            }
+            Console.WriteLine("条目 " + plan.Items.Count.ToString(CultureInfo.InvariantCulture)
+                + " · 待搬字节 " + (bytes / 1024.0 / 1024.0).ToString("F1", CultureInfo.InvariantCulture) + " MB");
+            StringBuilder kindLine = new StringBuilder();
+            foreach (KeyValuePair<string, int> kv in kinds)
+            {
+                if (kindLine.Length > 0)
+                {
+                    kindLine.Append(" · ");
+                }
+                kindLine.Append(kv.Key + " " + kv.Value.ToString(CultureInfo.InvariantCulture));
+            }
+            Console.WriteLine("类型：" + kindLine.ToString());
+            StringBuilder stateLine = new StringBuilder();
+            foreach (KeyValuePair<string, int> kv in states)
+            {
+                if (stateLine.Length > 0)
+                {
+                    stateLine.Append(" · ");
+                }
+                stateLine.Append(kv.Key + " " + kv.Value.ToString(CultureInfo.InvariantCulture));
+            }
+            Console.WriteLine("状态：" + stateLine.ToString());
+            List<KeyValuePair<string, int>> workList = new List<KeyValuePair<string, int>>(works);
+            workList.Sort((a, b) => b.Value.CompareTo(a.Value));
+            int shown = 0;
+            StringBuilder workLine = new StringBuilder();
+            foreach (KeyValuePair<string, int> kv in workList)
+            {
+                if (shown >= 24)
+                {
+                    break;
+                }
+                if (workLine.Length > 0)
+                {
+                    workLine.Append(" · ");
+                }
+                workLine.Append(kv.Key + " " + kv.Value.ToString(CultureInfo.InvariantCulture));
+                shown = shown + 1;
+            }
+            Console.WriteLine("作品（前 " + shown.ToString(CultureInfo.InvariantCulture) + " / 共 " + workList.Count.ToString(CultureInfo.InvariantCulture) + "）：" + workLine.ToString());
+            int samples = 0;
+            foreach (CardPlanItem it in plan.Items)
+            {
+                if (!it.Move || it.State != CardOrganizer.StatePending || samples >= 12)
+                {
+                    continue;
+                }
+                Console.WriteLine("  [待搬] " + it.Kind + " | " + (string.IsNullOrEmpty(it.Work) ? "?" : it.Work) + " | " + it.SrcRel);
+                samples = samples + 1;
             }
         }
 
