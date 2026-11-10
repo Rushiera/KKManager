@@ -17,3 +17,6 @@ card_archive/
 .vs/
 *.user
 CatTemp/
+
+# kkc 收件箱与整理产物（卡片 / mod / 整合包数据，21 GB——数据不入仓，2026-11-11）
+revealer/kkc/
