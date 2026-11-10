@@ -406,6 +406,291 @@ namespace KKManager.Core
             WriteRules(path, merged);
         }
 
+        /// <summary>
+        /// 生成「重排计划」——把已归位的卡片按某维度分子目录（work / author / chara），或恢复扁平（flat）。
+        /// 元数据读自索引 TSV（现路径 / 作品 / 作者 / 角色名），只动卡片（类型列 = 卡），不动 mod 与其它。
+        /// </summary>
+        public static CardPlan BuildLayoutPlan(string root, string indexTsv, string by, Action<string> log)
+        {
+            var plan = new CardPlan
+            {
+                DestRoot = root,
+                CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+            };
+            if (string.IsNullOrEmpty(indexTsv) || !File.Exists(indexTsv))
+            {
+                if (log != null)
+                {
+                    log("索引文件不存在：" + indexTsv);
+                }
+                return plan;
+            }
+            string[] lines = File.ReadAllLines(indexTsv, Encoding.UTF8);
+            if (lines.Length < 2)
+            {
+                return plan;
+            }
+            string[] head = lines[0].Split('\t');
+            int colDest = -1;
+            int colKind = -1;
+            int colCtype = -1;
+            int colName = -1;
+            int colWork = -1;
+            int colAuthor = -1;
+            int colSrc = -1;
+            int colInner = -1;
+            int colSize = -1;
+            for (int i = 0; i < head.Length; i++)
+            {
+                string h = head[i].Trim();
+                if (h == "现路径")
+                {
+                    colDest = i;
+                }
+                else if (h == "类型")
+                {
+                    colKind = i;
+                }
+                else if (h == "卡类型")
+                {
+                    colCtype = i;
+                }
+                else if (h == "角色名")
+                {
+                    colName = i;
+                }
+                else if (h == "作品")
+                {
+                    colWork = i;
+                }
+                else if (h == "作者")
+                {
+                    colAuthor = i;
+                }
+                else if (h == "来源")
+                {
+                    colSrc = i;
+                }
+                else if (h == "包内路径")
+                {
+                    colInner = i;
+                }
+                else if (h == "大小")
+                {
+                    colSize = i;
+                }
+            }
+            if (colDest < 0 || colKind < 0)
+            {
+                if (log != null)
+                {
+                    log("索引表头缺少「现路径」或「类型」列：" + indexTsv);
+                }
+                return plan;
+            }
+            int maxCol = head.Length - 1;
+            for (int i = 1; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                string[] c = line.Split('\t');
+                if (c.Length > maxCol)
+                {
+                    maxCol = c.Length - 1;
+                }
+                if (c.Length <= colDest)
+                {
+                    continue;
+                }
+                if (GetCol(c, colKind) != "卡")
+                {
+                    continue;
+                }
+                string rel = GetCol(c, colDest);
+                if (rel.Length == 0 || rel.StartsWith("（", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string norm = rel.Replace('\\', '/');
+                string[] parts = norm.Split('/');
+                if (parts.Length < 3)
+                {
+                    continue;
+                }
+                string typeDir = parts[0] + "/" + parts[1];
+                string fileName = parts[parts.Length - 1];
+                string dim = "";
+                if (by == "work")
+                {
+                    dim = SafeDirName(GetCol(c, colWork));
+                }
+                else if (by == "author")
+                {
+                    dim = SafeDirName(GetCol(c, colAuthor));
+                }
+                else if (by == "chara")
+                {
+                    dim = SafeDirName(GetCol(c, colName));
+                }
+                string newRel = dim.Length > 0 ? (typeDir + "/" + dim + "/" + fileName) : (typeDir + "/" + fileName);
+                string srcAbs = Path.Combine(root, norm.Replace('/', Path.DirectorySeparatorChar));
+                string dstAbs = Path.Combine(root, newRel.Replace('/', Path.DirectorySeparatorChar));
+                long size = 0;
+                string sizeText = GetCol(c, colSize);
+                if (sizeText.Length > 0)
+                {
+                    long.TryParse(sizeText, NumberStyles.Integer, CultureInfo.InvariantCulture, out size);
+                }
+                var item = new CardPlanItem
+                {
+                    SrcPath = srcAbs,
+                    Kind = "卡",
+                    CardType = GetCol(c, colCtype),
+                    CharaName = GetCol(c, colName),
+                    Work = GetCol(c, colWork),
+                    Author = GetCol(c, colAuthor),
+                    SrcRoot = GetCol(c, colSrc),
+                    SrcRel = GetCol(c, colInner).Length > 0 ? GetCol(c, colInner) : norm,
+                    DestPath = dstAbs,
+                    Size = size,
+                    State = StatePending
+                };
+                if (string.Equals(srcAbs, dstAbs, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Note = "已在目标位置";
+                    item.Move = false;
+                    item.State = StateSkipped;
+                }
+                else if (!File.Exists(srcAbs))
+                {
+                    item.Note = "源已不在";
+                    item.Move = false;
+                    item.State = StateSkipped;
+                }
+                else if (File.Exists(dstAbs))
+                {
+                    item.Note = "目标已存在同名文件";
+                    item.Move = false;
+                    item.State = StateConflict;
+                }
+                else
+                {
+                    item.Move = true;
+                }
+                plan.Items.Add(item);
+            }
+            return plan;
+        }
+
+        private static string GetCol(string[] cols, int index)
+        {
+            if (index < 0 || index >= cols.Length)
+            {
+                return "";
+            }
+            return (cols[index] ?? "").Trim();
+        }
+
+        /// <summary>目录名清洗——Windows 非法字符换下划线、去尾部点与空格、保留设备名加前缀、超长截断；空值给「未标注」。</summary>
+        public static string SafeDirName(string name)
+        {
+            string s = (name ?? "").Trim();
+            if (s.Length == 0)
+            {
+                return "未标注";
+            }
+            char[] bad = { '\\', '/', ':', '*', '?', '"', '<', '>', '|' };
+            StringBuilder sb = new StringBuilder(s.Length);
+            foreach (char ch in s)
+            {
+                bool hit = false;
+                foreach (char b in bad)
+                {
+                    if (ch == b)
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                sb.Append(hit ? '_' : ch);
+            }
+            string cleaned = sb.ToString().TrimEnd('.', ' ');
+            if (cleaned.Length == 0)
+            {
+                return "未标注";
+            }
+            string upper = cleaned.ToUpperInvariant();
+            if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL"
+                || upper == "COM1" || upper == "COM2" || upper == "COM3" || upper == "COM4"
+                || upper == "LPT1" || upper == "LPT2" || upper == "LPT3")
+            {
+                cleaned = "_" + cleaned;
+            }
+            if (cleaned.Length > 60)
+            {
+                cleaned = cleaned.Substring(0, 60).TrimEnd('.', ' ');
+            }
+            return cleaned;
+        }
+
+        /// <summary>删掉某根下的空目录（自下而上多轮；根本身不动）；返回清掉的目录数。</summary>
+        public static int PruneEmptyDirs(string root, Action<string> log = null)
+        {
+            int removed = 0;
+            int blocked = 0;
+            for (int pass = 0; pass < 8; pass++)
+            {
+                bool any = false;
+                List<string> dirs = new List<string>();
+                try
+                {
+                    dirs.AddRange(Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories));
+                }
+                catch (Exception ex)
+                {
+                    if (log != null)
+                    {
+                        log("枚举目录失败（" + root + "）：" + ex.Message);
+                    }
+                    break;
+                }
+                dirs.Sort((a, b) => b.Length.CompareTo(a.Length));
+                foreach (string dir in dirs)
+                {
+                    try
+                    {
+                        if (Directory.GetFileSystemEntries(dir).Length == 0)
+                        {
+                            Directory.Delete(dir);
+                            removed = removed + 1;
+                            any = true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        blocked = blocked + 1;
+                        if (log != null)
+                        {
+                            log("空目录删不掉（可能被占用）：" + dir + " —— " + ex.Message);
+                        }
+                    }
+                }
+                if (!any)
+                {
+                    break;
+                }
+            }
+            if (blocked > 0 && log != null)
+            {
+                log("空目录清理：删掉 " + removed.ToString(CultureInfo.InvariantCulture)
+                    + " 个 · 删不掉 " + blocked.ToString(CultureInfo.InvariantCulture) + " 次（已逐条出声）");
+            }
+            return removed;
+        }
+
         /// <summary>合并规则——同 Kind 同 Match 时外部覆盖内置（外部在后）。</summary>
         public static List<CardRule> MergeRules(List<CardRule> builtin, List<CardRule> external)
         {

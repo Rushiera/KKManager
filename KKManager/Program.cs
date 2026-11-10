@@ -185,6 +185,7 @@ namespace KKManager
             Console.WriteLine("  card-sort exec [--out <计划.tsv>] --yes  执行整理计划（同盘改名搬运；逐条落状态，中断安全）");
             Console.WriteLine("  card-sort rules [--write <规则.tsv>]  看 / 导出分类规则模板（内置规则 + 外部规则文件合并后的全量）");
             Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从既有索引学「角色名 → 作品」规则并写进规则文件（整理过的索引成为下一轮的判据）");
+            Console.WriteLine("  card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--yes]  按维度重排卡片目录（work / author / chara 分子目录，flat 恢复扁平；同盘改名，可反复切换）");
             Console.WriteLine("  plugins [--unnoted]                    列出插件库里的插件（与面板「插件清单」同源；含中文说明 / 配置节数；--unnoted 只列未收录说明的项）");
             Console.WriteLine("  plugin-config [GUID|插件名]           插件配置文件——无参数列全部 cfg；给键则列出该插件的分节 / 配置项 / 作者注释");
             Console.WriteLine("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）");
@@ -1535,6 +1536,45 @@ namespace KKManager
                     Console.WriteLine("  " + kind + "\t" + r.Match + "\t" + r.Value);
                 }
                 return 0;
+            }
+
+            if (sub == "layout")
+            {
+                string layoutRoot = Take(rest, "--root");
+                string layoutIndex = Take(rest, "--index");
+                string by = Take(rest, "--by") ?? "flat";
+                string layoutOut = outPath;
+                string defaultPlan = Path.Combine(AppContext.BaseDirectory, "data", "card-plan.tsv");
+                if (string.Equals(outPath, defaultPlan, StringComparison.OrdinalIgnoreCase))
+                {
+                    layoutOut = Path.Combine(AppContext.BaseDirectory, "data", "card-layout.tsv");
+                }
+                if (string.IsNullOrEmpty(layoutRoot) || string.IsNullOrEmpty(layoutIndex))
+                {
+                    Console.Error.WriteLine("用法: card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--out <计划.tsv>] [--yes]");
+                    return 2;
+                }
+                if (by != "work" && by != "author" && by != "chara" && by != "flat")
+                {
+                    Console.Error.WriteLine("--by 只认 work / author / chara / flat（当前：" + by + "）");
+                    return 2;
+                }
+                CardPlan layout = CardOrganizer.BuildLayoutPlan(layoutRoot, layoutIndex, by, m => Console.WriteLine(m));
+                CardOrganizer.WritePlan(layoutOut, layout);
+                PrintCardPlan(layout);
+                Console.WriteLine();
+                if (!yes)
+                {
+                    Console.WriteLine("计划已写出：" + layoutOut + "（按 " + by + " 重排）");
+                    Console.WriteLine("确认后执行：card-sort layout --root \"" + layoutRoot + "\" --index \"" + layoutIndex + "\" --by " + by + " --yes");
+                    return 0;
+                }
+                CardOrganizer.Execute(layout, m => Console.WriteLine(m));
+                int pruned = CardOrganizer.PruneEmptyDirs(layoutRoot, m => Console.WriteLine(m));
+                CardOrganizer.WritePlan(layoutOut, layout);
+                Console.WriteLine("空目录清理：" + pruned.ToString(CultureInfo.InvariantCulture) + " 个");
+                Console.WriteLine("状态已回写：" + layoutOut);
+                return layout.Count(CardOrganizer.StateFailed) > 0 ? 1 : 0;
             }
 
             if (sub == "learn")
