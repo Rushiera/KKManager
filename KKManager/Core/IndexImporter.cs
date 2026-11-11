@@ -48,6 +48,46 @@ namespace KKManager.Core
             return Path.Combine(rootPath ?? "", "整理", "index");
         }
 
+        /// <summary>提交批次行数——每 N 行提交一轮；行计数跨分片、跨文件统一累加。</summary>
+        private const int CommitRows = 2000;
+
+        /// <summary>在全部参与库上开写入事务（deferred——分片库连接都 ATTACH 主库，IMMEDIATE 会互撞主库锁）。</summary>
+        private static void BeginAll(List<Store> stores)
+        {
+            foreach (Store s in stores)
+            {
+                s.Begin();
+            }
+        }
+
+        /// <summary>提交全部参与库的写入事务——先提交已写入的行，下一批重新 Begin。</summary>
+        private static void CommitAll(List<Store> stores)
+        {
+            foreach (Store s in stores)
+            {
+                s.Commit();
+            }
+        }
+
+        /// <summary>回滚全部参与库——回滚本身失败逐库出声（不静默吞）；已提交的批次不回退，重跑按幂等修复。</summary>
+        private static void RollbackAll(List<Store> stores, Action<string> log)
+        {
+            foreach (Store s in stores)
+            {
+                try
+                {
+                    s.Rollback();
+                }
+                catch (Exception ex)
+                {
+                    if (log != null)
+                    {
+                        log("回滚失败：" + s.DbPath + " · " + ex.Message);
+                    }
+                }
+            }
+        }
+
         /// <summary>导入一个库根的索引——modRoot 是 mod 库根条目（tier / 只读 / 路径），cardRoot 是卡片库根条目（空 = 同 modRoot）；indexDir 空 = 默认目录。</summary>
         public static IndexImportResult Import(StoreHub hub, RootsConfig cfg, RootEntry modRoot, RootEntry cardRoot, string indexDir, Action<string> log)
         {
@@ -114,20 +154,52 @@ namespace KKManager.Core
                     (cardShards == null ? "" : " · 卡片 " + cardShards.Count + " 片"));
             }
 
-            foreach (string f in files)
+            // 写入事务：mod 库 + 全部卡片分片一起 Begin，每 CommitRows 行提交一轮。
+            // 逐条自动提交时每行都是一个独立事务（journal 写 + 锁往返），是本导入的主要开销源。
+            List<Store> txStores = new List<Store>();
+            txStores.Add(modStore);
+            if (cardShards != null)
             {
-                if (!File.Exists(f))
+                foreach (Store s in cardShards)
                 {
-                    if (log != null)
+                    if (!txStores.Contains(s))
                     {
-                        log("  ! 分片缺失，跳过：" + f);
+                        txStores.Add(s);
                     }
-                    continue;
                 }
-                foreach (Dictionary<string, string> row in ReadRows(f))
+            }
+            int pending = 0;
+            try
+            {
+                BeginAll(txStores);
+                foreach (string f in files)
                 {
-                    ImportRow(hub, modRoot, cardRoot, relBase, row, cardShards, modStore, result);
+                    if (!File.Exists(f))
+                    {
+                        if (log != null)
+                        {
+                            log("  ! 分片缺失，跳过：" + f);
+                        }
+                        continue;
+                    }
+                    foreach (Dictionary<string, string> row in ReadRows(f))
+                    {
+                        ImportRow(hub, modRoot, cardRoot, relBase, row, cardShards, modStore, result);
+                        pending = pending + 1;
+                        if (pending >= CommitRows)
+                        {
+                            CommitAll(txStores);
+                            BeginAll(txStores);
+                            pending = 0;
+                        }
+                    }
                 }
+                CommitAll(txStores);
+            }
+            catch
+            {
+                RollbackAll(txStores, log);
+                throw;
             }
 
             hub.Core.UpsertIndexSource(modRoot.path, result.IndexDir, "kkc-index-v1",

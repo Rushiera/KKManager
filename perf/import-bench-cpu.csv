@@ -1,0 +1,13 @@
+Timestamp,Tag,Label,Exe,ElapsedMs,CpuTotalSec,CpuUserSec,CpuKernelSec,KernelSharePct,CpuPctOfWall,ExitCode
+2026-11-11 13:51:30.082,cpu-split,release-p0,D:\Mau\WorkSpace\tools\CatTemp\kmrperf-p0\KMR.exe,12066,1.67,0.72,0.95,56.9,13.8,0
+2026-11-11 13:51:32.971,cpu-split,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,2875,0.58,0.5,0.08,13.8,20.2,0
+2026-11-11 13:51:46.048,cpu-split,release-p0,D:\Mau\WorkSpace\tools\CatTemp\kmrperf-p0\KMR.exe,13075,1.58,0.53,1.05,66.5,12.1,0
+2026-11-11 13:51:48.521,cpu-split,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,2471,0.55,0.48,0.06,10.9,22.3,0
+2026-11-11 13:52:01.491,cpu-split,release-p0,D:\Mau\WorkSpace\tools\CatTemp\kmrperf-p0\KMR.exe,12970,1.41,0.67,0.73,51.8,10.9,0
+2026-11-11 13:52:03.885,cpu-split,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,2392,0.36,0.31,0.05,13.9,15.1,0
+2026-11-11 13:59:31.759,debug-vs-p1,debug-0.21.7,D:\Mau\WorkSpace\KKManager\KKManager\bin\Debug\net8.0-windows\KMR.exe,2390,0.66,0.61,0.05,7.6,27.6,0
+2026-11-11 13:59:34.073,debug-vs-p1,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,2304,0.53,0.53,0,0,23,0
+2026-11-11 13:59:36.855,debug-vs-p1,debug-0.21.7,D:\Mau\WorkSpace\KKManager\KKManager\bin\Debug\net8.0-windows\KMR.exe,2780,0.75,0.69,0.06,8,27,0
+2026-11-11 13:59:39.456,debug-vs-p1,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,2599,0.67,0.66,0.02,3,25.8,0
+2026-11-11 13:59:42.316,debug-vs-p1,debug-0.21.7,D:\Mau\WorkSpace\KKManager\KKManager\bin\Debug\net8.0-windows\KMR.exe,2859,0.45,0.45,0,0,15.7,0
+2026-11-11 13:59:45.674,debug-vs-p1,release-p1,D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe,3357,0.88,0.84,0.03,3.4,26.2,0
