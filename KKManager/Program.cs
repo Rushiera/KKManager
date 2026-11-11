@@ -108,6 +108,12 @@ namespace KKManager
                     return SortCommand(db, rest);
                 case "card-sort":
                     return CardSortCommand(rest);
+                case "index-import":
+                    return IndexImportCommand(db, rest);
+                case "idx":
+                    return IdxCommand(db, rest);
+                case "refs-read":
+                    return RefsReadCommand(db, rest);
                 case "plugin-info":
                     return PluginInfoCommand(rest);
                 case "plugin-config":
@@ -186,6 +192,9 @@ namespace KKManager
             Console.WriteLine("  card-sort rules [--write <规则.tsv>]  看 / 导出分类规则模板（内置规则 + 外部规则文件合并后的全量）");
             Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从既有索引学「角色名 → 作品」规则并写进规则文件（整理过的索引成为下一轮的判据）");
             Console.WriteLine("  card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--yes]  按维度重排卡片目录（work / author / chara 分子目录，flat 恢复扁平；同盘改名，可反复切换）");
+            Console.WriteLine("  index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]  读 kkc 风格索引写库（不扫文件系统）；--old-root 同时迁移库根路径并清旧记录");
+            Console.WriteLine("  idx [--kind 卡|mod] [--work <作品>] [--author <作者>] [--q <关键词>] [--limit N] [--root <库根>]  查索引元数据（作品 / 作者 / 角色 / 来源——索引导入独有字段）");
+            Console.WriteLine("  refs-read --root <库根路径>  引用补读：读该库根下已入库卡片的声明区，写 mod 引用（一次性，不扫目录）");
             Console.WriteLine("  plugins [--unnoted]                    列出插件库里的插件（与面板「插件清单」同源；含中文说明 / 配置节数；--unnoted 只列未收录说明的项）");
             Console.WriteLine("  plugin-config [GUID|插件名]           插件配置文件——无参数列全部 cfg；给键则列出该插件的分节 / 配置项 / 作者注释");
             Console.WriteLine("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（键来自卡片数据区，如 kkpe / timeline / vnge_sss）");
@@ -1174,6 +1183,146 @@ namespace KKManager
             }
         }
 
+        /// <summary>索引导入——读 kkc 风格索引写库（不扫文件系统）；--old-root 同时迁移库根路径并清旧记录。</summary>
+        private static int IndexImportCommand(string db, List<string> rest)
+        {
+            string root = Take(rest, "--root");
+            string index = Take(rest, "--index");
+            string oldRoot = Take(rest, "--old-root");
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                Console.Error.WriteLine("用法：index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]");
+                return 2;
+            }
+            root = root.TrimEnd('\\', '/');
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+
+                // [段1] 库根路径迁移——把旧路径的条目改指向新路径（mod + 卡片两侧，同目录可能各有一条）
+                if (!string.IsNullOrWhiteSpace(oldRoot))
+                {
+                    oldRoot = oldRoot.TrimEnd('\\', '/');
+                    hub.RekeyRoot(oldRoot, root);
+                    int moved = 0;
+                    foreach (RootEntry e in cfg.modRoots)
+                    {
+                        if (SamePath(e.path, oldRoot))
+                        {
+                            e.path = root;
+                            e.offline = false;
+                            moved = moved + 1;
+                        }
+                    }
+                    foreach (RootEntry e in cfg.cardRoots)
+                    {
+                        if (SamePath(e.path, oldRoot))
+                        {
+                            e.path = root;
+                            e.offline = false;
+                            moved = moved + 1;
+                        }
+                    }
+                    if (moved > 0)
+                    {
+                        hub.Core.SaveRoots(cfg);
+                        Console.WriteLine("库根路径迁移：" + oldRoot + " → " + root + "（" + moved + " 条）");
+                    }
+                    else
+                    {
+                        Console.WriteLine("未找到旧库根条目：" + oldRoot + "（跳过迁移）");
+                    }
+                }
+
+                RootEntry modRoot = cfg.modRoots.Find(e => SamePath(e.path, root));
+                RootEntry cardRoot = cfg.cardRoots.Find(e => SamePath(e.path, root));
+                if (modRoot == null && cardRoot == null)
+                {
+                    Console.Error.WriteLine("该路径不是已配置的库根：" + root + "——先 roots-add，或加 --old-root 迁移");
+                    return 2;
+                }
+
+                // [段2] 导入（不扫盘）
+                // 同根重建：导入前先清掉该根的旧记录（路径口径变了 / 索引重生成时用）
+                if (rest.Remove("--purge-first"))
+                {
+                    int purgedFirst = hub.PurgeRoot(cfg, root);
+                    Console.WriteLine("导入前清理：root 旧记录（受影响 mod guid " + purgedFirst + " 个）");
+                }
+                IndexImportResult r = IndexImporter.Import(hub, cfg, modRoot ?? cardRoot, cardRoot, index, m => Console.WriteLine("  " + m));
+                if (!string.IsNullOrEmpty(r.Error))
+                {
+                    Console.Error.WriteLine("导入失败：" + r.Error);
+                    return 3;
+                }
+                Console.WriteLine("索引源登记：root=" + root + " · 摘要 " + r.Digest + " · 目录 " + r.IndexDir);
+
+                // [段3] 旧记录清理——路径已迁移时，旧路径下的记录全部作废（否则统计重复）
+                if (!string.IsNullOrWhiteSpace(oldRoot) && !SamePath(oldRoot, root))
+                {
+                    int purged = hub.PurgeRoot(cfg, oldRoot);
+                    Console.WriteLine("旧记录清理：" + oldRoot + "（受影响 mod guid " + purged + " 个）");
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>引用补读——读某库根下已入库卡片的声明区写 mod 引用（一次性，不扫目录）。</summary>
+        private static int RefsReadCommand(string db, List<string> rest)
+        {
+            string root = (Take(rest, "--root") ?? "").TrimEnd('\\', '/');
+            bool onlyPending = rest.Remove("--only-pending");
+            int limit = int.Parse(Take(rest, "--limit") ?? "0");
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                Console.Error.WriteLine("用法：refs-read --root <库根路径> [--only-pending] [--limit N]");
+                return 2;
+            }
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                RefsReadResult r = RefsReader.ReadRoot(hub, cfg, root, onlyPending, limit, m => Console.WriteLine("  " + m));
+                Console.WriteLine("引用补读：卡 " + r.Cards + " · 有引用 " + r.WithRefs + " · 引用行 " + r.RefRows + " · 失败 " + r.Failed);
+            }
+            return 0;
+        }
+
+        /// <summary>查索引元数据（作品 / 作者 / 角色 / 来源）——索引导入独有字段，按类型 / 作品 / 作者筛选 + 关键词模糊。</summary>
+        private static int IdxCommand(string db, List<string> rest)
+        {
+            string kind = Take(rest, "--kind");
+            string work = Take(rest, "--work");
+            string author = Take(rest, "--author");
+            string q = Take(rest, "--q");
+            string root = Take(rest, "--root");
+            int limit = int.Parse(Take(rest, "--limit") ?? "50");
+            using (StoreHub hub = new StoreHub(db))
+            {
+                RootsConfig cfg = hub.Core.LoadRoots();
+                RootsRules.Normalize(cfg);
+                hub.EnsureMigrated(cfg);
+                List<Store.IdxRow> rows = hub.QueryIndexMeta(cfg, root, kind, work, author, q, limit);
+                Console.WriteLine("索引元数据：命中 " + rows.Count + " 条（上限 " + limit + "）");
+                foreach (Store.IdxRow r in rows)
+                {
+                    Console.WriteLine("  " + r.IdxId + " | " + r.Kind + " | " + (r.Work ?? "") + " | " +
+                        (r.Chara ?? "") + " | " + (r.Author ?? "") + " | " + r.FilePath);
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>路径比较（忽略大小写与尾部分隔符）。</summary>
+        private static bool SamePath(string a, string b)
+        {
+            return string.Equals((a ?? "").Trim().TrimEnd('\\', '/'), (b ?? "").Trim().TrimEnd('\\', '/'),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         private static int StatsCommand(string db)
         {
             using (StoreHub hub = new StoreHub(db))
@@ -1515,6 +1664,23 @@ namespace KKManager
             string rulesPath = Take(rest, "--rules") ?? Path.Combine(AppContext.BaseDirectory, "data", "card-rules.tsv");
             string dest = Take(rest, "--dest");
             bool yes = rest.Remove("--yes");
+
+            if (sub == "refs")
+            {
+                string refsRoot = Take(rest, "--root");
+                if (string.IsNullOrEmpty(refsRoot))
+                {
+                    Console.Error.WriteLine("用法: card-sort refs --root <整理根> [--out <引用表.tsv>]");
+                    return 2;
+                }
+                string defaultPlan = Path.Combine(AppContext.BaseDirectory, "data", "card-plan.tsv");
+                string refsOut = string.Equals(outPath, defaultPlan, StringComparison.OrdinalIgnoreCase)
+                    ? Path.Combine(AppContext.BaseDirectory, "data", "card-refs.tsv")
+                    : outPath;
+                int refsCount = CardOrganizer.ExportRefs(refsRoot, refsOut, m => Console.WriteLine(m));
+                Console.WriteLine("引用表已写出：" + refsOut + "（" + refsCount.ToString(CultureInfo.InvariantCulture) + " 张卡）");
+                return 0;
+            }
 
             if (sub == "rules")
             {

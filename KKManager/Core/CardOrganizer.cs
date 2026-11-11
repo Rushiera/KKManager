@@ -1244,5 +1244,51 @@ namespace KKManager.Core
             }
             return v.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
         }
+        /// <summary>导出整理根的卡片引用表（现路径 → 引用 guid 列表）——索引生成的前置数据，一次性；不写库。</summary>
+        public static int ExportRefs(string root, string outPath, Action<string> log)
+        {
+            string rootFull = Path.GetFullPath(root);
+            int n = 0;
+            int withRefs = 0;
+            long rows = 0;
+            string dir = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            using (StreamWriter w = new StreamWriter(outPath, false, new UTF8Encoding(true)))
+            {
+                w.WriteLine("现路径\t引用mod\t引用行数");
+                foreach (string p in Directory.EnumerateFiles(rootFull, "*.png", SearchOption.AllDirectories))
+                {
+                    string rel = Path.GetRelativePath(rootFull, p).Replace('\\', '/');
+                    n = n + 1;
+                    try
+                    {
+                        CardInfo info = CardReader.Parse(p);
+                        IReadOnlyList<string> ids = info.DistinctModIds();
+                        if (ids.Count > 0)
+                        {
+                            withRefs = withRefs + 1;
+                        }
+                        rows = rows + info.ModRefs.Count;
+                        w.WriteLine(rel + "\t" + string.Join(",", ids) + "\t" + info.ModRefs.Count.ToString(CultureInfo.InvariantCulture));
+                    }
+                    catch (IOException)
+                    {
+                        w.WriteLine(rel + "\t\t0");
+                    }
+                    if (log != null && n % 500 == 0)
+                    {
+                        log("  已读 " + n.ToString(CultureInfo.InvariantCulture));
+                    }
+                }
+            }
+            if (log != null)
+            {
+                log("引用表：" + n.ToString(CultureInfo.InvariantCulture) + " 张 · 有引用 " + withRefs.ToString(CultureInfo.InvariantCulture) + " · 引用行 " + rows.ToString(CultureInfo.InvariantCulture));
+            }
+            return n;
+        }
     }
 }

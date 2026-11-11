@@ -996,6 +996,10 @@ namespace KKManager.Data
                              PRIMARY KEY(card_id, property, slot, local_slot, mod_guid))");
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_guid ON card_mod(mod_guid)");
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_card ON card_mod(card_id)");
+            // 索引元数据——索引导入独有字段（作品 / 作者 / 来源 / 包内路径 / guid）；与 card 行按 file_path 一对一
+            Exec(@"CREATE TABLE IF NOT EXISTS idx_meta(
+                             file_path TEXT PRIMARY KEY, idx_id TEXT, kind TEXT, card_type TEXT, chara TEXT,
+                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT)");
             Exec(@"CREATE TABLE IF NOT EXISTS card_timeline(
                              card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
                              has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
@@ -1016,6 +1020,11 @@ namespace KKManager.Data
             if (_isCore)
             {
                 Exec("CREATE INDEX IF NOT EXISTS ix_mod_tier ON mod(tier)");
+                // 索引源登记（主库）——某库根的索引目录 / 格式 / 行数 / 摘要 / 导入时间；导入不扫盘，索引是唯一真相源
+                Exec(@"CREATE TABLE IF NOT EXISTS index_source(
+                                 root_path TEXT PRIMARY KEY, index_dir TEXT, format TEXT,
+                                 rows INTEGER, cards INTEGER, mods INTEGER, others INTEGER,
+                                 digest TEXT, imported_at TEXT)");
                 Exec(@"CREATE TABLE IF NOT EXISTS mod_old(
                                  old_path TEXT PRIMARY KEY, guid TEXT, old_name TEXT, old_version TEXT,
                                  new_name TEXT, new_version TEXT, marked_at TEXT)");
@@ -2061,6 +2070,237 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$path", c.FilePath);
                 return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
             }
+        }
+
+        /// <summary>确保索引相关表存在——旧库文件按「结构已就绪」打开、不跑完整 EnsureSchema，导入等新功能需先补表（幂等轻量）。</summary>
+        public void EnsureIndexTables()
+        {
+            Exec(@"CREATE TABLE IF NOT EXISTS idx_meta(
+                             file_path TEXT PRIMARY KEY, idx_id TEXT, kind TEXT, card_type TEXT, chara TEXT,
+                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT)");
+            if (_isCore)
+            {
+                Exec(@"CREATE TABLE IF NOT EXISTS index_source(
+                                 root_path TEXT PRIMARY KEY, index_dir TEXT, format TEXT,
+                                 rows INTEGER, cards INTEGER, mods INTEGER, others INTEGER,
+                                 digest TEXT, imported_at TEXT)");
+            }
+        }
+
+        /// <summary>索引元数据 upsert——索引导入独有字段（作品 / 作者 / 来源 / 包内路径 / guid）。</summary>
+        public void UpsertIndexMeta(string filePath, string idxId, string kind, string cardType, string chara,
+            string work, string author, string source, string srcRel, string note, string guid)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO idx_meta(file_path,idx_id,kind,card_type,chara,work,author,source,src_rel,note,guid)
+                     VALUES($p,$id,$k,$ct,$ch,$w,$a,$s,$sr,$n,$g)
+                     ON CONFLICT(file_path) DO UPDATE SET
+                       idx_id=excluded.idx_id, kind=excluded.kind, card_type=excluded.card_type, chara=excluded.chara,
+                       work=excluded.work, author=excluded.author, source=excluded.source, src_rel=excluded.src_rel,
+                       note=excluded.note, guid=excluded.guid"))
+            {
+                cmd.Parameters.AddWithValue("$p", filePath);
+                cmd.Parameters.AddWithValue("$id", (object)idxId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$k", (object)kind ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$ct", (object)cardType ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$ch", (object)chara ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$w", (object)work ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$a", (object)author ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$s", (object)source ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$sr", (object)srcRel ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$n", (object)note ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$g", (object)guid ?? DBNull.Value);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>索引源登记 upsert（主库）——某库根的索引目录 / 格式 / 行数 / 摘要 / 导入时间。</summary>
+        public void UpsertIndexSource(string rootPath, string indexDir, string format, long rows, long cards, long mods, long others, string digest)
+        {
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO index_source(root_path,index_dir,format,rows,cards,mods,others,digest,imported_at)
+                     VALUES($r,$d,$f,$n,$c,$m,$o,$g,$now)
+                     ON CONFLICT(root_path) DO UPDATE SET
+                       index_dir=excluded.index_dir, format=excluded.format, rows=excluded.rows,
+                       cards=excluded.cards, mods=excluded.mods, others=excluded.others,
+                       digest=excluded.digest, imported_at=excluded.imported_at"))
+            {
+                cmd.Parameters.AddWithValue("$r", rootPath ?? "");
+                cmd.Parameters.AddWithValue("$d", (object)indexDir ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$f", (object)format ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$n", rows);
+                cmd.Parameters.AddWithValue("$c", cards);
+                cmd.Parameters.AddWithValue("$m", mods);
+                cmd.Parameters.AddWithValue("$o", others);
+                cmd.Parameters.AddWithValue("$g", (object)digest ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>某库根下的卡片行（id + 路径，按路径升序）——引用补读等逐卡操作用；pendingStep 非空时只取该步骤无完成戳的卡。</summary>
+        public List<KeyValuePair<long, string>> QueryCardIdsByRoot(string rootPath, string pendingStep)
+        {
+            List<KeyValuePair<long, string>> list = new List<KeyValuePair<long, string>>();
+            string sql = "SELECT c.id, c.file_path FROM card c WHERE c.root_path=$r";
+            if (!string.IsNullOrEmpty(pendingStep))
+            {
+                sql = sql + " AND NOT EXISTS (SELECT 1 FROM scan_state s WHERE s.file_path=c.file_path AND s.step=$step)";
+            }
+            sql = sql + " ORDER BY c.file_path";
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                cmd.Parameters.AddWithValue("$r", (rootPath ?? "").TrimEnd('\\', '/'));
+                cmd.Parameters.AddWithValue("$step", pendingStep ?? "");
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(new KeyValuePair<long, string>(r.GetInt64(0), r.GetString(1)));
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>索引元数据行——作品 / 作者 / 来源等索引导入独有字段的查询结果。</summary>
+        public class IdxRow
+        {
+            /// <summary>文件绝对路径。</summary>
+            public string FilePath { get; set; }
+
+            /// <summary>索引编号（K0001 起）。</summary>
+            public string IdxId { get; set; }
+
+            /// <summary>类型（卡 / mod / 纯图 / 其它）。</summary>
+            public string Kind { get; set; }
+
+            /// <summary>卡类型标记。</summary>
+            public string CardType { get; set; }
+
+            /// <summary>角色名。</summary>
+            public string Chara { get; set; }
+
+            /// <summary>作品。</summary>
+            public string Work { get; set; }
+
+            /// <summary>作者。</summary>
+            public string Author { get; set; }
+
+            /// <summary>来源。</summary>
+            public string Source { get; set; }
+
+            /// <summary>包内路径。</summary>
+            public string SrcRel { get; set; }
+
+            /// <summary>备注。</summary>
+            public string Note { get; set; }
+
+            /// <summary>mod guid。</summary>
+            public string Guid { get; set; }
+        }
+
+        /// <summary>查索引元数据——按类型 / 作品 / 作者精确筛选 + 关键词模糊（角色名 / 路径 / 作品）；空条件不筛。</summary>
+        public List<IdxRow> QueryIndexMeta(string kind, string work, string author, string keyword, int limit)
+        {
+            List<IdxRow> list = new List<IdxRow>();
+            string sql = @"SELECT file_path, idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid
+                           FROM idx_meta WHERE ($k='' OR kind=$k) AND ($w='' OR work=$w) AND ($a='' OR author=$a)
+                             AND ($q='' OR chara LIKE $qq OR file_path LIKE $qq OR work LIKE $qq OR author LIKE $qq OR guid LIKE $qq)
+                           ORDER BY work, chara, file_path LIMIT $n";
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                string q = keyword ?? "";
+                cmd.Parameters.AddWithValue("$k", kind ?? "");
+                cmd.Parameters.AddWithValue("$w", work ?? "");
+                cmd.Parameters.AddWithValue("$a", author ?? "");
+                cmd.Parameters.AddWithValue("$q", q);
+                cmd.Parameters.AddWithValue("$qq", "%" + q + "%");
+                cmd.Parameters.AddWithValue("$n", limit <= 0 ? 100 : limit);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(new IdxRow
+                        {
+                            FilePath = r.IsDBNull(0) ? "" : r.GetString(0),
+                            IdxId = r.IsDBNull(1) ? "" : r.GetString(1),
+                            Kind = r.IsDBNull(2) ? "" : r.GetString(2),
+                            CardType = r.IsDBNull(3) ? "" : r.GetString(3),
+                            Chara = r.IsDBNull(4) ? "" : r.GetString(4),
+                            Work = r.IsDBNull(5) ? "" : r.GetString(5),
+                            Author = r.IsDBNull(6) ? "" : r.GetString(6),
+                            Source = r.IsDBNull(7) ? "" : r.GetString(7),
+                            SrcRel = r.IsDBNull(8) ? "" : r.GetString(8),
+                            Note = r.IsDBNull(9) ? "" : r.GetString(9),
+                            Guid = r.IsDBNull(10) ? "" : r.GetString(10)
+                        });
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>清理孤儿引用行——card_id 已不在 card 表里的 card_mod 行（删卡 / 换根后收尾，幂等轻量）。</summary>
+        public int CleanOrphanRefs()
+        {
+            using (SqliteCommand cmd = NewCommand("DELETE FROM card_mod WHERE card_id NOT IN (SELECT id FROM card)"))
+            {
+                return cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>某 guid 在 mod 主表是否存在（主库表）。</summary>
+        public bool HasModRow(string guid)
+        {
+            using (SqliteCommand cmd = NewCommand("SELECT COUNT(*) FROM " + ModTable + " WHERE guid=$g"))
+            {
+                cmd.Parameters.AddWithValue("$g", guid ?? "");
+                return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+            }
+        }
+
+        /// <summary>清理某库根前缀下的索引相关记录（换根 / 重建索引用）——card / mod_file / non_card / idx_meta / scan_state；返回受影响的 mod guid 清单。</summary>
+        public List<string> DeleteRecordsUnderRoot(string rootPath)
+        {
+            List<string> guids = new List<string>();
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/');
+            if (prefix.Length == 0)
+            {
+                return guids;
+            }
+            using (SqliteCommand cmd = NewCommand("SELECT DISTINCT guid FROM mod_file WHERE root_path=$r"))
+            {
+                cmd.Parameters.AddWithValue("$r", prefix);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        if (!r.IsDBNull(0))
+                        {
+                            guids.Add(r.GetString(0));
+                        }
+                    }
+                }
+            }
+            string[] sqls = new[]
+            {
+                // 🔴 card_mod 先于 card 删（card_id 是关联键；次序反了子查询取不到旧卡 id）
+                "DELETE FROM card_mod WHERE card_id IN (SELECT id FROM card WHERE root_path=$r)",
+                "DELETE FROM card WHERE root_path=$r",
+                "DELETE FROM mod_file WHERE root_path=$r",
+                "DELETE FROM non_card WHERE root_path=$r",
+                "DELETE FROM idx_meta WHERE file_path LIKE $p",
+                "DELETE FROM scan_state WHERE file_path LIKE $p"
+            };
+            foreach (string sql in sqls)
+            {
+                using (SqliteCommand cmd = NewCommand(sql))
+                {
+                    cmd.Parameters.AddWithValue("$r", prefix);
+                    cmd.Parameters.AddWithValue("$p", prefix + "\\%");
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            return guids;
         }
 
         /// <summary>载入 mod 副本的 guid 索引——file_path → guid（扫描组装内存态用）。</summary>

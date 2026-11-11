@@ -391,7 +391,7 @@ namespace KKManager.Data
             return list;
         }
 
-        /// <summary>把一组库根对应的库文件加进清单（已加的跳过）——每个库根按分片数展开（卡片侧可能多片，mod 侧单片）。</summary>
+        /// <summary>把一组库根对应的库文件加进清单（已加的跳过）——mod 侧单片；卡片侧按分片数展开（每片一个库文件）。</summary>
         private void AddLibStores(List<Store> list, HashSet<int> seen, List<RootEntry> roots, bool isMods)
         {
             if (roots == null)
@@ -405,6 +405,16 @@ namespace KKManager.Data
                 {
                     continue;
                 }
+                // 🔴 mod 侧不分片——库序号直接成文件名（与 StoreFor / 扫描写入同源）；
+                // 早期这里无条件走 LibsOfBase 展开 32 片，导致「写入 lib_5_0.db、查询翻 lib_5000_*」成为两套文件。
+                if (isMods)
+                {
+                    if (seen.Add(lib))
+                    {
+                        list.Add(StoreByLib(lib));
+                    }
+                    continue;
+                }
                 foreach (int one in LibsOfBase(lib))
                 {
                     if (seen.Add(one))
@@ -413,6 +423,95 @@ namespace KKManager.Data
                     }
                 }
             }
+        }
+
+        /// <summary>跨库的卡片操作目标（引用补读用）——卡片行所在 Store + id + 绝对路径。</summary>
+        public class CardTarget
+        {
+            /// <summary>卡片行 id（所在库内）。</summary>
+            public long CardId { get; set; }
+
+            /// <summary>卡片绝对路径。</summary>
+            public string FilePath { get; set; }
+
+            /// <summary>卡片行所在的 Store（写引用走它）。</summary>
+            public Store Store { get; set; }
+        }
+
+        /// <summary>跨库取某库根的卡片目标（id + 路径 + 所在 Store）——引用补读等逐卡操作用；pendingStep 非空时只取该步骤无戳的卡。</summary>
+        public List<CardTarget> CardsOfRoot(RootsConfig cfg, string rootPath, string pendingStep)
+        {
+            List<CardTarget> list = new List<CardTarget>();
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/');
+            foreach (Store s in AllStores(cfg))
+            {
+                foreach (KeyValuePair<long, string> kv in s.QueryCardIdsByRoot(prefix, pendingStep))
+                {
+                    list.Add(new CardTarget { CardId = kv.Key, FilePath = kv.Value, Store = s });
+                }
+            }
+            return list;
+        }
+
+        /// <summary>按库根前缀清理全部库的记录（换根 / 重建索引用）——card / mod_file / non_card / idx_meta / scan_state 逐库删，返回受影响 guid 数。</summary>
+        public int PurgeRoot(RootsConfig cfg, string rootPath)
+        {
+            List<string> guids = new List<string>();
+            foreach (Store s in AllStores(cfg))
+            {
+                guids.AddRange(s.DeleteRecordsUnderRoot(rootPath));
+            }
+            HashSet<string> distinct = new HashSet<string>(guids, StringComparer.Ordinal);
+            foreach (string g in distinct)
+            {
+                RecomputeMod(cfg, g);
+            }
+            return distinct.Count;
+        }
+
+        /// <summary>跨库查索引元数据——rootPath 非空时按路径前缀过滤（某库根的记录）；结果按 limit 截断。</summary>
+        public List<Store.IdxRow> QueryIndexMeta(RootsConfig cfg, string rootPath, string kind, string work, string author, string keyword, int limit)
+        {
+            List<Store.IdxRow> list = new List<Store.IdxRow>();
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/').ToLowerInvariant();
+            int want = limit <= 0 ? 100 : limit;
+            foreach (Store s in AllStores(cfg))
+            {
+                foreach (Store.IdxRow row in s.QueryIndexMeta(kind, work, author, keyword, want))
+                {
+                    if (prefix.Length == 0 || (row.FilePath ?? "").ToLowerInvariant().StartsWith(prefix))
+                    {
+                        list.Add(row);
+                    }
+                }
+            }
+            if (list.Count > want)
+            {
+                list = list.GetRange(0, want);
+            }
+            return list;
+        }
+
+        /// <summary>库根换路径时迁移库序号映射——旧路径的库号搬到新路径（否则 LibOf 给新路径分配新号，数据成孤岛）。</summary>
+        public void RekeyRoot(string oldPath, string newPath)
+        {
+            string ok = (oldPath ?? "").Trim().ToLowerInvariant().TrimEnd('\\', '/');
+            string nk = (newPath ?? "").Trim().ToLowerInvariant().TrimEnd('\\', '/');
+            if (ok.Length == 0 || nk.Length == 0 || string.Equals(ok, nk, StringComparison.Ordinal))
+            {
+                return;
+            }
+            int lib = 0;
+            if (!_libOf.TryGetValue(ok, out lib))
+            {
+                // 旧路径没有映射（或已在上一轮搬过）——新路径若有映射则无需处理
+                return;
+            }
+            _libOf.Remove(ok);
+            _libOf[nk] = lib;
+            Core.DeleteSetting("libdb:" + ok);
+            Core.SetSetting("libdb:" + nk, lib.ToString(CultureInfo.InvariantCulture));
+            Console.WriteLine("[库数据] 库号迁移：" + ok + " → " + nk + "（lib " + lib + "）");
         }
 
         /// <summary>全库扫描前按库根配置准备库文件——含首次迁移（把主库里的附加库 / 冷藏库数据搬进各自的库文件；卡片侧预置库根也各自独立成库）+ 预建全部库文件（缺文件从内嵌模板释放，零 DDL）。</summary>
