@@ -14,6 +14,7 @@
 | 建跑测件（Release） | cwd=`D:\Mau\WorkSpace\KKManager\KKManager`：`dotnet restore -r win-x64` → `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o D:\Mau\WorkSpace\tools\CatTemp\kmrperf`（**不带** `-p:ReleasePack=true`） |
 | 跑一次索引导入 | `D:\Mau\WorkSpace\tools\CatTemp\kmrperf\KMR.exe index-import --root D:\Mau\WorkSpace\KKManager\dist\data\kkc --db D:\Mau\WorkSpace\KKManager\dist\data\kkmanager.db` |
 | 量墙钟 + CPU 拆分 | `powershell -NoProfile -ExecutionPolicy Bypass -File D:\Mau\WorkSpace\KKManager\perf\import-bench.ps1 -Runs 3 -Tag <标签>` |
+| 冷扫描对照（4 vs 32 workers） | `powershell -NoProfile -ExecutionPolicy Bypass -File D:\Mau\WorkSpace\KKManager\perf\scan-bench.ps1 -Runs 3 -CardDir <卡目录> -WorkRoot <临时库根>`（每轮重建空库；跑完把两个临时目录整棵软删除） |
 | 量系统侧 | 重活期间同开：`typeperf "<7 计数器>" -sc 32 -f CSV -o D:\Mau\WorkSpace\tools\CatTemp\perf_<标签>.csv` |
 | 量机器本身 | `ts_bench.ps1 -Samples 3`（重活前后各一次）· `ts_jobwatch.ps1 -Seconds <重活时长+10>`（归因到进程） |
 
@@ -153,7 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\Mau\WorkSpace\KKManager\p
 
 | 项 | 为什么没做 | 下一步 |
 |:--|:--|:--|
-| 冷扫描 `KKM_SCAN_WORKERS=4` vs `32` 对照 | 无 `scanbench` 命令；`scan-main` 全量约 10 min，本轮明确不跑 | 二选一：`scan-cards` 挑一个样本目录做冷扫描对照（会写库），或 `scan-main` 分段跑——等拍板 |
+| 冷扫描 `KKM_SCAN_WORKERS=4` vs `32` 对照 | **已做（113 张样本 · 拍板 B）**：`perf/scan-bench.ps1` + 每轮重建临时空库——4 workers 1,130 ms vs 32 workers 1,035 ms（+9.2%，≤+15% 内），CPU 0.48 vs 1.31 s；详表 → `ccbp:Project/KKManager/design-KKManager_log.md` §110.6 | 大库吞吐仍未测——要测就 `scan-main` 分段（约 10 min） |
 | P2 插件扫描并行上限 | 需要一次插件库扫描做对照，属写库操作 | 与上一条同批做，或在有插件库快照时单独做 |
 | `--purge-first`（首次建库 / INSERT 路径） | 对真库是破坏性动作 | 在库副本上做，别在 `dist/data` 上做 |
 | 挂载盘 / 远程盘上的扫描 | 不属本轮 | 见 `ccbp:Project/FileClean/` 的盘型判据 |
