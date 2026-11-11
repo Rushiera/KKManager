@@ -1219,7 +1219,7 @@ namespace KKManager.Data
             }
         }
 
-        private SqliteCommand NewCommand(string sql)
+        internal SqliteCommand NewCommand(string sql)
         {
             SqliteCommand cmd = _conn.CreateCommand();
             cmd.CommandText = sql;
@@ -2084,6 +2084,21 @@ namespace KKManager.Data
                                  root_path TEXT PRIMARY KEY, index_dir TEXT, format TEXT,
                                  rows INTEGER, cards INTEGER, mods INTEGER, others INTEGER,
                                  digest TEXT, imported_at TEXT)");
+                // 卡片整理规则——DB 是唯一真相源（learn 写 / plan 读 / TSV 降为导入导出）；停用不删（enabled=0）
+                Exec(@"CREATE TABLE IF NOT EXISTS card_rule(
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 kind TEXT NOT NULL, match TEXT NOT NULL, value TEXT NOT NULL,
+                                 origin TEXT, votes INTEGER, works INTEGER, updated_at TEXT,
+                                 enabled INTEGER NOT NULL DEFAULT 1,
+                                 UNIQUE(kind, match))");
+                // 卡片移动记录——计划落盘（pending）→ 执行认领（claimed）→ 完成（done）→ 导入消费（consumed）
+                Exec(@"CREATE TABLE IF NOT EXISTS card_move(
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 from_path TEXT NOT NULL UNIQUE, to_path TEXT NOT NULL,
+                                 work TEXT, card_type TEXT,
+                                 state TEXT NOT NULL DEFAULT 'pending',
+                                 claimed_by TEXT, claimed_at TEXT, executed_at TEXT,
+                                 consumed INTEGER NOT NULL DEFAULT 0, note TEXT)");
             }
         }
 
@@ -2134,6 +2149,459 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$now", Now());
                 cmd.ExecuteNonQuery();
             }
+        }
+
+        /// <summary>读规则表（启用中的卡片整理规则，按 id 升序）——plan 的唯一规则来源。</summary>
+        public List<CardRule> LoadCardRules()
+        {
+            List<CardRule> list = new List<CardRule>();
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("SELECT kind, match, value, origin, votes, works FROM card_rule WHERE enabled=1 ORDER BY id"))
+            using (SqliteDataReader r = cmd.ExecuteReader())
+            {
+                while (r.Read())
+                {
+                    CardRule rule = new CardRule
+                    {
+                        Kind = ParseRuleKind(r.IsDBNull(0) ? "" : r.GetString(0)),
+                        Match = r.IsDBNull(1) ? "" : r.GetString(1),
+                        Value = r.IsDBNull(2) ? "" : r.GetString(2),
+                        Origin = r.IsDBNull(3) ? "" : r.GetString(3),
+                        Votes = r.IsDBNull(4) ? 0 : (int)r.GetInt64(4),
+                        Works = r.IsDBNull(5) ? 0 : (int)r.GetInt64(5)
+                    };
+                    list.Add(rule);
+                }
+            }
+            return list;
+        }
+
+        /// <summary>写一批规则（导入 / bootstrap）——同 kind+match 已存在时：overwrite=true 覆盖值与统计；false 只补统计（保留已有人工值）。</summary>
+        public int MergeCardRules(List<CardRule> rules, string origin, bool overwrite)
+        {
+            if (rules == null || rules.Count == 0)
+            {
+                return 0;
+            }
+            EnsureIndexTables();
+            int n = 0;
+            string now = Now();
+            Begin();
+            try
+            {
+                foreach (CardRule rule in rules)
+                {
+                    string sql = overwrite
+                        ? @"INSERT INTO card_rule(kind,match,value,origin,votes,works,updated_at,enabled)
+                             VALUES($k,$m,$v,$o,$vo,$wo,$now,1)
+                             ON CONFLICT(kind,match) DO UPDATE SET
+                               value=excluded.value, origin=excluded.origin, votes=excluded.votes,
+                               works=excluded.works, updated_at=excluded.updated_at, enabled=1"
+                        : @"INSERT INTO card_rule(kind,match,value,origin,votes,works,updated_at,enabled)
+                             VALUES($k,$m,$v,$o,$vo,$wo,$now,1)
+                             ON CONFLICT(kind,match) DO UPDATE SET
+                               votes=CASE WHEN excluded.votes > 0 THEN excluded.votes ELSE card_rule.votes END,
+                               works=CASE WHEN excluded.works > 0 THEN excluded.works ELSE card_rule.works END,
+                               updated_at=excluded.updated_at";
+                    using (SqliteCommand cmd = NewCommand(sql))
+                    {
+                        cmd.Parameters.AddWithValue("$k", RuleKindText(rule.Kind));
+                        cmd.Parameters.AddWithValue("$m", rule.Match ?? "");
+                        cmd.Parameters.AddWithValue("$v", rule.Value ?? "");
+                        cmd.Parameters.AddWithValue("$o", (object)(string.IsNullOrEmpty(rule.Origin) ? origin : rule.Origin) ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("$vo", rule.Votes);
+                        cmd.Parameters.AddWithValue("$wo", rule.Works);
+                        cmd.Parameters.AddWithValue("$now", now);
+                        cmd.ExecuteNonQuery();
+                    }
+                    n = n + 1;
+                }
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+            return n;
+        }
+
+        /// <summary>写学习结果——同 kind+match 已存在时保留原值（人工改的优先），只刷新票数 / 作品数；不产生重复行。</summary>
+        public int LearnCardRules(List<CardRule> rules)
+        {
+            if (rules == null || rules.Count == 0)
+            {
+                return 0;
+            }
+            EnsureIndexTables();
+            int n = 0;
+            string now = Now();
+            Begin();
+            try
+            {
+                foreach (CardRule rule in rules)
+                {
+                    using (SqliteCommand cmd = NewCommand(@"INSERT INTO card_rule(kind,match,value,origin,votes,works,updated_at,enabled)
+                             VALUES($k,$m,$v,'learn',$vo,$wo,$now,1)
+                             ON CONFLICT(kind,match) DO UPDATE SET
+                               votes=excluded.votes, works=excluded.works, updated_at=excluded.updated_at"))
+                    {
+                        cmd.Parameters.AddWithValue("$k", RuleKindText(rule.Kind));
+                        cmd.Parameters.AddWithValue("$m", rule.Match ?? "");
+                        cmd.Parameters.AddWithValue("$v", rule.Value ?? "");
+                        cmd.Parameters.AddWithValue("$vo", rule.Votes);
+                        cmd.Parameters.AddWithValue("$wo", rule.Works);
+                        cmd.Parameters.AddWithValue("$now", now);
+                        cmd.ExecuteNonQuery();
+                    }
+                    n = n + 1;
+                }
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+            return n;
+        }
+
+        /// <summary>规则表条数（含停用；bootstrap 判空用）。</summary>
+        public long CountCardRules()
+        {
+            EnsureIndexTables();
+            return Convert.ToInt64(ExecScalar("SELECT COUNT(*) FROM card_rule"), CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>某来源的规则条数（bootstrap 判据：内置规则是否已入库）。</summary>
+        public long CountCardRulesOfOrigin(string origin)
+        {
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("SELECT COUNT(*) FROM card_rule WHERE origin=$o"))
+            {
+                cmd.Parameters.AddWithValue("$o", origin ?? "");
+                return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>卡片移动记录的一行（计划 → 认领 → 执行 → 导入消费）。</summary>
+        public class CardMoveRow
+        {
+            /// <summary>主键。</summary>
+            public long Id { get; set; }
+
+            /// <summary>源绝对路径（唯一键）。</summary>
+            public string FromPath { get; set; }
+
+            /// <summary>目标绝对路径。</summary>
+            public string ToPath { get; set; }
+
+            /// <summary>目标作品。</summary>
+            public string Work { get; set; }
+
+            /// <summary>卡类型标记。</summary>
+            public string CardType { get; set; }
+
+            /// <summary>状态：pending / claimed / done / failed / skipped。</summary>
+            public string State { get; set; }
+
+            /// <summary>认领者标识。</summary>
+            public string ClaimedBy { get; set; }
+
+            /// <summary>认领时刻。</summary>
+            public string ClaimedAt { get; set; }
+
+            /// <summary>完成时刻。</summary>
+            public string ExecutedAt { get; set; }
+
+            /// <summary>导入侧是否已消费（done 记录迁移 DB 行后置 1）。</summary>
+            public bool Consumed { get; set; }
+
+            /// <summary>备注（失败原因 / 改名说明）。</summary>
+            public string Note { get; set; }
+        }
+
+        /// <summary>批量写移动记录（plan 落盘）——同 from_path 已 done 且目标相同则保持，其余重置 pending；返回写入条数。</summary>
+        public int UpsertCardMoves(List<CardMoveRow> rows)
+        {
+            if (rows == null || rows.Count == 0)
+            {
+                return 0;
+            }
+            EnsureIndexTables();
+            int n = 0;
+            string now = Now();
+            Begin();
+            try
+            {
+                foreach (CardMoveRow row in rows)
+                {
+                    using (SqliteCommand cmd = NewCommand(@"INSERT INTO card_move(from_path,to_path,work,card_type,state,note,claimed_by,claimed_at,executed_at,consumed)
+                             VALUES($f,$t,$w,$ct,'pending',$note,NULL,NULL,NULL,0)
+                             ON CONFLICT(from_path) DO UPDATE SET
+                               state=CASE WHEN card_move.state IN ('done','skipped') AND card_move.to_path=excluded.to_path THEN card_move.state ELSE 'pending' END,
+                               to_path=excluded.to_path, work=excluded.work, card_type=excluded.card_type,
+                               note=CASE WHEN card_move.state IN ('done','skipped') AND card_move.to_path=excluded.to_path THEN card_move.note ELSE excluded.note END"))
+                    {
+                        cmd.Parameters.AddWithValue("$f", row.FromPath ?? "");
+                        cmd.Parameters.AddWithValue("$t", row.ToPath ?? "");
+                        cmd.Parameters.AddWithValue("$w", (object)row.Work ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("$ct", (object)row.CardType ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("$note", (object)row.Note ?? DBNull.Value);
+                        cmd.ExecuteNonQuery();
+                    }
+                    n = n + 1;
+                }
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+            return n;
+        }
+
+        /// <summary>按状态读移动记录（state 空 = 全部，按 id 升序）。</summary>
+        public List<CardMoveRow> LoadCardMoves(string state)
+        {
+            List<CardMoveRow> list = new List<CardMoveRow>();
+            EnsureIndexTables();
+            string sql = "SELECT id, from_path, to_path, work, card_type, state, claimed_by, claimed_at, executed_at, consumed, note FROM card_move";
+            if (!string.IsNullOrEmpty(state))
+            {
+                sql = sql + " WHERE state=$st";
+            }
+            sql = sql + " ORDER BY id";
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                if (!string.IsNullOrEmpty(state))
+                {
+                    cmd.Parameters.AddWithValue("$st", state);
+                }
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(ReadCardMove(r));
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>按源路径找移动记录（回滚 / 状态查询）。</summary>
+        public List<CardMoveRow> LoadCardMovesByFrom(string fromPath)
+        {
+            List<CardMoveRow> list = new List<CardMoveRow>();
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("SELECT id, from_path, to_path, work, card_type, state, claimed_by, claimed_at, executed_at, consumed, note FROM card_move WHERE from_path=$f ORDER BY id"))
+            {
+                cmd.Parameters.AddWithValue("$f", fromPath ?? "");
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(ReadCardMove(r));
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>按目标路径找移动记录（导入消费）。</summary>
+        public List<CardMoveRow> LoadCardMovesByTo(string toPath)
+        {
+            List<CardMoveRow> list = new List<CardMoveRow>();
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("SELECT id, from_path, to_path, work, card_type, state, claimed_by, claimed_at, executed_at, consumed, note FROM card_move WHERE to_path=$t ORDER BY id"))
+            {
+                cmd.Parameters.AddWithValue("$t", toPath ?? "");
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(ReadCardMove(r));
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>认领一条移动（pending → claimed，原子）——返回 true = 认领成功（affected 行数 1）。</summary>
+        public bool ClaimCardMove(long id, string by)
+        {
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("UPDATE card_move SET state='claimed', claimed_by=$by, claimed_at=$now WHERE id=$id AND state='pending'"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.Parameters.AddWithValue("$by", by ?? "");
+                cmd.Parameters.AddWithValue("$now", Now());
+                return cmd.ExecuteNonQuery() == 1;
+            }
+        }
+
+        /// <summary>结束一条移动（→ done / failed / skipped）。</summary>
+        public void FinishCardMove(long id, string state, string note)
+        {
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("UPDATE card_move SET state=$st, executed_at=$now, note=COALESCE($note, note) WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.Parameters.AddWithValue("$st", state ?? "");
+                cmd.Parameters.AddWithValue("$note", (object)note ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$now", Now());
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>回滚一条已完成移动——状态回 pending、清除认领与消费标记（文件与 DB 行由调用方反向搬回）。</summary>
+        public void ReopenCardMove(long id)
+        {
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("UPDATE card_move SET state='pending', consumed=0, claimed_by=NULL, claimed_at=NULL, executed_at=NULL WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>回收本机已死进程的认领（claimed_by 以本机名开头且 pid 不存在 → pending）；返回回收条数。并发执行时存活进程的认领不动。</summary>
+        public int ResetDeadLocalClaims(string machineName)
+        {
+            EnsureIndexTables();
+            List<CardMoveRow> claimed = LoadCardMoves("claimed");
+            int n = 0;
+            string prefix = (machineName ?? "") + "/";
+            foreach (CardMoveRow mv in claimed)
+            {
+                string by = mv.ClaimedBy ?? "";
+                if (!by.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                int pid = 0;
+                int.TryParse(by.Substring(prefix.Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out pid);
+                if (pid > 0 && ProcessExists(pid))
+                {
+                    continue;
+                }
+                using (SqliteCommand cmd = NewCommand("UPDATE card_move SET state='pending', claimed_by=NULL, claimed_at=NULL WHERE id=$id"))
+                {
+                    cmd.Parameters.AddWithValue("$id", mv.Id);
+                    cmd.ExecuteNonQuery();
+                }
+                n = n + 1;
+            }
+            return n;
+        }
+
+        /// <summary>进程是否存在（已退出 / 无权限 / 不存在都按不存在处理）。</summary>
+        private static bool ProcessExists(int pid)
+        {
+            try
+            {
+                using (System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(pid))
+                {
+                    return !p.HasExited;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>回收超时的 claimed（认领超过 minutes 分钟 → pending）；返回回收条数。</summary>
+        public int ResetStaleCardClaims(int minutes)
+        {
+            EnsureIndexTables();
+            string cutoff = DateTime.UtcNow.AddMinutes(-Math.Max(1, minutes)).ToString(StampFormat, CultureInfo.InvariantCulture);
+            using (SqliteCommand cmd = NewCommand("UPDATE card_move SET state='pending', claimed_by=NULL, claimed_at=NULL WHERE state='claimed' AND (claimed_at IS NULL OR claimed_at < $cutoff)"))
+            {
+                cmd.Parameters.AddWithValue("$cutoff", cutoff);
+                return cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>标记 done 记录已被导入消费；返回标记条数。</summary>
+        public int MarkCardMovesConsumed(List<long> ids)
+        {
+            if (ids == null || ids.Count == 0)
+            {
+                return 0;
+            }
+            EnsureIndexTables();
+            int n = 0;
+            Begin();
+            try
+            {
+                foreach (long id in ids)
+                {
+                    using (SqliteCommand cmd = NewCommand("UPDATE card_move SET consumed=1 WHERE id=$id"))
+                    {
+                        cmd.Parameters.AddWithValue("$id", id);
+                        n = n + cmd.ExecuteNonQuery();
+                    }
+                }
+                Commit();
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+            return n;
+        }
+
+        /// <summary>读一行移动记录（列序固定）。</summary>
+        private static CardMoveRow ReadCardMove(SqliteDataReader r)
+        {
+            return new CardMoveRow
+            {
+                Id = r.GetInt64(0),
+                FromPath = r.IsDBNull(1) ? "" : r.GetString(1),
+                ToPath = r.IsDBNull(2) ? "" : r.GetString(2),
+                Work = r.IsDBNull(3) ? "" : r.GetString(3),
+                CardType = r.IsDBNull(4) ? "" : r.GetString(4),
+                State = r.IsDBNull(5) ? "" : r.GetString(5),
+                ClaimedBy = r.IsDBNull(6) ? "" : r.GetString(6),
+                ClaimedAt = r.IsDBNull(7) ? "" : r.GetString(7),
+                ExecutedAt = r.IsDBNull(8) ? "" : r.GetString(8),
+                Consumed = !r.IsDBNull(9) && r.GetInt64(9) != 0,
+                Note = r.IsDBNull(10) ? "" : r.GetString(10)
+            };
+        }
+
+        /// <summary>规则类型枚举 → DB 文本（dir / kw / chara / author）。</summary>
+        private static string RuleKindText(CardRuleKind kind)
+        {
+            return kind == CardRuleKind.Dir ? "dir"
+                : (kind == CardRuleKind.Author ? "author"
+                : (kind == CardRuleKind.Chara ? "chara" : "kw"));
+        }
+
+        /// <summary>DB 文本 → 规则类型枚举（未知按关键词——写入侧只产出四种合法值）。</summary>
+        private static CardRuleKind ParseRuleKind(string kind)
+        {
+            string k = (kind ?? "").Trim().ToLowerInvariant();
+            if (k == "dir")
+            {
+                return CardRuleKind.Dir;
+            }
+            if (k == "author")
+            {
+                return CardRuleKind.Author;
+            }
+            if (k == "chara")
+            {
+                return CardRuleKind.Chara;
+            }
+            return CardRuleKind.Keyword;
         }
 
         /// <summary>某库根下的卡片行（id + 路径，按路径升序）——引用补读等逐卡操作用；pendingStep 非空时只取该步骤无完成戳的卡。</summary>

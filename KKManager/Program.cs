@@ -107,7 +107,7 @@ namespace KKManager
                 case "sort":
                     return SortCommand(db, rest);
                 case "card-sort":
-                    return CardSortCommand(rest);
+                    return CardSortCommand(db, rest);
                 case "index-import":
                     return IndexImportCommand(db, rest);
                 case "idx":
@@ -186,11 +186,11 @@ namespace KKManager
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
             Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
-            Console.WriteLine("  card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]  扫卡片 / mod / 其它文件出整理计划（卡片按卡类型归位、zipmod 归 mod、其余保源内路径；重名自动跳过或加 [dupN]）");
+            Console.WriteLine("  card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]  扫卡片 / mod / 其它文件出整理计划（卡片按 01-卡片/<卡类型>/<作品>/ 归位、zipmod 归 mod、其余保源内路径；布局不合格即拒绝、重名自动跳过或加 [dupN]）");
             Console.WriteLine("  card-sort show [--out <计划.tsv>]     读整理计划并核对实况（逐条看源在不在、目标在不在）");
             Console.WriteLine("  card-sort exec [--out <计划.tsv>] --yes  执行整理计划（同盘改名搬运；逐条落状态，中断安全）");
-            Console.WriteLine("  card-sort rules [--write <规则.tsv>]  看 / 导出分类规则模板（内置规则 + 外部规则文件合并后的全量）");
-            Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从既有索引学「角色名 → 作品」规则并写进规则文件（整理过的索引成为下一轮的判据）");
+            Console.WriteLine("  card-sort rules [--import <规则.tsv> [--origin manual|learn|builtin]] [--write <规则.tsv>]  规则库：DB 是真相源——默认列出；--import 导入 TSV；--write 导出 TSV");
+            Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从索引学「角色名 → 作品」规则写进规则库（origin=learn；已有同名规则保留原值）");
             Console.WriteLine("  card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--yes]  按维度重排卡片目录（work / author / chara 分子目录，flat 恢复扁平；同盘改名，可反复切换）");
             Console.WriteLine("  index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]  读 kkc 风格索引写库（不扫文件系统）；--old-root 同时迁移库根路径并清旧记录");
             Console.WriteLine("  idx [--kind 卡|mod] [--work <作品>] [--author <作者>] [--q <关键词>] [--limit N] [--root <库根>]  查索引元数据（作品 / 作者 / 角色 / 来源——索引导入独有字段）");
@@ -1251,6 +1251,8 @@ namespace KKManager
                     int purgedFirst = hub.PurgeRoot(cfg, root);
                     Console.WriteLine("导入前清理：root 旧记录（受影响 mod guid " + purgedFirst + " 个）");
                 }
+                // [段 2.5] 消费已完成的移动记录——DB 行从旧路径迁到新路径（保 card_id / card_mod 引用），再导入
+                hub.ConsumeCardMoves(cfg, root, m => Console.WriteLine("  " + m));
                 IndexImportResult r = IndexImporter.Import(hub, cfg, modRoot ?? cardRoot, cardRoot, index, m => Console.WriteLine("  " + m));
                 if (!string.IsNullOrEmpty(r.Error))
                 {
@@ -1652,8 +1654,8 @@ namespace KKManager
             }
         }
 
-        /// <summary>卡片整理命令行——plan 扫源目录出计划 / show 核对 / exec 执行 / rules 导出规则模板。</summary>
-        private static int CardSortCommand(List<string> rest)
+        /// <summary>卡片整理命令行——plan 扫源目录出计划 / show 核对 / exec 执行 / rules 规则库（读 / 导入 / 导出）。</summary>
+        private static int CardSortCommand(string db, List<string> rest)
         {
             string sub = rest.Count > 0 ? rest[0] : "show";
             if (rest.Count > 0)
@@ -1661,7 +1663,7 @@ namespace KKManager
                 rest.RemoveAt(0);
             }
             string outPath = Take(rest, "--out") ?? Path.Combine(AppContext.BaseDirectory, "data", "card-plan.tsv");
-            string rulesPath = Take(rest, "--rules") ?? Path.Combine(AppContext.BaseDirectory, "data", "card-rules.tsv");
+            string rulesPath = Take(rest, "--rules");   // 显式给出 = 导入入口（规则真相源是 DB，不再默认读 exe 旁 TSV）
             string dest = Take(rest, "--dest");
             bool yes = rest.Remove("--yes");
 
@@ -1685,23 +1687,37 @@ namespace KKManager
             if (sub == "rules")
             {
                 string write = Take(rest, "--write");
-                List<CardRule> merged = CardOrganizer.MergeRules(CardOrganizer.BuiltinRules(), CardOrganizer.LoadRules(rulesPath, m => Console.WriteLine(m)));
-                if (write != null)
+                string import = Take(rest, "--import");
+                string origin = Take(rest, "--origin") ?? "manual";
+                using (StoreHub hub = new StoreHub(db))
                 {
-                    CardOrganizer.WriteRules(write, merged);
-                    Console.WriteLine("已写出规则模板：" + write + "（" + merged.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                    hub.Core.EnsureIndexTables();
+                    if (import != null)
+                    {
+                        List<CardRule> imported = CardOrganizer.LoadRules(import, m => Console.WriteLine(m));
+                        int n = hub.Core.MergeCardRules(imported, origin, true);
+                        Console.WriteLine("已导入规则库：" + import + " → " + n.ToString(CultureInfo.InvariantCulture) + " 条（origin=" + origin + "）");
+                    }
+                    List<CardRule> dbRules = hub.Core.LoadCardRules();
+                    if (dbRules.Count == 0)
+                    {
+                        Console.WriteLine("规则库为空：" + db + "——先导入 card-sort rules --import <规则.tsv> [--origin manual]");
+                        return 0;
+                    }
+                    if (write != null)
+                    {
+                        CardOrganizer.WriteRules(write, dbRules);
+                        Console.WriteLine("已导出规则：" + write + "（" + dbRules.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                        return 0;
+                    }
+                    Console.WriteLine("规则库：" + db + "（启用中 " + dbRules.Count.ToString(CultureInfo.InvariantCulture) + " 条）：");
+                    foreach (CardRule r in dbRules)
+                    {
+                        Console.WriteLine("  " + CardRuleKindText(r.Kind) + "\t" + r.Match + "\t" + r.Value + "\t" + (r.Origin ?? "")
+                            + "\t" + r.Votes.ToString(CultureInfo.InvariantCulture) + "\t" + r.Works.ToString(CultureInfo.InvariantCulture));
+                    }
                     return 0;
                 }
-                Console.WriteLine("规则文件：" + rulesPath + (File.Exists(rulesPath) ? "" : "（不存在——只用内置规则）"));
-                Console.WriteLine("合并后共 " + merged.Count.ToString(CultureInfo.InvariantCulture) + " 条：");
-                foreach (CardRule r in merged)
-                {
-                    string kind = r.Kind == CardRuleKind.Dir ? "dir"
-                        : (r.Kind == CardRuleKind.Author ? "author"
-                        : (r.Kind == CardRuleKind.Chara ? "chara" : "kw"));
-                    Console.WriteLine("  " + kind + "\t" + r.Match + "\t" + r.Value);
-                }
-                return 0;
             }
 
             if (sub == "layout")
@@ -1746,10 +1762,10 @@ namespace KKManager
             if (sub == "learn")
             {
                 string from = Take(rest, "--from");
-                string write = Take(rest, "--write") ?? rulesPath;
+                string write = Take(rest, "--write");
                 if (string.IsNullOrEmpty(from))
                 {
-                    Console.Error.WriteLine("用法: card-sort learn --from <索引.tsv> [--write <规则.tsv>]");
+                    Console.Error.WriteLine("用法: card-sort learn --from <索引.tsv> [--write <导出规则.tsv>]");
                     return 2;
                 }
                 List<CardRule> learned = CardOrganizer.LearnRules(from, m => Console.WriteLine(m));
@@ -1758,8 +1774,18 @@ namespace KKManager
                     Console.WriteLine("没有学到规则（索引里没有可用的「角色名 + 作品」行）");
                     return 0;
                 }
-                CardOrganizer.AppendRules(write, learned);
-                Console.WriteLine("已写入规则文件：" + write + "（学 " + learned.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    int n = hub.Core.LearnCardRules(learned);
+                    Console.WriteLine("已写入规则库：" + db + "（学 " + n.ToString(CultureInfo.InvariantCulture) + " 条，origin=learn；已有同名规则保留原值）");
+                    if (write != null)
+                    {
+                        List<CardRule> all = hub.Core.LoadCardRules();
+                        CardOrganizer.WriteRules(write, all);
+                        Console.WriteLine("已导出规则：" + write + "（" + all.Count.ToString(CultureInfo.InvariantCulture) + " 条）");
+                    }
+                }
                 return 0;
             }
 
@@ -1776,9 +1802,56 @@ namespace KKManager
                     Console.Error.WriteLine("缺少 --dest <目标根>（归位到哪个整理库根）");
                     return 2;
                 }
-                List<CardRule> rules = CardOrganizer.MergeRules(CardOrganizer.BuiltinRules(), CardOrganizer.LoadRules(rulesPath, m => Console.WriteLine(m)));
+                List<CardRule> rules;
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    if (rulesPath != null)
+                    {
+                        List<CardRule> imported = CardOrganizer.LoadRules(rulesPath, m => Console.WriteLine(m));
+                        int n = hub.Core.MergeCardRules(imported, "manual", true);
+                        Console.WriteLine("规则导入：" + rulesPath + "（" + n.ToString(CultureInfo.InvariantCulture) + " 条，origin=manual）");
+                    }
+                    if (hub.Core.CountCardRulesOfOrigin("builtin") == 0)
+                    {
+                        int n = hub.Core.MergeCardRules(CardOrganizer.BuiltinRules(), "builtin", false);
+                        Console.WriteLine("规则库缺内置规则——已补 " + n.ToString(CultureInfo.InvariantCulture) + " 条（origin=builtin）");
+                    }
+                    rules = hub.Core.LoadCardRules();
+                    Console.WriteLine("规则来源：DB（" + rules.Count.ToString(CultureInfo.InvariantCulture) + " 条启用）");
+                }
                 CardPlan plan = CardOrganizer.BuildPlan(srcs, dest, rules, m => Console.WriteLine(m));
+                // 闸门：目标路径不落当前布局（01-卡片/<卡类型>/<作品>/<文件名>）即拒绝——不写出错误计划
+                int layoutBad = CardOrganizer.ValidateCardLayout(dest, plan, m => Console.Error.WriteLine("  " + m));
+                if (layoutBad > 0)
+                {
+                    Console.Error.WriteLine("布局校验失败：" + layoutBad.ToString(CultureInfo.InvariantCulture) + " 条卡片目标不在作品子目录——计划未写出");
+                    return 3;
+                }
                 CardOrganizer.WritePlan(outPath, plan);
+                // 闸门 3 前置：映射先落盘——待搬条目写 card_move(pending)，写在任何文件操作之前
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    List<Store.CardMoveRow> moveRows = new List<Store.CardMoveRow>();
+                    foreach (CardPlanItem it in plan.Items)
+                    {
+                        if (!it.Move || it.State != CardOrganizer.StatePending)
+                        {
+                            continue;
+                        }
+                        moveRows.Add(new Store.CardMoveRow
+                        {
+                            FromPath = it.SrcPath,
+                            ToPath = it.DestPath,
+                            Work = it.Work,
+                            CardType = it.CardType,
+                            Note = it.Note
+                        });
+                    }
+                    int n = hub.Core.UpsertCardMoves(moveRows);
+                    Console.WriteLine("移动映射已落盘：" + n.ToString(CultureInfo.InvariantCulture) + " 条（card_move pending · DB " + db + "）");
+                }
                 PrintCardPlan(plan);
                 Console.WriteLine();
                 Console.WriteLine("计划已写出：" + outPath);
@@ -1818,6 +1891,142 @@ namespace KKManager
                 return 0;
             }
 
+            if (sub == "rollback")
+            {
+                if (!yes)
+                {
+                    Console.Error.WriteLine("回滚会移动磁盘文件——请加 --yes 确认");
+                    return 2;
+                }
+                string rollbackRoot = Take(rest, "--root");
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    RootsConfig cfg = hub.Core.LoadRoots();
+                    RootsRules.Normalize(cfg);
+                    hub.EnsureMigrated(cfg);
+                    List<Store.CardMoveRow> moves = hub.Core.LoadCardMoves("done");
+                    if (moves.Count == 0)
+                    {
+                        Console.WriteLine("没有可回滚的移动记录（done 0 条）");
+                        return 0;
+                    }
+                    string rootPath = rollbackRoot;
+                    if (string.IsNullOrEmpty(rootPath))
+                    {
+                        foreach (RootEntry e in cfg.cardRoots)
+                        {
+                            string p = (e.path ?? "").TrimEnd('\\', '/');
+                            if (p.Length > 0 && (moves[0].ToPath ?? "").StartsWith(p + "\\", StringComparison.OrdinalIgnoreCase))
+                            {
+                                rootPath = p;
+                                break;
+                            }
+                        }
+                    }
+                    RootEntry cardRoot = null;
+                    if (!string.IsNullOrEmpty(rootPath))
+                    {
+                        foreach (RootEntry e in cfg.cardRoots)
+                        {
+                            if (string.Equals((e.path ?? "").TrimEnd('\\', '/'), rootPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                cardRoot = e;
+                                break;
+                            }
+                        }
+                    }
+                    if (cardRoot == null)
+                    {
+                        Console.Error.WriteLine("回滚定位不到库根——用 --root <整理根> 指定");
+                        return 3;
+                    }
+                    List<Store> shards = hub.StoresOfBase(hub.CardBaseOf(cardRoot));
+                    string prefix = rootPath.TrimEnd('\\', '/');
+                    int movedFiles = 0;
+                    int skipped = 0;
+                    int failed = 0;
+                    foreach (Store.CardMoveRow mv in moves)
+                    {
+                        if (!(mv.ToPath ?? "").StartsWith(prefix + "\\", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+                        try
+                        {
+                            if (!File.Exists(mv.ToPath))
+                            {
+                                skipped = skipped + 1;
+                                continue;
+                            }
+                            if (File.Exists(mv.FromPath))
+                            {
+                                failed = failed + 1;
+                                Console.Error.WriteLine("  原位置已有文件，跳过：" + mv.FromPath);
+                                continue;
+                            }
+                            string dir = Path.GetDirectoryName(mv.FromPath);
+                            if (!string.IsNullOrEmpty(dir))
+                            {
+                                Directory.CreateDirectory(dir);
+                            }
+                            File.Move(mv.ToPath, mv.FromPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            failed = failed + 1;
+                            Console.Error.WriteLine("  回滚失败：" + mv.ToPath + " —— " + ex.Message);
+                            continue;
+                        }
+                        Store fromStore = null;
+                        foreach (Store s in hub.AllStores(cfg))
+                        {
+                            if (s.CardIdOf(mv.ToPath ?? "") > 0)
+                            {
+                                fromStore = s;
+                                break;
+                            }
+                        }
+                        if (fromStore != null && shards != null && shards.Count > 0)
+                        {
+                            int shard = StoreHub.ShardOfPath(mv.FromPath, shards.Count);
+                            Store toStore = shards[shard];
+                            string rel = mv.FromPath.Substring(prefix.Length).TrimStart('\\');
+                            string oldFolder = Path.GetDirectoryName(rel) ?? "";
+                            hub.MoveCardRow(fromStore, toStore, mv.ToPath, mv.FromPath, oldFolder);
+                        }
+                        hub.Core.ReopenCardMove(mv.Id);
+                        movedFiles = movedFiles + 1;
+                    }
+                    CardPlan rbPlan = CardOrganizer.ReadPlan(outPath);
+                    bool touched = false;
+                    foreach (CardPlanItem it in rbPlan.Items)
+                    {
+                        if (it.State != CardOrganizer.StateMoved)
+                        {
+                            continue;
+                        }
+                        foreach (Store.CardMoveRow mv in moves)
+                        {
+                            if (string.Equals(it.DestPath, mv.ToPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                it.State = CardOrganizer.StatePending;
+                                it.Note = string.IsNullOrEmpty(it.Note) ? "已回滚" : it.Note + "；已回滚";
+                                touched = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (touched)
+                    {
+                        CardOrganizer.WritePlan(outPath, rbPlan);
+                        Console.WriteLine("状态已回写：" + outPath);
+                    }
+                    Console.WriteLine("回滚：文件回位 " + movedFiles.ToString(CultureInfo.InvariantCulture)
+                        + " · 跳过 " + skipped.ToString(CultureInfo.InvariantCulture) + " · 失败 " + failed.ToString(CultureInfo.InvariantCulture));
+                    return failed > 0 ? 1 : 0;
+                }
+            }
+
             if (sub == "exec")
             {
                 if (!yes)
@@ -1825,16 +2034,219 @@ namespace KKManager
                     Console.Error.WriteLine("执行会移动磁盘文件——请加 --yes 确认（并确保游戏 / 面板已关闭）");
                     return 2;
                 }
-                CardOrganizer.Execute(loaded, m => Console.WriteLine(m));
-                CardOrganizer.WritePlan(outPath, loaded);
-                PrintCardPlan(loaded);
-                Console.WriteLine();
-                Console.WriteLine("状态已回写：" + outPath);
-                return loaded.Count(CardOrganizer.StateFailed) > 0 ? 1 : 0;
+                // 闸门 5：布局完整（防手改计划 TSV）——卡片目标必须落 01-卡片/<卡类型>/<作品>/
+                int layoutBad = CardOrganizer.ValidateCardLayout(null, loaded, m => Console.Error.WriteLine("  " + m));
+                if (layoutBad > 0)
+                {
+                    Console.Error.WriteLine("闸门[布局]：" + layoutBad.ToString(CultureInfo.InvariantCulture) + " 条卡片目标不在作品子目录——拒绝执行");
+                    return 3;
+                }
+                int pendingMove = 0;
+                int conflicts = 0;
+                string firstDest = null;
+                foreach (CardPlanItem it in loaded.Items)
+                {
+                    if (it.State == CardOrganizer.StateConflict)
+                    {
+                        conflicts = conflicts + 1;
+                    }
+                    if (it.Move && it.State == CardOrganizer.StatePending)
+                    {
+                        pendingMove = pendingMove + 1;
+                        if (firstDest == null)
+                        {
+                            firstDest = it.DestPath;
+                        }
+                    }
+                }
+                // 闸门 2：可搬条目数（0 = 红灯）
+                if (pendingMove == 0)
+                {
+                    Console.Error.WriteLine("闸门[可搬条目数]：待搬 0 条——红灯（先核对计划，不是「没事可做」）");
+                    return 3;
+                }
+                // 闸门 4：冲突清零
+                if (conflicts > 0)
+                {
+                    Console.Error.WriteLine("闸门[冲突]：" + conflicts.ToString(CultureInfo.InvariantCulture) + " 条冲突未清零——先处理再执行");
+                    return 3;
+                }
+                string execRoot = Take(rest, "--root");
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    RootsConfig cfg = hub.Core.LoadRoots();
+                    RootsRules.Normalize(cfg);
+                    hub.EnsureMigrated(cfg);
+                    string rootPath = execRoot;
+                    if (string.IsNullOrEmpty(rootPath))
+                    {
+                        foreach (RootEntry e in cfg.cardRoots)
+                        {
+                            string p = (e.path ?? "").TrimEnd('\\', '/');
+                            if (p.Length > 0 && firstDest != null && firstDest.StartsWith(p + "\\", StringComparison.OrdinalIgnoreCase))
+                            {
+                                rootPath = p;
+                                break;
+                            }
+                        }
+                    }
+                    if (string.IsNullOrEmpty(rootPath))
+                    {
+                        Console.Error.WriteLine("闸门[索引新鲜度]：定位不到计划所属库根——用 --root <整理根> 指定");
+                        return 3;
+                    }
+                    // 闸门 1：索引新鲜度（抽样 200 条，失配率 ≤1%）
+                    List<StoreHub.CardTarget> cards = hub.CardsOfRoot(cfg, rootPath, null);
+                    int sample = cards.Count <= 200 ? cards.Count : 200;
+                    if (sample == 0)
+                    {
+                        Console.Error.WriteLine("闸门[索引新鲜度]：库根下无卡片行（索引未导入）——先 index-import 再执行");
+                        return 3;
+                    }
+                    int missing = 0;
+                    int stride = cards.Count / sample < 1 ? 1 : cards.Count / sample;
+                    int taken = 0;
+                    for (int i = 0; i < cards.Count && taken < sample; i = i + stride)
+                    {
+                        taken = taken + 1;
+                        if (!File.Exists(cards[i].FilePath))
+                        {
+                            missing = missing + 1;
+                        }
+                    }
+                    double missRate = taken == 0 ? 100.0 : missing * 100.0 / taken;
+                    if (missRate > 1.0)
+                    {
+                        Console.Error.WriteLine("闸门[索引新鲜度]：抽样 " + taken.ToString(CultureInfo.InvariantCulture) + " 条 · 失配 " + missing.ToString(CultureInfo.InvariantCulture)
+                            + " 条（" + missRate.ToString("F2", CultureInfo.InvariantCulture) + "% > 1%）——索引过期，先重建索引（kkc_index.py --split --refs）");
+                        return 3;
+                    }
+                    Console.WriteLine("闸门[索引新鲜度]：抽样 " + taken.ToString(CultureInfo.InvariantCulture) + " · 失配 " + missing.ToString(CultureInfo.InvariantCulture)
+                        + "（" + missRate.ToString("F2", CultureInfo.InvariantCulture) + "%）通过");
+                    // 闸门 3：映射先落盘——每条待搬在 card_move 有一行（pending / claimed）
+                    List<Store.CardMoveRow> moves = hub.Core.LoadCardMoves(null);
+                    Dictionary<string, Store.CardMoveRow> moveByFrom = new Dictionary<string, Store.CardMoveRow>(StringComparer.OrdinalIgnoreCase);
+                    foreach (Store.CardMoveRow mv in moves)
+                    {
+                        if (!moveByFrom.ContainsKey(mv.FromPath))
+                        {
+                            moveByFrom[mv.FromPath] = mv;
+                        }
+                    }
+                    int missingMove = 0;
+                    foreach (CardPlanItem it in loaded.Items)
+                    {
+                        if (!it.Move || it.State != CardOrganizer.StatePending)
+                        {
+                            continue;
+                        }
+                        Store.CardMoveRow mv;
+                        if (!moveByFrom.TryGetValue(it.SrcPath, out mv))
+                        {
+                            missingMove = missingMove + 1;
+                            Console.Error.WriteLine("  无映射：" + it.SrcPath);
+                        }
+                        else if (mv.State != "pending" && mv.State != "claimed")
+                        {
+                            missingMove = missingMove + 1;
+                            Console.Error.WriteLine("  映射状态不可搬（" + mv.State + "）：" + it.SrcPath);
+                        }
+                    }
+                    if (missingMove > 0)
+                    {
+                        Console.Error.WriteLine("闸门[映射]：" + missingMove.ToString(CultureInfo.InvariantCulture) + " 条待搬缺 card_move 映射（或状态已终结）——重跑 plan 落映射");
+                        return 3;
+                    }
+                    int reclaimed = hub.Core.ResetStaleCardClaims(10) + hub.Core.ResetDeadLocalClaims(Environment.MachineName);
+                    if (reclaimed > 0)
+                    {
+                        Console.WriteLine("回收失效认领：" + reclaimed.ToString(CultureInfo.InvariantCulture) + " 条");
+                    }
+                    // 执行：认领（DB 落盘）→ 搬文件 → 落状态
+                    int moved = 0;
+                    int skipped = 0;
+                    int failed = 0;
+                    int missed = 0;
+                    string executor = Environment.MachineName + "/" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+                    foreach (CardPlanItem it in loaded.Items)
+                    {
+                        if (!it.Move || it.State != CardOrganizer.StatePending)
+                        {
+                            continue;
+                        }
+                        Store.CardMoveRow mv;
+                        if (!moveByFrom.TryGetValue(it.SrcPath, out mv))
+                        {
+                            continue;
+                        }
+                        if (mv.State == "done" || mv.State == "skipped")
+                        {
+                            it.State = CardOrganizer.StateSkipped;
+                            it.Note = string.IsNullOrEmpty(it.Note) ? "映射已终结" : it.Note + "；映射已终结";
+                            skipped = skipped + 1;
+                            continue;
+                        }
+                        if (!hub.Core.ClaimCardMove(mv.Id, executor))
+                        {
+                            missed = missed + 1;
+                            it.Note = string.IsNullOrEmpty(it.Note) ? "已被他人认领" : it.Note + "；已被他人认领";
+                            continue;
+                        }
+                        try
+                        {
+                            if (!File.Exists(it.SrcPath))
+                            {
+                                it.State = CardOrganizer.StateSkipped;
+                                it.Note = string.IsNullOrEmpty(it.Note) ? "源已不在" : it.Note + "；源已不在";
+                                hub.Core.FinishCardMove(mv.Id, "skipped", "源已不在");
+                                skipped = skipped + 1;
+                                continue;
+                            }
+                            if (File.Exists(it.DestPath))
+                            {
+                                it.State = CardOrganizer.StateConflict;
+                                it.Note = string.IsNullOrEmpty(it.Note) ? "目标已存在同名文件" : it.Note + "；目标已存在同名文件";
+                                hub.Core.FinishCardMove(mv.Id, "skipped", "目标已存在");
+                                failed = failed + 1;
+                                continue;
+                            }
+                            string dir = Path.GetDirectoryName(it.DestPath);
+                            if (!string.IsNullOrEmpty(dir))
+                            {
+                                Directory.CreateDirectory(dir);
+                            }
+                            File.Move(it.SrcPath, it.DestPath);
+                            it.State = CardOrganizer.StateMoved;
+                            hub.Core.FinishCardMove(mv.Id, "done", it.Note);
+                            moved = moved + 1;
+                        }
+                        catch (Exception ex)
+                        {
+                            it.State = CardOrganizer.StateFailed;
+                            it.Note = string.IsNullOrEmpty(it.Note) ? ex.Message : it.Note + "；" + ex.Message;
+                            hub.Core.FinishCardMove(mv.Id, "failed", ex.Message);
+                            failed = failed + 1;
+                            Console.Error.WriteLine("  失败：" + it.SrcPath + " —— " + ex.Message);
+                        }
+                    }
+                    CardOrganizer.WritePlan(outPath, loaded);
+                    Console.WriteLine("执行：就位 " + moved.ToString(CultureInfo.InvariantCulture) + " · 跳过 " + skipped.ToString(CultureInfo.InvariantCulture)
+                        + " · 失败 " + failed.ToString(CultureInfo.InvariantCulture) + " · 未认领 " + missed.ToString(CultureInfo.InvariantCulture));
+                    Console.WriteLine("状态已回写：" + outPath);
+                    return (failed > 0 || missed > 0) ? 1 : 0;
+                }
             }
 
             Console.Error.WriteLine("未知子命令: " + sub + "（可用：plan / show / exec / rules）");
             return 2;
+        }
+
+        /// <summary>规则类型 → 命令行文本（dir / kw / chara / author）。</summary>
+        private static string CardRuleKindText(CardRuleKind kind)
+        {
+            return kind == CardRuleKind.Dir ? "dir"
+                : (kind == CardRuleKind.Author ? "author"
+                : (kind == CardRuleKind.Chara ? "chara" : "kw"));
         }
 
         /// <summary>打印整理计划摘要（类型 / 状态 / 作品分布 + 待搬样例）。</summary>

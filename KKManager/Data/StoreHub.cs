@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using KKManager.Core;
+using Microsoft.Data.Sqlite;
 
 namespace KKManager.Data
 {
@@ -467,6 +468,270 @@ namespace KKManager.Data
                 RecomputeMod(cfg, g);
             }
             return distinct.Count;
+        }
+
+        /// <summary>把一张卡片行从源分片搬到目标分片（按源路径定位，保 id / 保 card_mod 引用 / 搬 idx_meta）——文件移动后的导入消费用。返回 true = 已搬。</summary>
+        public bool MoveCardRow(Store from, Store to, string fromPath, string newPath, string newFolder)
+        {
+            if (from == null || to == null || string.IsNullOrEmpty(fromPath) || string.IsNullOrEmpty(newPath))
+            {
+                return false;
+            }
+            long cardId = from.CardIdOf(fromPath ?? "");
+            if (cardId <= 0)
+            {
+                return false;
+            }
+            string oldPath = null;
+            long size = 0;
+            long tier = 0;
+            long imageEnd = 0;
+            long uarBlocks = 0;
+            long modCount = 0;
+            string mtime = null;
+            string rootPath = null;
+            string folder = null;
+            string cardType = null;
+            string dataVersion = null;
+            string scanTime = null;
+            string error = null;
+            string chara = null;
+            byte[] thumb = null;
+            using (SqliteCommand cmd = from.NewCommand("SELECT file_path, size, mtime, tier, root_path, folder, card_type, data_version, image_end, uar_blocks, mod_count, thumb, scan_time, error, chara_name FROM card WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (!r.Read())
+                    {
+                        return false;
+                    }
+                    oldPath = r.IsDBNull(0) ? "" : r.GetString(0);
+                    size = r.IsDBNull(1) ? 0 : r.GetInt64(1);
+                    mtime = r.IsDBNull(2) ? "" : r.GetString(2);
+                    tier = r.IsDBNull(3) ? 0 : r.GetInt64(3);
+                    rootPath = r.IsDBNull(4) ? "" : r.GetString(4);
+                    folder = r.IsDBNull(5) ? "" : r.GetString(5);
+                    cardType = r.IsDBNull(6) ? null : r.GetString(6);
+                    dataVersion = r.IsDBNull(7) ? null : r.GetString(7);
+                    imageEnd = r.IsDBNull(8) ? 0 : r.GetInt64(8);
+                    uarBlocks = r.IsDBNull(9) ? 0 : r.GetInt64(9);
+                    modCount = r.IsDBNull(10) ? 0 : r.GetInt64(10);
+                    thumb = r.IsDBNull(11) ? null : (byte[])r.GetValue(11);
+                    scanTime = r.IsDBNull(12) ? "" : r.GetString(12);
+                    error = r.IsDBNull(13) ? null : r.GetString(13);
+                    chara = r.IsDBNull(14) ? null : r.GetString(14);
+                }
+            }
+            // card_mod 引用行（删源行之前读进内存）
+            var mods = new List<object[]>();
+            using (SqliteCommand cmd = from.NewCommand("SELECT mod_guid, property, slot, local_slot, category_no, rec_name, rec_author, rec_website FROM card_mod WHERE card_id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        object[] row = new object[8];
+                        for (int i = 0; i < 8; i = i + 1)
+                        {
+                            row[i] = r.IsDBNull(i) ? null : r.GetValue(i);
+                        }
+                        mods.Add(row);
+                    }
+                }
+            }
+            // idx_meta（删源行之前读）
+            bool hasMeta = false;
+            string idxId = null;
+            string iKind = null;
+            string iCardType = null;
+            string iChara = null;
+            string iWork = null;
+            string iAuthor = null;
+            string iSource = null;
+            string iSrcRel = null;
+            string iNote = null;
+            string iGuid = null;
+            using (SqliteCommand cmd = from.NewCommand("SELECT idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid FROM idx_meta WHERE file_path=$p"))
+            {
+                cmd.Parameters.AddWithValue("$p", oldPath ?? "");
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    if (r.Read())
+                    {
+                        hasMeta = true;
+                        idxId = r.IsDBNull(0) ? null : r.GetString(0);
+                        iKind = r.IsDBNull(1) ? null : r.GetString(1);
+                        iCardType = r.IsDBNull(2) ? null : r.GetString(2);
+                        iChara = r.IsDBNull(3) ? null : r.GetString(3);
+                        iWork = r.IsDBNull(4) ? null : r.GetString(4);
+                        iAuthor = r.IsDBNull(5) ? null : r.GetString(5);
+                        iSource = r.IsDBNull(6) ? null : r.GetString(6);
+                        iSrcRel = r.IsDBNull(7) ? null : r.GetString(7);
+                        iNote = r.IsDBNull(8) ? null : r.GetString(8);
+                        iGuid = r.IsDBNull(9) ? null : r.GetString(9);
+                    }
+                }
+            }
+            // 先删源行（同分片移动时释放 id；card_mod / card_analysis 一并删）
+            from.DeleteCardByPath(oldPath ?? "");
+            if (hasMeta)
+            {
+                using (SqliteCommand cmd = from.NewCommand("DELETE FROM idx_meta WHERE file_path=$p"))
+                {
+                    cmd.Parameters.AddWithValue("$p", oldPath ?? "");
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            // 目标已有同路径行（重复导入残留）——先删
+            to.DeleteCardByPath(newPath);
+            // 插入 id：无冲突用原 id；冲突则分配分片内新 id（card.id 只在分片内唯一）
+            long insertId = cardId;
+            using (SqliteCommand cmd = to.NewCommand("SELECT COUNT(*) FROM card WHERE id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                if (Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+                {
+                    using (SqliteCommand maxCmd = to.NewCommand("SELECT COALESCE(MAX(id),0)+1 FROM card"))
+                    {
+                        insertId = Convert.ToInt64(maxCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+                    }
+                }
+            }
+            using (SqliteCommand ins = to.NewCommand(@"INSERT INTO card(id, file_path, file_name, size, mtime, tier, root_path, folder, card_type, data_version, image_end, uar_blocks, mod_count, thumb, scan_time, error, chara_name)
+                             VALUES($id,$path,$file,$size,$mtime,$tier,$root,$folder,$type,$ver,$img,$uar,$cnt,$thumb,$scan,$err,$chara)"))
+            {
+                ins.Parameters.AddWithValue("$id", insertId);
+                ins.Parameters.AddWithValue("$path", newPath);
+                ins.Parameters.AddWithValue("$file", Path.GetFileName(newPath));
+                ins.Parameters.AddWithValue("$size", size);
+                ins.Parameters.AddWithValue("$mtime", mtime ?? "");
+                ins.Parameters.AddWithValue("$tier", tier);
+                ins.Parameters.AddWithValue("$root", rootPath ?? "");
+                ins.Parameters.AddWithValue("$folder", newFolder ?? folder ?? "");
+                ins.Parameters.AddWithValue("$type", (object)cardType ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$ver", (object)dataVersion ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$img", imageEnd);
+                ins.Parameters.AddWithValue("$uar", uarBlocks);
+                ins.Parameters.AddWithValue("$cnt", modCount);
+                ins.Parameters.AddWithValue("$thumb", (object)thumb ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$scan", scanTime ?? "");
+                ins.Parameters.AddWithValue("$err", (object)error ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$chara", (object)chara ?? DBNull.Value);
+                ins.ExecuteNonQuery();
+            }
+            // card_mod 引用行随卡搬（引用新 id）
+            foreach (object[] row in mods)
+            {
+                using (SqliteCommand ins = to.NewCommand(@"INSERT INTO card_mod(card_id, mod_guid, property, slot, local_slot, category_no, rec_name, rec_author, rec_website)
+                                 VALUES($id,$guid,$prop,$slot,$local,$cat,$rn,$ra,$rw)"))
+                {
+                    ins.Parameters.AddWithValue("$id", insertId);
+                    ins.Parameters.AddWithValue("$guid", (object)row[0] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$prop", (object)row[1] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$slot", (object)row[2] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$local", (object)row[3] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$cat", (object)row[4] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$rn", (object)row[5] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$ra", (object)row[6] ?? DBNull.Value);
+                    ins.Parameters.AddWithValue("$rw", (object)row[7] ?? DBNull.Value);
+                    ins.ExecuteNonQuery();
+                }
+            }
+            if (hasMeta)
+            {
+                to.UpsertIndexMeta(newPath, idxId, iKind, iCardType, iChara, iWork, iAuthor, iSource, iSrcRel, iNote, iGuid);
+            }
+            return true;
+        }
+
+        /// <summary>消费已完成的卡片移动记录（done 且未消费）——把 DB 行从旧路径搬到新路径（保 id / 引用），标记 consumed；返回消费条数。</summary>
+        public int ConsumeCardMoves(RootsConfig cfg, string rootPath, Action<string> log)
+        {
+            List<Store.CardMoveRow> moves = Core.LoadCardMoves("done");
+            if (moves.Count == 0)
+            {
+                return 0;
+            }
+            string prefix = (rootPath ?? "").TrimEnd('\\', '/');
+            RootEntry cardRoot = null;
+            if (cfg != null)
+            {
+                foreach (RootEntry e in cfg.cardRoots)
+                {
+                    if (string.Equals((e.path ?? "").TrimEnd('\\', '/'), prefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cardRoot = e;
+                        break;
+                    }
+                }
+            }
+            if (cardRoot == null)
+            {
+                return 0;
+            }
+            List<Store> shards = StoresOfBase(CardBaseOf(cardRoot));
+            if (shards == null || shards.Count == 0)
+            {
+                return 0;
+            }
+            // [段1] 收集可搬记录（找源行所在分片）
+            var plans = new List<object[]>();
+            var consumedIds = new List<long>();
+            foreach (Store.CardMoveRow mv in moves)
+            {
+                if (mv.Consumed)
+                {
+                    continue;
+                }
+                if (!(mv.ToPath ?? "").StartsWith(prefix + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                Store fromStore = null;
+                foreach (Store s in AllStores(cfg))
+                {
+                    if (s.CardIdOf(mv.FromPath ?? "") > 0)
+                    {
+                        fromStore = s;
+                        break;
+                    }
+                }
+                if (fromStore == null)
+                {
+                    consumedIds.Add(mv.Id);
+                    if (log != null)
+                    {
+                        log("移动记录无对应 DB 行（跳过迁移）：" + mv.FromPath);
+                    }
+                    continue;
+                }
+                plans.Add(new object[] { fromStore, mv.FromPath ?? "", mv.ToPath, ShardOfPath(mv.ToPath, shards.Count), mv.Id });
+            }
+            // [段2] 搬行——冲突由 MoveCardRow 处理（先删源行；id 冲突才给本卡换新 id，不动他人行）
+            int done = 0;
+            foreach (object[] p in plans)
+            {
+                Store fromStore = (Store)p[0];
+                string fromPath = (string)p[1];
+                string toPath = (string)p[2];
+                Store toStore = shards[(int)p[3]];
+                long moveId = (long)p[4];
+                string rel = toPath.Substring(prefix.Length).TrimStart('\\');
+                string newFolder = Path.GetDirectoryName(rel) ?? "";
+                if (MoveCardRow(fromStore, toStore, fromPath, toPath, newFolder))
+                {
+                    consumedIds.Add(moveId);
+                    done = done + 1;
+                }
+            }
+            Core.MarkCardMovesConsumed(consumedIds);
+            if (log != null && consumedIds.Count > 0)
+            {
+                log("移动记录消费：" + done.ToString(CultureInfo.InvariantCulture) + " 条（DB 行已按新路径迁移，保 id）");
+            }
+            return done;
         }
 
         /// <summary>跨库查索引元数据——rootPath 非空时按路径前缀过滤（某库根的记录）；结果按 limit 截断。</summary>

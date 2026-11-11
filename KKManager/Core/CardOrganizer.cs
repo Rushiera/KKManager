@@ -33,6 +33,18 @@ namespace KKManager.Core
 
         /// <summary>命中后填的值（作品名或作者名）。</summary>
         public string Value { get; set; }
+
+        /// <summary>来源：builtin / learn / manual（DB 为真相源；TSV 旧三列格式导入时视为 manual）。</summary>
+        public string Origin { get; set; }
+
+        /// <summary>学到此规则时的支撑卡片数（learn 统计；非学习来源为 0）。</summary>
+        public int Votes { get; set; }
+
+        /// <summary>该 match 在学习源里出现过的作品数（1 = 单作品强证据）。</summary>
+        public int Works { get; set; }
+
+        /// <summary>是否启用（DB 停用不删，可回滚）。</summary>
+        public bool Enabled { get; set; } = true;
     }
 
     /// <summary>卡片整理计划的一行。</summary>
@@ -255,6 +267,21 @@ namespace KKManager.Core
                     continue;
                 }
                 string kind = cols[0].Trim().ToLowerInvariant();
+                int votes = 0;
+                int works = 0;
+                string origin = cols.Length >= 4 ? cols[3].Trim().ToLowerInvariant() : "";
+                if (origin.Length == 0)
+                {
+                    origin = "manual";
+                }
+                if (cols.Length >= 5)
+                {
+                    int.TryParse(cols[4].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out votes);
+                }
+                if (cols.Length >= 6)
+                {
+                    int.TryParse(cols[5].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out works);
+                }
                 CardRuleKind k;
                 if (kind == "dir")
                 {
@@ -280,7 +307,7 @@ namespace KKManager.Core
                     }
                     continue;
                 }
-                rules.Add(new CardRule { Kind = k, Match = cols[1].Trim(), Value = cols[2].Trim() });
+                rules.Add(new CardRule { Kind = k, Match = cols[1].Trim(), Value = cols[2].Trim(), Origin = origin, Votes = votes, Works = works });
             }
             return rules;
         }
@@ -294,14 +321,16 @@ namespace KKManager.Core
                 Directory.CreateDirectory(dir);
             }
             var sb = new StringBuilder();
-            sb.AppendLine("# 类型\tdir / kw / author\t值");
-            sb.AppendLine("# dir = 源目录名 → 作品；kw = 关键词 → 作品；author = 源目录名 → 作者");
+            sb.AppendLine("# 类型\tdir / kw / chara / author\t值\t来源\t票数\t作品数");
+            sb.AppendLine("# dir = 源目录名 → 作品；kw = 关键词 → 作品；chara = 角色名精确 → 作品；author = 源目录名 → 作者");
+            sb.AppendLine("# 来源：builtin / learn / manual；票数 / 作品数为 learn 统计（导出全量带上，导入按列补齐）");
             foreach (CardRule r in rules)
             {
                 string kind = r.Kind == CardRuleKind.Dir ? "dir"
                     : (r.Kind == CardRuleKind.Author ? "author"
                     : (r.Kind == CardRuleKind.Chara ? "chara" : "kw"));
-                sb.AppendLine(kind + "\t" + r.Match + "\t" + r.Value);
+                sb.AppendLine(kind + "\t" + r.Match + "\t" + r.Value + "\t" + (r.Origin ?? "") + "\t"
+                    + r.Votes.ToString(CultureInfo.InvariantCulture) + "\t" + r.Works.ToString(CultureInfo.InvariantCulture));
             }
             File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
         }
@@ -389,7 +418,7 @@ namespace KKManager.Core
                         bestCount = w.Value;
                     }
                 }
-                rules.Add(new CardRule { Kind = CardRuleKind.Chara, Match = kv.Key, Value = best });
+                rules.Add(new CardRule { Kind = CardRuleKind.Chara, Match = kv.Key, Value = best, Origin = "learn", Votes = bestCount, Works = kv.Value.Count });
             }
             if (log != null)
             {
@@ -990,20 +1019,26 @@ namespace KKManager.Core
             return "";
         }
 
-        /// <summary>目标子目录（卡类型 → 目录）——换领域只改这里。</summary>
-        public static string TargetDirOf(string kind)
+        /// <summary>卡片类归类（人物卡 / 服装卡 / 场景卡）——目标必须带作品子目录的三类。</summary>
+        public static bool IsCardKind(string kind)
+        {
+            return kind == KindChara || kind == KindClothes || kind == KindScene;
+        }
+
+        /// <summary>目标子目录（卡类型 + 作品 → 目录）——卡片类按作品分子目录（01-卡片/&lt;卡类型&gt;/&lt;作品&gt;），mod / 其它按固定段；换领域只改这里。</summary>
+        public static string TargetDirOf(string kind, string work)
         {
             if (kind == KindChara)
             {
-                return Path.Combine("01-卡片", "人物卡");
+                return Path.Combine("01-卡片", "人物卡", SafeDirName(work));
             }
             if (kind == KindClothes)
             {
-                return Path.Combine("01-卡片", "服装卡");
+                return Path.Combine("01-卡片", "服装卡", SafeDirName(work));
             }
             if (kind == KindScene)
             {
-                return Path.Combine("01-卡片", "场景卡");
+                return Path.Combine("01-卡片", "场景卡", SafeDirName(work));
             }
             if (kind == KindMod)
             {
@@ -1012,10 +1047,55 @@ namespace KKManager.Core
             return Path.Combine("05-其它", "散件");
         }
 
+        /// <summary>布局校验——卡片条目的目标必须落在 &lt;destRoot&gt;/01-卡片/&lt;卡类型&gt;/&lt;作品&gt;/ 下（不得落扁平根）；返回不合格条数（逐条出声）。</summary>
+        public static int ValidateCardLayout(string destRoot, CardPlan plan, Action<string> log)
+        {
+            int bad = 0;
+            string rootNorm = string.IsNullOrEmpty(destRoot) ? "" : Path.GetFullPath(destRoot).Replace('\\', '/').TrimEnd('/');
+            foreach (CardPlanItem it in plan.Items)
+            {
+                if (!IsCardKind(it.Kind))
+                {
+                    continue;
+                }
+                string destNorm = (it.DestPath ?? "").Replace('\\', '/');
+                string rel = destNorm;
+                if (rootNorm.Length > 0)
+                {
+                    if (!destNorm.StartsWith(rootNorm + "/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bad = bad + 1;
+                        if (log != null)
+                        {
+                            log("布局不合格（" + it.Kind + "）：" + (it.DestPath ?? "") + "——目标不在整理根 " + rootNorm + " 下");
+                        }
+                        continue;
+                    }
+                    rel = destNorm.Substring(rootNorm.Length + 1);
+                }
+                string[] parts = rel.Split('/');
+                // 尾部四段：01-卡片 / 卡类型 / 作品 / 文件名
+                bool ok = parts.Length >= 4
+                    && parts[parts.Length - 4] == "01-卡片"
+                    && parts[parts.Length - 3] == it.Kind
+                    && parts[parts.Length - 2].Trim().Length > 0
+                    && parts[parts.Length - 1].Length > 0;
+                if (!ok)
+                {
+                    bad = bad + 1;
+                    if (log != null)
+                    {
+                        log("布局不合格（" + it.Kind + "）：" + (it.DestPath ?? "") + "——目标须为 01-卡片/" + it.Kind + "/作品/文件名");
+                    }
+                }
+            }
+            return bad;
+        }
+
         /// <summary>算目标路径并检出重名（目标已存在 / 计划内撞车）。</summary>
         private static void PlaceItem(CardPlanItem item, string destRoot, Dictionary<string, Dictionary<string, long>> destFiles, Dictionary<string, HashSet<string>> usedInPlan)
         {
-            string sub = TargetDirOf(item.Kind);
+            string sub = TargetDirOf(item.Kind, item.Work);
             string dir = Path.Combine(destRoot, sub);
             string fileName = Path.GetFileName(item.SrcPath);
             if (item.Kind == KindOther)
