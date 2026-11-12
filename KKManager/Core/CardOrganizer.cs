@@ -767,7 +767,7 @@ namespace KKManager.Core
         /// 生成整理计划——遍历源目录，逐文件判类型 / 角色名 / 作品 / 作者，算出目标路径并检出重名。
         /// 卡片按卡类型归位；zipmod 归 mod；其余归其它（保持源内相对路径）。
         /// </summary>
-        public static CardPlan BuildPlan(IEnumerable<string> srcDirs, string destRoot, List<CardRule> rules, Action<string> log)
+        public static CardPlan BuildPlan(IEnumerable<string> srcDirs, string destRoot, List<CardRule> rules, Action<string> log, bool keepPending = false)
         {
             var plan = new CardPlan
             {
@@ -816,6 +816,12 @@ namespace KKManager.Core
                         continue;
                     }
                     PlaceItem(item, destRoot, destFiles, usedInPlan, categories);
+                    // 待确认保护（2026-11-12）——源已在整理根待确认区内，或显式 --keep-pending：
+                    // 作品仍判不出的条目保持原位（Move=false），不把「质量较高需关注 / 去在看看」等质量分级子目录拍平到待确认根
+                    if (keepPending || IsInPendingArea(item.SrcPath, destRoot))
+                    {
+                        ProtectPending(item);
+                    }
                     plan.Items.Add(item);
                 }
                 if (log != null)
@@ -824,6 +830,60 @@ namespace KKManager.Core
                 }
             }
             return plan;
+        }
+        /// <summary>
+        /// 待确认区判定——源路径已落在整理根的某个待确认目录内（01-卡片/…/待确认/…）。
+        /// </summary>
+        /// <param name="srcPath">源文件绝对路径</param>
+        /// <param name="destRoot">整理根</param>
+        /// <returns>true=已在待确认区内</returns>
+        private static bool IsInPendingArea(string srcPath, string destRoot)
+        {
+            if (string.IsNullOrEmpty(srcPath) || string.IsNullOrEmpty(destRoot))
+            {
+                return false;
+            }
+            string rel;
+            try
+            {
+                rel = Path.GetRelativePath(destRoot, srcPath).Replace('\\', '/');
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            if (rel.StartsWith("../", StringComparison.Ordinal) || rel == ".." || Path.IsPathFullyQualified(rel))
+            {
+                return false;
+            }
+            string[] parts = rel.Split('/');
+            if (parts.Length < 2 || parts[0] != "01-卡片")
+            {
+                return false;
+            }
+            for (int i = 1; i < parts.Length - 1; i = i + 1)
+            {
+                if (parts[i] == WorkPending)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        /// <summary>
+        /// 待确认保护——作品仍判不出的条目保持原位（不写 Move）：待确认是合法终态，其子目录承载质量分级。
+        /// </summary>
+        /// <param name="item">计划条目</param>
+        private static void ProtectPending(CardPlanItem item)
+        {
+            if (item == null || item.Work != WorkPending)
+            {
+                return;
+            }
+            item.Move = false;
+            item.State = StateSkipped;
+            string note = "保留待确认（不搬）";
+            item.Note = string.IsNullOrEmpty(item.Note) ? note : item.Note + "；" + note;
         }
 
         /// <summary>判定单个文件的归类与元数据（不碰磁盘写入）。</summary>

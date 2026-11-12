@@ -186,7 +186,7 @@ namespace KKManager
             Console.WriteLine("  sort exec --yes                       执行整理计划（逐条搬运 + 完成后清空目录；--yes 表示已关游戏）");
             Console.WriteLine("  sort conflict <seq>                   列出这一处整理冲突的候选副本（版本 / 作者 / MD5 实时读——与面板小窗同一实现）");
             Console.WriteLine("  sort keep <seq>                       保留这一份：其余同 guid 非旧版副本判旧版进缓存库，计划条目跟着改指新位置（与面板同一实现）");
-            Console.WriteLine("  card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]  扫卡片 / mod / 其它文件出整理计划（卡片按 01-卡片/<卡类型>/<作品>/ 归位、zipmod 归 mod、其余保源内路径；布局不合格即拒绝、重名自动跳过或加 [dupN]）");
+            Console.WriteLine("  card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>] [--keep-pending]  扫卡片 / mod / 其它文件出整理计划（卡片按 01-卡片/<卡类型>/<作品>/ 归位、zipmod 归 mod、其余保源内路径；布局不合格即拒绝、重名自动跳过或加 [dupN]；源已在待确认区内的条目默认保持原位，--keep-pending 则所有作品=待确认条目一律不搬）");
             Console.WriteLine("  card-sort show [--out <计划.tsv>]     读整理计划并核对实况（逐条看源在不在、目标在不在）");
             Console.WriteLine("  card-sort exec [--out <计划.tsv>] --yes  执行整理计划（同盘改名搬运；逐条落状态，中断安全）");
             Console.WriteLine("  card-sort rules [--import <规则.tsv> [--origin manual|learn|builtin]] [--write <规则.tsv>]  规则库：DB 是真相源——默认列出；--import 导入 TSV；--write 导出 TSV");
@@ -1677,6 +1677,7 @@ namespace KKManager
             string rulesPath = Take(rest, "--rules");   // 显式给出 = 导入入口（规则真相源是 DB，不再默认读 exe 旁 TSV）
             string dest = Take(rest, "--dest");
             bool yes = rest.Remove("--yes");
+            bool keepPending = rest.Remove("--keep-pending");
 
             if (sub == "refs")
             {
@@ -1926,7 +1927,7 @@ namespace KKManager
                 List<string> srcs = new List<string>(rest);
                 if (srcs.Count == 0)
                 {
-                    Console.Error.WriteLine("用法: card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>]");
+                    Console.Error.WriteLine("用法: card-sort plan <源目录...> --dest <目标根> [--rules <规则.tsv>] [--out <计划.tsv>] [--keep-pending]");
                     return 2;
                 }
                 if (string.IsNullOrEmpty(dest))
@@ -1952,7 +1953,7 @@ namespace KKManager
                     rules = hub.Core.LoadCardRules();
                     Console.WriteLine("规则来源：DB（" + rules.Count.ToString(CultureInfo.InvariantCulture) + " 条启用）");
                 }
-                CardPlan plan = CardOrganizer.BuildPlan(srcs, dest, rules, m => Console.WriteLine(m));
+                CardPlan plan = CardOrganizer.BuildPlan(srcs, dest, rules, m => Console.WriteLine(m), keepPending);
                 // 闸门：目标路径不落当前布局（01-卡片/<卡类型>/<作品>/<文件名>）即拒绝——不写出错误计划
                 int layoutBad = CardOrganizer.ValidateCardLayout(dest, plan, m => Console.Error.WriteLine("  " + m));
                 if (layoutBad > 0)
