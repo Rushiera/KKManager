@@ -1202,6 +1202,18 @@ namespace KKManager.Core
                     }
                     rel = destNorm.Substring(rootNorm.Length + 1);
                 }
+                else
+                {
+                    // 无显式整理根（exec 闸门传 null）——以「01-卡片」为锚点剥前缀，兼容绝对路径与相对路径
+                    if (!destNorm.StartsWith("01-卡片/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int anchor = destNorm.IndexOf("/01-卡片/", StringComparison.OrdinalIgnoreCase);
+                        if (anchor >= 0)
+                        {
+                            rel = destNorm.Substring(anchor + 1);
+                        }
+                    }
+                }
                 string[] parts = rel.Split('/');
                 // 人物卡：01-卡片/人物卡/[大类/子类|其它]/作品/文件名；其它卡类型：01-卡片/卡类型/作品/文件名；EroMakeChara 单列
                 bool ok;

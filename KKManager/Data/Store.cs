@@ -2116,6 +2116,12 @@ namespace KKManager.Data
                                  state TEXT NOT NULL DEFAULT 'pending',
                                  claimed_by TEXT, claimed_at TEXT, executed_at TEXT,
                                  consumed INTEGER NOT NULL DEFAULT 0, note TEXT)");
+                // 确认删除区记录——删除动作只移入该区（人工复核后由人手动清理；工具不提供物理删除）
+                Exec(@"CREATE TABLE IF NOT EXISTS card_delete(
+                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                 from_path TEXT NOT NULL, to_path TEXT NOT NULL,
+                                 size INTEGER, state TEXT NOT NULL DEFAULT 'done',
+                                 deleted_at TEXT, note TEXT)");
             }
         }
 
@@ -2602,6 +2608,80 @@ namespace KKManager.Data
                 ExecutedAt = r.IsDBNull(8) ? "" : r.GetString(8),
                 Consumed = !r.IsDBNull(9) && r.GetInt64(9) != 0,
                 Note = r.IsDBNull(10) ? "" : r.GetString(10)
+            };
+        }
+        /// <summary>确认删除区记录的一行——删除动作只移入该区，物理删除由人手动完成。</summary>
+        public class CardDeleteRow
+        {
+            /// <summary>主键。</summary>
+            public long Id { get; set; }
+
+            /// <summary>原绝对路径。</summary>
+            public string FromPath { get; set; }
+
+            /// <summary>确认删除区内的绝对路径。</summary>
+            public string ToPath { get; set; }
+
+            /// <summary>字节数（目录记 0）。</summary>
+            public long Size { get; set; }
+
+            /// <summary>状态（done = 已移入确认删除区）。</summary>
+            public string State { get; set; }
+
+            /// <summary>移入时刻（ISO）。</summary>
+            public string DeletedAt { get; set; }
+
+            /// <summary>备注（人工说明）。</summary>
+            public string Note { get; set; }
+        }
+        /// <summary>写一条确认删除区记录——删除动作的唯一落账方式（不物理删除）。</summary>
+        public void InsertCardDelete(string fromPath, string toPath, long size, string note)
+        {
+            EnsureIndexTables();
+            using (SqliteCommand cmd = NewCommand("INSERT INTO card_delete(from_path,to_path,size,state,deleted_at,note) VALUES($f,$t,$s,'done',$at,$n)"))
+            {
+                cmd.Parameters.AddWithValue("$f", fromPath ?? "");
+                cmd.Parameters.AddWithValue("$t", toPath ?? "");
+                cmd.Parameters.AddWithValue("$s", size);
+                cmd.Parameters.AddWithValue("$at", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+                cmd.Parameters.AddWithValue("$n", note ?? "");
+                cmd.ExecuteNonQuery();
+            }
+        }
+        /// <summary>按时间倒序读确认删除区记录（limit 0 = 全部）。</summary>
+        public List<CardDeleteRow> LoadCardDeletes(int limit)
+        {
+            List<CardDeleteRow> list = new List<CardDeleteRow>();
+            EnsureIndexTables();
+            string sql = "SELECT id, from_path, to_path, size, state, deleted_at, note FROM card_delete ORDER BY id DESC";
+            if (limit > 0)
+            {
+                sql = sql + " LIMIT " + limit.ToString(CultureInfo.InvariantCulture);
+            }
+            using (SqliteCommand cmd = NewCommand(sql))
+            {
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        list.Add(ReadCardDelete(r));
+                    }
+                }
+            }
+            return list;
+        }
+        /// <summary>读一行确认删除区记录（列序固定）。</summary>
+        private static CardDeleteRow ReadCardDelete(SqliteDataReader r)
+        {
+            return new CardDeleteRow
+            {
+                Id = r.GetInt64(0),
+                FromPath = r.IsDBNull(1) ? "" : r.GetString(1),
+                ToPath = r.IsDBNull(2) ? "" : r.GetString(2),
+                Size = r.IsDBNull(3) ? 0 : r.GetInt64(3),
+                State = r.IsDBNull(4) ? "" : r.GetString(4),
+                DeletedAt = r.IsDBNull(5) ? "" : r.GetString(5),
+                Note = r.IsDBNull(6) ? "" : r.GetString(6)
             };
         }
 

@@ -190,6 +190,10 @@ namespace KKManager
             Console.WriteLine("  card-sort show [--out <计划.tsv>]     读整理计划并核对实况（逐条看源在不在、目标在不在）");
             Console.WriteLine("  card-sort exec [--out <计划.tsv>] --yes  执行整理计划（同盘改名搬运；逐条落状态，中断安全）");
             Console.WriteLine("  card-sort rules [--import <规则.tsv> [--origin manual|learn|builtin]] [--write <规则.tsv>]  规则库：DB 是真相源——默认列出；--import 导入 TSV；--write 导出 TSV");
+            Console.WriteLine("  card-sort moves [--limit N] [--all]    搬运记录（最近 N 条，时间倒序——追溯搬了什么、搬到哪里）");
+            Console.WriteLine("  card-sort rollback [--yes] [--root <整理根>] [--last N] [--dry-run]  回滚搬运（done 记录逐条回位；--last N 只回最近 N 条；--dry-run 只列不搬）");
+            Console.WriteLine("  card-sort delete <路径...> --root <整理根> [--note <说明>]  移入确认删除区（<整理根>/99-确认删除/<时间戳>/），人工复核后由人手动删除");
+            Console.WriteLine("  card-sort delete-list [--limit N]     确认删除区记录（时间 / 大小 / 原位置 → 现位置）");
             Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从索引学「角色名 → 作品」规则写进规则库（origin=learn；已有同名规则保留原值）");
             Console.WriteLine("  card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--yes]  按维度重排卡片目录（work / author / chara 分子目录，flat 恢复扁平；同盘改名，可反复切换）");
             Console.WriteLine("  index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]  读 kkc 风格索引写库（不扫文件系统）；--old-root 同时迁移库根路径并清旧记录");
@@ -1766,6 +1770,127 @@ namespace KKManager
                 return layout.Count(CardOrganizer.StateFailed) > 0 ? 1 : 0;
             }
 
+            if (sub == "moves")
+            {
+                int limit = int.Parse(Take(rest, "--limit") ?? "20");
+                bool allStates = rest.Remove("--all");
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    List<Store.CardMoveRow> moves = hub.Core.LoadCardMoves(allStates ? null : "done");
+                    moves.Sort((a, b) => string.Compare(b.ExecutedAt ?? b.ClaimedAt ?? "", a.ExecutedAt ?? a.ClaimedAt ?? "", StringComparison.Ordinal));
+                    Console.WriteLine("搬运记录：" + moves.Count.ToString(CultureInfo.InvariantCulture) + " 条（" + (allStates ? "全部状态" : "done") + "，按时间倒序）");
+                    int shown = 0;
+                    foreach (Store.CardMoveRow mv in moves)
+                    {
+                        if (shown >= limit)
+                        {
+                            break;
+                        }
+                        shown = shown + 1;
+                        Console.WriteLine("  [" + (mv.ExecutedAt ?? mv.ClaimedAt ?? "") + "] " + (mv.State ?? "") + " · " + (mv.Work ?? "") + " | " + mv.FromPath + " → " + mv.ToPath);
+                    }
+                    if (moves.Count > shown)
+                    {
+                        Console.WriteLine("  … 另有 " + (moves.Count - shown).ToString(CultureInfo.InvariantCulture) + " 条（--limit 调整）");
+                    }
+                }
+                return 0;
+            }
+
+            if (sub == "delete")
+            {
+                string deleteRoot = Take(rest, "--root");
+                string deleteNote = Take(rest, "--note");
+                if (rest.Count == 0)
+                {
+                    Console.Error.WriteLine("用法: card-sort delete <路径...> --root <整理根> [--note <说明>]——移入确认删除区，由人工复核后手动删除");
+                    return 2;
+                }
+                if (string.IsNullOrEmpty(deleteRoot))
+                {
+                    Console.Error.WriteLine("缺少 --root <整理根>（确认删除区落 <整理根>/99-确认删除/<时间戳>/）");
+                    return 2;
+                }
+                string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                string zone = Path.Combine(deleteRoot, "99-确认删除", stamp);
+                int movedDel = 0;
+                int missingDel = 0;
+                int failedDel = 0;
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    foreach (string p in rest)
+                    {
+                        if (!File.Exists(p) && !Directory.Exists(p))
+                        {
+                            missingDel = missingDel + 1;
+                            Console.Error.WriteLine("  源已不在：" + p);
+                            continue;
+                        }
+                        string rel;
+                        try
+                        {
+                            rel = Path.GetRelativePath(deleteRoot, p);
+                        }
+                        catch (Exception)
+                        {
+                            rel = Path.GetFileName(p);
+                        }
+                        if (rel.StartsWith("..", StringComparison.Ordinal))
+                        {
+                            rel = Path.GetFileName(p);
+                        }
+                        string destPath = Path.Combine(zone, rel);
+                        try
+                        {
+                            string dir = Path.GetDirectoryName(destPath);
+                            if (!string.IsNullOrEmpty(dir))
+                            {
+                                Directory.CreateDirectory(dir);
+                            }
+                            long size = 0;
+                            if (File.Exists(p))
+                            {
+                                size = new FileInfo(p).Length;
+                                File.Move(p, destPath);
+                            }
+                            else
+                            {
+                                Directory.Move(p, destPath);
+                            }
+                            hub.Core.InsertCardDelete(p, destPath, size, deleteNote ?? "");
+                            movedDel = movedDel + 1;
+                        }
+                        catch (Exception ex)
+                        {
+                            failedDel = failedDel + 1;
+                            Console.Error.WriteLine("  失败：" + p + " —— " + ex.Message);
+                        }
+                    }
+                }
+                Console.WriteLine("确认删除区：" + zone);
+                Console.WriteLine("已移入 " + movedDel.ToString(CultureInfo.InvariantCulture) + " · 源已不在 " + missingDel.ToString(CultureInfo.InvariantCulture) + " · 失败 " + failedDel.ToString(CultureInfo.InvariantCulture));
+                Console.WriteLine("该区为人工复核删除的最终落点——由人手动清理（工具不提供物理清除）。");
+                return failedDel > 0 ? 1 : 0;
+            }
+
+            if (sub == "delete-list")
+            {
+                int limit = int.Parse(Take(rest, "--limit") ?? "50");
+                using (StoreHub hub = new StoreHub(db))
+                {
+                    hub.Core.EnsureIndexTables();
+                    List<Store.CardDeleteRow> rows = hub.Core.LoadCardDeletes(limit);
+                    Console.WriteLine("确认删除区记录：" + rows.Count.ToString(CultureInfo.InvariantCulture) + " 条（按时间倒序）");
+                    foreach (Store.CardDeleteRow row in rows)
+                    {
+                        Console.WriteLine("  [" + (row.DeletedAt ?? "") + "] " + (row.Size > 0 ? (row.Size / 1024.0 / 1024.0).ToString("F1", CultureInfo.InvariantCulture) + " MB" : "目录") + " | " + row.FromPath + " → " + row.ToPath + (string.IsNullOrEmpty(row.Note) ? "" : " · " + row.Note));
+                    }
+                }
+                return 0;
+            }
+
             if (sub == "learn")
             {
                 string from = Take(rest, "--from");
@@ -1867,7 +1992,7 @@ namespace KKManager
             }
 
             CardPlan loaded = CardOrganizer.ReadPlan(outPath);
-            if (loaded.Items.Count == 0)
+            if (loaded.Items.Count == 0 && sub != "rollback")
             {
                 Console.WriteLine("还没有整理计划——先跑 card-sort plan");
                 return 0;
@@ -1900,9 +2025,11 @@ namespace KKManager
 
             if (sub == "rollback")
             {
-                if (!yes)
+                bool dryRun = rest.Remove("--dry-run");
+                int lastN = int.Parse(Take(rest, "--last") ?? "0");
+                if (!yes && !dryRun)
                 {
-                    Console.Error.WriteLine("回滚会移动磁盘文件——请加 --yes 确认");
+                    Console.Error.WriteLine("回滚会移动磁盘文件——请加 --yes 确认（--dry-run 只列不搬）");
                     return 2;
                 }
                 string rollbackRoot = Take(rest, "--root");
@@ -1912,9 +2039,23 @@ namespace KKManager
                     RootsRules.Normalize(cfg);
                     hub.EnsureMigrated(cfg);
                     List<Store.CardMoveRow> moves = hub.Core.LoadCardMoves("done");
+                    if (lastN > 0 && moves.Count > lastN)
+                    {
+                        moves.Sort((a, b) => string.Compare(b.ExecutedAt ?? "", a.ExecutedAt ?? "", StringComparison.Ordinal));
+                        moves = moves.GetRange(0, lastN);
+                    }
                     if (moves.Count == 0)
                     {
                         Console.WriteLine("没有可回滚的移动记录（done 0 条）");
+                        return 0;
+                    }
+                    if (dryRun)
+                    {
+                        Console.WriteLine("dry-run：将回滚 " + moves.Count.ToString(CultureInfo.InvariantCulture) + " 条（未动文件）");
+                        foreach (Store.CardMoveRow mv in moves)
+                        {
+                            Console.WriteLine("  " + (mv.ExecutedAt ?? "") + " | " + mv.ToPath + " → " + mv.FromPath);
+                        }
                         return 0;
                     }
                     string rootPath = rollbackRoot;
