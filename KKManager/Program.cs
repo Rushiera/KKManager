@@ -1302,17 +1302,24 @@ namespace KKManager
             string q = Take(rest, "--q");
             string root = Take(rest, "--root");
             int limit = int.Parse(Take(rest, "--limit") ?? "50");
+            bool wide = rest.Remove("--wide");
             using (StoreHub hub = new StoreHub(db))
             {
                 RootsConfig cfg = hub.Core.LoadRoots();
                 RootsRules.Normalize(cfg);
                 hub.EnsureMigrated(cfg);
                 List<Store.IdxRow> rows = hub.QueryIndexMeta(cfg, root, kind, work, author, q, limit);
-                Console.WriteLine("索引元数据：命中 " + rows.Count + " 条（上限 " + limit + "）");
+                Console.WriteLine("索引元数据：命中 " + rows.Count + " 条（上限 " + limit + "）" + (wide ? " · 宽表 13 列" : ""));
                 foreach (Store.IdxRow r in rows)
                 {
-                    Console.WriteLine("  " + r.IdxId + " | " + r.Kind + " | " + (r.Work ?? "") + " | " +
-                        (r.Chara ?? "") + " | " + (r.Author ?? "") + " | " + r.FilePath);
+                    string line = "  " + r.IdxId + " | " + r.Kind + " | " + (r.Work ?? "") + " | " +
+                        (r.Chara ?? "") + " | " + (r.Author ?? "") + " | " + r.FilePath;
+                    if (wide)
+                    {
+                        line = line + " | " + (r.Series ?? "") + " | " + (r.VnId ?? "") + " | " + (r.VnName ?? "") + " | " +
+                            (r.VndbCharaId ?? "") + " | " + (r.CharaIdConf ?? "") + " | " + (r.Category ?? "") + " | " + (r.SubCategory ?? "");
+                    }
+                    Console.WriteLine(line);
                 }
             }
             return 0;

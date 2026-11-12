@@ -307,12 +307,20 @@ namespace KKManager.Core
             string srcRel = Get(row, "包内路径");
             string note = Get(row, "备注");
             string guid = Get(row, "guid");
+            string series = Get(row, "系列");
+            string vnId = Get(row, "VN_ID");
+            string vnName = Get(row, "VN名");
+            string vndbCharaId = Get(row, "VNDB角色ID");
+            string charaIdConf = Get(row, "角色ID置信度");
+            string category = Get(row, "大类");
+            string subCategory = Get(row, "子类");
             long size = ParseLong(Get(row, "大小"));
 
             // 跳过行（现路径 = 「（跳过…）」）——只登记元数据，不写卡片 / mod
             if (rel.StartsWith("（", StringComparison.Ordinal) || rel.Length == 0)
             {
-                modStore.UpsertIndexMeta("[跳过]" + idxId, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid);
+                modStore.UpsertIndexMeta("[跳过]" + idxId, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid,
+                    series, vnId, vnName, vndbCharaId, charaIdConf, category, subCategory);
                 result.Others = result.Others + 1;
                 return;
             }
@@ -334,7 +342,8 @@ namespace KKManager.Core
                     UarBlocks = 0
                 };
                 long cardId = cs.UpsertCard(ci, cardRoot, folder, null, "");
-                cs.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid);
+                cs.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid,
+                    series, vnId, vnName, vndbCharaId, charaIdConf, category, subCategory);
                 // 引用列（索引自带）——每 guid 一行写 card_mod，mod_count 同步；无引用列时留给 refs-read 补
                 string refsCell = Get(row, "引用mod");
                 if (!string.IsNullOrEmpty(refsCell))
@@ -394,12 +403,14 @@ namespace KKManager.Core
                     // 仍无 guid（manifest 读不到）——只进元数据，不伪造 guid
                     result.Others = result.Others + 1;
                 }
-                modStore.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid);
+                modStore.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid,
+                series, vnId, vnName, vndbCharaId, charaIdConf, category, subCategory);
                 return;
             }
 
             // 其它 / 纯图——只进元数据
-            modStore.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid);
+            modStore.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid,
+                series, vnId, vnName, vndbCharaId, charaIdConf, category, subCategory);
             result.Others = result.Others + 1;
         }
 

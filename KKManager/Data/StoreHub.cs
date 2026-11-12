@@ -553,7 +553,14 @@ namespace KKManager.Data
             string iSrcRel = null;
             string iNote = null;
             string iGuid = null;
-            using (SqliteCommand cmd = from.NewCommand("SELECT idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid FROM idx_meta WHERE file_path=$p"))
+            string iSeries = null;
+            string iVnId = null;
+            string iVnName = null;
+            string iVndbCharaId = null;
+            string iCharaIdConf = null;
+            string iCategory = null;
+            string iSubCategory = null;
+            using (SqliteCommand cmd = from.NewCommand("SELECT idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid, series, vn_id, vn_name, vndb_chara_id, chara_id_conf, category, sub_category FROM idx_meta WHERE file_path=$p"))
             {
                 cmd.Parameters.AddWithValue("$p", oldPath ?? "");
                 using (SqliteDataReader r = cmd.ExecuteReader())
@@ -571,6 +578,13 @@ namespace KKManager.Data
                         iSrcRel = r.IsDBNull(7) ? null : r.GetString(7);
                         iNote = r.IsDBNull(8) ? null : r.GetString(8);
                         iGuid = r.IsDBNull(9) ? null : r.GetString(9);
+                        iSeries = r.IsDBNull(10) ? null : r.GetString(10);
+                        iVnId = r.IsDBNull(11) ? null : r.GetString(11);
+                        iVnName = r.IsDBNull(12) ? null : r.GetString(12);
+                        iVndbCharaId = r.IsDBNull(13) ? null : r.GetString(13);
+                        iCharaIdConf = r.IsDBNull(14) ? null : r.GetString(14);
+                        iCategory = r.IsDBNull(15) ? null : r.GetString(15);
+                        iSubCategory = r.IsDBNull(16) ? null : r.GetString(16);
                     }
                 }
             }
@@ -641,7 +655,8 @@ namespace KKManager.Data
             }
             if (hasMeta)
             {
-                to.UpsertIndexMeta(newPath, idxId, iKind, iCardType, iChara, iWork, iAuthor, iSource, iSrcRel, iNote, iGuid);
+                to.UpsertIndexMeta(newPath, idxId, iKind, iCardType, iChara, iWork, iAuthor, iSource, iSrcRel, iNote, iGuid,
+                    iSeries, iVnId, iVnName, iVndbCharaId, iCharaIdConf, iCategory, iSubCategory);
             }
             return true;
         }

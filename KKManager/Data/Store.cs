@@ -997,9 +997,12 @@ namespace KKManager.Data
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_guid ON card_mod(mod_guid)");
             Exec("CREATE INDEX IF NOT EXISTS ix_card_mod_card ON card_mod(card_id)");
             // 索引元数据——索引导入独有字段（作品 / 作者 / 来源 / 包内路径 / guid）；与 card 行按 file_path 一对一
+            // 参考层七列（系列 / VN_ID / VN名 / VNDB角色ID / 角色ID置信度 / 大类 / 子类）——只作检索与展示，不作主键、不建索引与约束
             Exec(@"CREATE TABLE IF NOT EXISTS idx_meta(
                              file_path TEXT PRIMARY KEY, idx_id TEXT, kind TEXT, card_type TEXT, chara TEXT,
-                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT)");
+                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT,
+                             series TEXT, vn_id TEXT, vn_name TEXT, vndb_chara_id TEXT, chara_id_conf TEXT,
+                             category TEXT, sub_category TEXT)");
             Exec(@"CREATE TABLE IF NOT EXISTS card_timeline(
                              card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
                              has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
@@ -1173,6 +1176,17 @@ namespace KKManager.Data
                 Exec("DROP TABLE IF EXISTS mod");
                 Exec("DROP TABLE IF EXISTS setting");
             }
+        }
+        /// <summary>补 idx_meta 参考层七列（系列 / VN_ID / VN名 / VNDB角色ID / 角色ID置信度 / 大类 / 子类）——旧库不重建表，列已在则不动；只加列，不建索引与约束。</summary>
+        private void EnsureIndexMetaColumns()
+        {
+            EnsureColumn("idx_meta", "series", "TEXT");
+            EnsureColumn("idx_meta", "vn_id", "TEXT");
+            EnsureColumn("idx_meta", "vn_name", "TEXT");
+            EnsureColumn("idx_meta", "vndb_chara_id", "TEXT");
+            EnsureColumn("idx_meta", "chara_id_conf", "TEXT");
+            EnsureColumn("idx_meta", "category", "TEXT");
+            EnsureColumn("idx_meta", "sub_category", "TEXT");
         }
 
         /// <summary>按列存在性补列（增量迁移——旧库不重建整库；列已在则不动）。</summary>
@@ -2077,7 +2091,10 @@ namespace KKManager.Data
         {
             Exec(@"CREATE TABLE IF NOT EXISTS idx_meta(
                              file_path TEXT PRIMARY KEY, idx_id TEXT, kind TEXT, card_type TEXT, chara TEXT,
-                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT)");
+                             work TEXT, author TEXT, source TEXT, src_rel TEXT, note TEXT, guid TEXT,
+                             series TEXT, vn_id TEXT, vn_name TEXT, vndb_chara_id TEXT, chara_id_conf TEXT,
+                             category TEXT, sub_category TEXT)");
+            EnsureIndexMetaColumns();
             if (_isCore)
             {
                 Exec(@"CREATE TABLE IF NOT EXISTS index_source(
@@ -2102,16 +2119,20 @@ namespace KKManager.Data
             }
         }
 
-        /// <summary>索引元数据 upsert——索引导入独有字段（作品 / 作者 / 来源 / 包内路径 / guid）。</summary>
+        /// <summary>索引元数据 upsert——索引导入独有字段（作品 / 作者 / 来源 / 包内路径 / guid）+ 参考层七列（系列 / VN_ID / VN名 / VNDB角色ID / 角色ID置信度 / 大类 / 子类）。</summary>
         public void UpsertIndexMeta(string filePath, string idxId, string kind, string cardType, string chara,
-            string work, string author, string source, string srcRel, string note, string guid)
+            string work, string author, string source, string srcRel, string note, string guid,
+            string series, string vnId, string vnName, string vndbCharaId, string charaIdConf,
+            string category, string subCategory)
         {
-            using (SqliteCommand cmd = NewCommand(@"INSERT INTO idx_meta(file_path,idx_id,kind,card_type,chara,work,author,source,src_rel,note,guid)
-                     VALUES($p,$id,$k,$ct,$ch,$w,$a,$s,$sr,$n,$g)
+            using (SqliteCommand cmd = NewCommand(@"INSERT INTO idx_meta(file_path,idx_id,kind,card_type,chara,work,author,source,src_rel,note,guid,series,vn_id,vn_name,vndb_chara_id,chara_id_conf,category,sub_category)
+                     VALUES($p,$id,$k,$ct,$ch,$w,$a,$s,$sr,$n,$g,$se,$vid,$vn,$vc,$cf,$cat,$sub)
                      ON CONFLICT(file_path) DO UPDATE SET
                        idx_id=excluded.idx_id, kind=excluded.kind, card_type=excluded.card_type, chara=excluded.chara,
                        work=excluded.work, author=excluded.author, source=excluded.source, src_rel=excluded.src_rel,
-                       note=excluded.note, guid=excluded.guid"))
+                       note=excluded.note, guid=excluded.guid, series=excluded.series, vn_id=excluded.vn_id,
+                       vn_name=excluded.vn_name, vndb_chara_id=excluded.vndb_chara_id, chara_id_conf=excluded.chara_id_conf,
+                       category=excluded.category, sub_category=excluded.sub_category"))
             {
                 cmd.Parameters.AddWithValue("$p", filePath);
                 cmd.Parameters.AddWithValue("$id", (object)idxId ?? DBNull.Value);
@@ -2124,6 +2145,13 @@ namespace KKManager.Data
                 cmd.Parameters.AddWithValue("$sr", (object)srcRel ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("$n", (object)note ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("$g", (object)guid ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$se", (object)series ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$vid", (object)vnId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$vn", (object)vnName ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$vc", (object)vndbCharaId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$cf", (object)charaIdConf ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$cat", (object)category ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$sub", (object)subCategory ?? DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
         }
@@ -2664,16 +2692,31 @@ namespace KKManager.Data
 
             /// <summary>mod guid。</summary>
             public string Guid { get; set; }
+            /// <summary>系列（参考层；缺省 = 作品）。</summary>
+            public string Series { get; set; }
+            /// <summary>VN 编号（参考层，可空；VNDB v 编号）。</summary>
+            public string VnId { get; set; }
+            /// <summary>VN 名（参考层，可空；跟随 VnId）。</summary>
+            public string VnName { get; set; }
+            /// <summary>VNDB 角色编号（参考层，可空；c 编号）。</summary>
+            public string VndbCharaId { get; set; }
+            /// <summary>角色 ID 置信度（参考层，可空；人工 / 精确 / 歧义 / 推测）。</summary>
+            public string CharaIdConf { get; set; }
+            /// <summary>大类（游戏 / 动画 / 其它 / 待确认）。</summary>
+            public string Category { get; set; }
+            /// <summary>子类（galgame / 手游 / 单机 / 番剧 / 剧场版 / VTuber；其它类为空）。</summary>
+            public string SubCategory { get; set; }
         }
 
         /// <summary>查索引元数据——按类型 / 作品 / 作者精确筛选 + 关键词模糊（角色名 / 路径 / 作品）；空条件不筛。</summary>
         public List<IdxRow> QueryIndexMeta(string kind, string work, string author, string keyword, int limit)
         {
             List<IdxRow> list = new List<IdxRow>();
-            string sql = @"SELECT file_path, idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid
-                           FROM idx_meta WHERE ($k='' OR kind=$k) AND ($w='' OR work=$w) AND ($a='' OR author=$a)
-                             AND ($q='' OR chara LIKE $qq OR file_path LIKE $qq OR work LIKE $qq OR author LIKE $qq OR guid LIKE $qq)
-                           ORDER BY work, chara, file_path LIMIT $n";
+            string sql = @"SELECT file_path, idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid,
+                                          series, vn_id, vn_name, vndb_chara_id, chara_id_conf, category, sub_category
+                                   FROM idx_meta WHERE ($k='' OR kind=$k) AND ($w='' OR work=$w) AND ($a='' OR author=$a)
+                                     AND ($q='' OR chara LIKE $qq OR file_path LIKE $qq OR work LIKE $qq OR author LIKE $qq OR guid LIKE $qq)
+                                   ORDER BY work, chara, file_path LIMIT $n";
             using (SqliteCommand cmd = NewCommand(sql))
             {
                 string q = keyword ?? "";
@@ -2699,7 +2742,14 @@ namespace KKManager.Data
                             Source = r.IsDBNull(7) ? "" : r.GetString(7),
                             SrcRel = r.IsDBNull(8) ? "" : r.GetString(8),
                             Note = r.IsDBNull(9) ? "" : r.GetString(9),
-                            Guid = r.IsDBNull(10) ? "" : r.GetString(10)
+                            Guid = r.IsDBNull(10) ? "" : r.GetString(10),
+                            Series = r.IsDBNull(11) ? "" : r.GetString(11),
+                            VnId = r.IsDBNull(12) ? "" : r.GetString(12),
+                            VnName = r.IsDBNull(13) ? "" : r.GetString(13),
+                            VndbCharaId = r.IsDBNull(14) ? "" : r.GetString(14),
+                            CharaIdConf = r.IsDBNull(15) ? "" : r.GetString(15),
+                            Category = r.IsDBNull(16) ? "" : r.GetString(16),
+                            SubCategory = r.IsDBNull(17) ? "" : r.GetString(17)
                         });
                     }
                 }
