@@ -90,6 +90,16 @@ namespace KKManager.Core
         public string State { get; set; }
     }
 
+    /// <summary>作品的大类 / 子类（人物卡分层：游戏/galgame、动画/番剧、其它平铺等）。</summary>
+    public class WorkCategory
+    {
+        /// <summary>大类（游戏 / 动画 / 其它 / 待确认）。</summary>
+        public string Cat { get; set; }
+
+        /// <summary>子类（galgame / 手游 / 单机 / 番剧 / 剧场版 / VTuber；其它类为空 = 平铺）。</summary>
+        public string Sub { get; set; }
+    }
+
     /// <summary>卡片整理计划——两份 TSV 之间的一等公民（计划 / 执行 / 回读共用）。</summary>
     public class CardPlan
     {
@@ -143,6 +153,12 @@ namespace KKManager.Core
 
         /// <summary>作品判不出时的占位值（筛选键，不猜死）。</summary>
         public const string WorkPending = "待确认";
+
+        /// <summary>EroMakeChara 卡类型标记——单列一类，不判作品，整体落 06-EroMakeChara。</summary>
+        public const string EroMakeCardType = "【EroMakeChara】";
+
+        /// <summary>EroMakeChara 目标目录（整理根下的单独类，不分子目录）。</summary>
+        public const string EroMakeFolder = "06-EroMakeChara";
 
         /// <summary>状态：待搬。</summary>
         public const string StatePending = "pending";
@@ -760,6 +776,7 @@ namespace KKManager.Core
             };
             var destFiles = new Dictionary<string, Dictionary<string, long>>(StringComparer.OrdinalIgnoreCase);
             var usedInPlan = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, WorkCategory> categories = LoadCategories(destRoot, log);
 
             foreach (string srcDir in srcDirs)
             {
@@ -798,7 +815,7 @@ namespace KKManager.Core
                     {
                         continue;
                     }
-                    PlaceItem(item, destRoot, destFiles, usedInPlan);
+                    PlaceItem(item, destRoot, destFiles, usedInPlan, categories);
                     plan.Items.Add(item);
                 }
                 if (log != null)
@@ -969,8 +986,22 @@ namespace KKManager.Core
                         return r.Value;
                     }
                 }
+                // 归一化（去空白 / 全角空格 / 大小写）后相等——卡名与规则只差空白形态时命中
+                string charaKey = NormalizeMatchKey(chara);
+                foreach (CardRule r in rules)
+                {
+                    if (r.Kind != CardRuleKind.Chara)
+                    {
+                        continue;
+                    }
+                    if (NormalizeMatchKey(r.Match) == charaKey)
+                    {
+                        return r.Value;
+                    }
+                }
             }
             string text = chara + " " + item.SrcRel;
+            string textKey = NormalizeMatchKey(text);
             foreach (CardRule r in rules)
             {
                 if (r.Kind != CardRuleKind.Keyword)
@@ -981,8 +1012,31 @@ namespace KKManager.Core
                 {
                     return r.Value;
                 }
+                if (textKey.IndexOf(NormalizeMatchKey(r.Match), StringComparison.Ordinal) >= 0)
+                {
+                    return r.Value;
+                }
             }
             return WorkPending;
+        }
+
+        /// <summary>匹配归一化——去所有空白（含全角空格）并小写；卡名与规则只差空白形态时视为同一名。</summary>
+        private static string NormalizeMatchKey(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+            {
+                return "";
+            }
+            var sb = new StringBuilder(s.Length);
+            foreach (char ch in s)
+            {
+                if (char.IsWhiteSpace(ch))
+                {
+                    continue;
+                }
+                sb.Append(char.ToLowerInvariant(ch));
+            }
+            return sb.ToString();
         }
 
         /// <summary>作者判定——先看源目录规则，再看文件名 [作者] 前缀。</summary>
@@ -1025,12 +1079,87 @@ namespace KKManager.Core
             return kind == KindChara || kind == KindClothes || kind == KindScene;
         }
 
-        /// <summary>目标子目录（卡类型 + 作品 → 目录）——卡片类按作品分子目录（01-卡片/&lt;卡类型&gt;/&lt;作品&gt;），mod / 其它按固定段；换领域只改这里。</summary>
-        public static string TargetDirOf(string kind, string work)
+        /// <summary>目标子目录（卡类型 + 作品 → 目录）——人物卡按大类 / 子类分层（01-卡片/人物卡/大类/子类/作品；其它类平铺），mod / 其它按固定段；换领域只改这里。</summary>
+        /// <summary>读大类映射（kkc 根/tools/work-category.tsv）——作品 → 大类 / 子类；kkc 根 = 整理根的父目录。文件缺失返回空表并出声。</summary>
+        public static Dictionary<string, WorkCategory> LoadCategories(string destRoot, Action<string> log)
         {
+            var map = new Dictionary<string, WorkCategory>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(destRoot))
+            {
+                return map;
+            }
+            string full = Path.GetFullPath(destRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string kkcRoot = Path.GetDirectoryName(full);
+            if (string.IsNullOrEmpty(kkcRoot))
+            {
+                return map;
+            }
+            string path = Path.Combine(kkcRoot, "tools", "work-category.tsv");
+            if (!File.Exists(path))
+            {
+                if (log != null)
+                {
+                    log("大类映射不存在，人物卡将回落 其它/：" + path);
+                }
+                return map;
+            }
+            int lineNo = 0;
+            foreach (string raw in File.ReadAllLines(path, Encoding.UTF8))
+            {
+                lineNo = lineNo + 1;
+                string line = raw.TrimEnd('\r', '\n');
+                if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string[] c = line.Split('\t');
+                if (c.Length < 3 || c[0] == "作品")
+                {
+                    continue;
+                }
+                string work = c[0].Trim();
+                string cat = c[1].Trim();
+                string sub = c[2].Trim();
+                if (work.Length == 0 || cat.Length == 0)
+                {
+                    if (log != null)
+                    {
+                        log("大类映射第 " + lineNo.ToString(CultureInfo.InvariantCulture) + " 行缺作品或大类，已跳过");
+                    }
+                    continue;
+                }
+                map[work] = new WorkCategory { Cat = cat, Sub = sub };
+            }
+            if (log != null)
+            {
+                log("大类映射：" + map.Count.ToString(CultureInfo.InvariantCulture) + " 个作品（" + path + "）");
+            }
+            return map;
+        }
+
+        /// <summary>目标子目录（卡类型 + 作品 → 目录）——人物卡按大类 / 子类分层，mod / 其它按固定段；换领域只改这里。</summary>
+        public static string TargetDirOf(string kind, string work, string cardType, Dictionary<string, WorkCategory> categories)
+        {
+            if (cardType == EroMakeCardType)
+            {
+                return EroMakeFolder;
+            }
             if (kind == KindChara)
             {
-                return Path.Combine("01-卡片", "人物卡", SafeDirName(work));
+                if (work == WorkPending)
+                {
+                    return Path.Combine("01-卡片", "人物卡", WorkPending);
+                }
+                WorkCategory wc;
+                if (categories != null && !string.IsNullOrEmpty(work) && categories.TryGetValue(work, out wc))
+                {
+                    if (string.IsNullOrEmpty(wc.Sub))
+                    {
+                        return Path.Combine("01-卡片", "人物卡", SafeDirName(wc.Cat), SafeDirName(work));
+                    }
+                    return Path.Combine("01-卡片", "人物卡", SafeDirName(wc.Cat), SafeDirName(wc.Sub), SafeDirName(work));
+                }
+                return Path.Combine("01-卡片", "人物卡", "其它", SafeDirName(work));
             }
             if (kind == KindClothes)
             {
@@ -1074,18 +1203,36 @@ namespace KKManager.Core
                     rel = destNorm.Substring(rootNorm.Length + 1);
                 }
                 string[] parts = rel.Split('/');
-                // 尾部四段：01-卡片 / 卡类型 / 作品 / 文件名
-                bool ok = parts.Length >= 4
-                    && parts[parts.Length - 4] == "01-卡片"
-                    && parts[parts.Length - 3] == it.Kind
-                    && parts[parts.Length - 2].Trim().Length > 0
-                    && parts[parts.Length - 1].Length > 0;
+                // 人物卡：01-卡片/人物卡/[大类/子类|其它]/作品/文件名；其它卡类型：01-卡片/卡类型/作品/文件名；EroMakeChara 单列
+                bool ok;
+                if (it.CardType == EroMakeCardType)
+                {
+                    ok = parts.Length >= 2
+                        && parts[parts.Length - 2] == EroMakeFolder
+                        && parts[parts.Length - 1].Length > 0;
+                }
+                else if (it.Kind == KindChara)
+                {
+                    ok = parts.Length >= 4
+                        && parts[0] == "01-卡片"
+                        && parts[1] == "人物卡"
+                        && parts[parts.Length - 2].Trim().Length > 0
+                        && parts[parts.Length - 1].Length > 0;
+                }
+                else
+                {
+                    ok = parts.Length >= 4
+                        && parts[parts.Length - 4] == "01-卡片"
+                        && parts[parts.Length - 3] == it.Kind
+                        && parts[parts.Length - 2].Trim().Length > 0
+                        && parts[parts.Length - 1].Length > 0;
+                }
                 if (!ok)
                 {
                     bad = bad + 1;
                     if (log != null)
                     {
-                        log("布局不合格（" + it.Kind + "）：" + (it.DestPath ?? "") + "——目标须为 01-卡片/" + it.Kind + "/作品/文件名");
+                        log("布局不合格（" + it.Kind + "）：" + (it.DestPath ?? "") + "——人物卡须为 01-卡片/人物卡/大类/子类/作品/文件名，其它卡须为 01-卡片/卡类型/作品/文件名");
                     }
                 }
             }
@@ -1093,9 +1240,9 @@ namespace KKManager.Core
         }
 
         /// <summary>算目标路径并检出重名（目标已存在 / 计划内撞车）。</summary>
-        private static void PlaceItem(CardPlanItem item, string destRoot, Dictionary<string, Dictionary<string, long>> destFiles, Dictionary<string, HashSet<string>> usedInPlan)
+        private static void PlaceItem(CardPlanItem item, string destRoot, Dictionary<string, Dictionary<string, long>> destFiles, Dictionary<string, HashSet<string>> usedInPlan, Dictionary<string, WorkCategory> categories)
         {
-            string sub = TargetDirOf(item.Kind, item.Work);
+            string sub = TargetDirOf(item.Kind, item.Work, item.CardType, categories);
             string dir = Path.Combine(destRoot, sub);
             string fileName = Path.GetFileName(item.SrcPath);
             if (item.Kind == KindOther)
