@@ -14,13 +14,94 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// DB 主库句柄（对应 C# 侧 Store 的 core 库）。
+// DB 主库 / 库文件句柄（对应 C# 侧 Store 的 core 库与库文件两种形态）。
 type DB struct {
 	sql  *sql.DB
 	path string
+	// core 主库绝对路径（空 = 本连接就是主库）。
+	core string
+	// isCore 是否为主库连接——库文件的设置表 / mod 主表 / 作者聚合表都走 core 前缀。
+	isCore bool
 	// attachedCore 已挂上本连接的主库绝对路径（ATTACH 是连接级；空 = 未挂）。
 	attachedCore string
+	// tx 当前的写入事务（扫描按批提交；nil = 无事务）。
+	tx *sql.Tx
 }
+
+// execer 语句执行面（*sql.DB 与 *sql.Tx 的公共子集）——扫描按批开事务时全部语句走事务。
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+// execer 当前语句执行面（事务内走事务）。
+func (d *DB) execer() execer {
+	if d.tx != nil {
+		return d.tx
+	}
+	return d.sql
+}
+
+// Begin 开启写入事务——deferred（sql.Tx 默认）：分片库连接都 ATTACH 了主库，IMMEDIATE 会给全部已附加库加写锁。
+func (d *DB) Begin() error {
+	if d.tx != nil {
+		return nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	d.tx = tx
+	return nil
+}
+
+// Commit 提交写入事务（无事务时静默）。
+func (d *DB) Commit() error {
+	if d.tx == nil {
+		return nil
+	}
+	err := d.tx.Commit()
+	d.tx = nil
+	return err
+}
+
+// Rollback 回滚写入事务（无事务时静默）。
+func (d *DB) Rollback() error {
+	if d.tx == nil {
+		return nil
+	}
+	err := d.tx.Rollback()
+	d.tx = nil
+	return err
+}
+
+// modTable mod 主表在本次连接里的引用名（主库是本地表，库文件走 core 前缀）——对齐 C# Store.ModTable。
+func (d *DB) modTable() string {
+	if d.isCore {
+		return "mod"
+	}
+	return "core.mod"
+}
+
+// settingTable 设置表在本次连接里的引用名。
+func (d *DB) settingTable() string {
+	if d.isCore {
+		return "setting"
+	}
+	return "core.setting"
+}
+
+// authorTable 作者聚合表的引用名（表恒在主库）。
+func (d *DB) authorTable() string {
+	if d.isCore {
+		return "mod_author"
+	}
+	return "core.mod_author"
+}
+
+// IsCore 是否主库连接。
+func (d *DB) IsCore() bool { return d.isCore }
 
 // errNilDB 空库句柄（调用方传了 nil——出声不静默）。
 var errNilDB = fmt.Errorf("库句柄为空")
@@ -38,22 +119,8 @@ func (d *DB) attachCore(corePath string) error {
 	return nil
 }
 
-// Open 打开主库并启用与 C# 一致的连接参数（WAL · synchronous=NORMAL · busy_timeout 15 s）。
-// 文件不存在时建最小 schema（只有 setting 表）并出声——C# 侧是从内嵌模板释放全量 schema，Go 侧待 G3 补。
-func Open(path string) (*DB, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = path
-	}
-	fresh := false
-	if _, statErr := os.Stat(abs); statErr != nil {
-		fresh = true
-		if dir := filepath.Dir(abs); dir != "" {
-			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-				return nil, mkErr
-			}
-		}
-	}
+// openConn 打开一个 sqlite 连接并启用与 C# 一致的连接参数（WAL · synchronous=NORMAL · busy_timeout 15 s）。
+func openConn(abs string) (*sql.DB, error) {
 	handle, err := sql.Open("sqlite", "file:"+strings.ReplaceAll(abs, "\\", "/"))
 	if err != nil {
 		return nil, err
@@ -69,15 +136,168 @@ func Open(path string) (*DB, error) {
 			return nil, err
 		}
 	}
-	db := &DB{sql: handle, path: abs}
+	return handle, nil
+}
+
+// Open 打开主库（core 库）——文件缺失先释放内嵌模板（失败回落最小结构并出声），再补主库独有表与增量列。
+// 结构版本不符时不重建：C# 会 DropAll 重建，Go 侧破坏性动作需显式确认，这里出声并返回错误。
+func Open(path string) (*DB, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	fresh := false
+	if info, statErr := os.Stat(abs); statErr != nil || info.IsDir() {
+		fresh = true
+		if dir := filepath.Dir(abs); dir != "" {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+				return nil, mkErr
+			}
+		}
+	}
+	released := false
 	if fresh {
-		fmt.Println("[库] 主库不存在——按最小 schema 新建（只有 setting 表；全量 schema 待 G3 从模板释放）：" + abs)
+		released = ReleaseTemplate(abs)
+	}
+	handle, err := openConn(abs)
+	if err != nil {
+		return nil, err
+	}
+	db := &DB{sql: handle, path: abs, isCore: true}
+	if !fresh {
+		ver, verErr := db.schemaVersion()
+		if verErr != nil {
+			handle.Close()
+			return nil, verErr
+		}
+		if ver != SchemaVersion {
+			handle.Close()
+			return nil, fmt.Errorf("主库结构版本 %d 与期望 %d 不符（%s）——需 C# 侧重建或迁移后再用", ver, SchemaVersion, abs)
+		}
+		// 模板 / 旧库可能落后于代码的增量补列（版本号未变）——幂等补齐
+		if err = db.EnsureColumns(); err != nil {
+			handle.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+	if !released {
+		// 模板缺失 / 写失败——回落最小结构（只有 setting 表）；ReleaseTemplate 已出声
+		fmt.Println("[库] 主库按最小 schema 新建：" + abs)
 		if err = db.ensureSetting(); err != nil {
 			handle.Close()
 			return nil, err
 		}
+		return db, nil
+	}
+	if err = db.EnsureColumns(); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	if err = db.EnsureCoreTables(); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	if err = db.setSchemaVersion(); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	fmt.Println("[库] 主库已从内嵌模板释放：" + abs)
+	return db, nil
+}
+
+// openLib 打开一个库文件（mod 单片库 / 卡片分片库）——缺文件从内嵌模板释放（零 DDL），ATTACH 主库为 core。
+// 模板释放失败回落最小结构（非核心表全集）；库文件的设置表 / mod 主表 / 作者表走 core 前缀。
+func openLib(path, corePath string) (*DB, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	coreAbs, coreErr := filepath.Abs(corePath)
+	if coreErr != nil {
+		coreAbs = corePath
+	}
+	fresh := false
+	if info, statErr := os.Stat(abs); statErr != nil || info.IsDir() {
+		fresh = true
+		if dir := filepath.Dir(abs); dir != "" {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+				return nil, mkErr
+			}
+		}
+	}
+	released := false
+	if fresh {
+		released = ReleaseTemplate(abs)
+	}
+	handle, err := openConn(abs)
+	if err != nil {
+		return nil, err
+	}
+	db := &DB{sql: handle, path: abs, core: coreAbs, isCore: false}
+	if fresh && !released {
+		fmt.Println("[库数据] 库文件按最小结构新建：" + abs)
+		if err = db.ensureShardSchema(); err != nil {
+			handle.Close()
+			return nil, err
+		}
+	}
+	// 模板复制件可能落后于代码的增量补列——幂等补齐（列已存在时只是几次 pragma 查询）
+	if err = db.EnsureColumns(); err != nil {
+		handle.Close()
+		return nil, err
+	}
+	if err = db.attachCore(coreAbs); err != nil {
+		handle.Close()
+		return nil, err
 	}
 	return db, nil
+}
+
+// ensureShardSchema 库文件的最小结构（模板缺失时的回落）——非核心表全集（对齐 C# EnsureSchema 的非主库分支）。
+func (d *DB) ensureShardSchema() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS mod_file(
+			 file_path TEXT PRIMARY KEY, guid TEXT, tier INTEGER, root_path TEXT,
+			 file_name TEXT, size INTEGER, mtime TEXT, scan_time TEXT)`,
+		`CREATE TABLE IF NOT EXISTS card(
+			 id INTEGER PRIMARY KEY AUTOINCREMENT,
+			 file_path TEXT UNIQUE, file_name TEXT, size INTEGER, mtime TEXT,
+			 tier INTEGER, root_path TEXT, folder TEXT,
+			 card_type TEXT, data_version TEXT, image_end INTEGER, uar_blocks INTEGER,
+			 mod_count INTEGER, thumb BLOB, scan_time TEXT, error TEXT, chara_name TEXT)`,
+		`CREATE TABLE IF NOT EXISTS card_mod(
+			 card_id INTEGER, mod_guid TEXT,
+			 property TEXT, slot INTEGER, local_slot INTEGER, category_no INTEGER,
+			 rec_name TEXT, rec_author TEXT, rec_website TEXT,
+			 PRIMARY KEY(card_id, property, slot, local_slot, mod_guid))`,
+		`CREATE TABLE IF NOT EXISTS card_analysis(
+			 card_id INTEGER NOT NULL, kind TEXT NOT NULL,
+			 file_path TEXT, size INTEGER, mtime TEXT, data TEXT, read_at TEXT,
+			 PRIMARY KEY(card_id, kind))`,
+		`CREATE TABLE IF NOT EXISTS card_timeline(
+			 card_id INTEGER PRIMARY KEY, file_path TEXT, size INTEGER, mtime TEXT,
+			 has_entry INTEGER, is_empty INTEGER, duration REAL, time_scale REAL,
+			 keyframes INTEGER, xml_length INTEGER, hit_stage TEXT, read_at TEXT, error TEXT)`,
+		`CREATE TABLE IF NOT EXISTS non_card(
+			 id INTEGER PRIMARY KEY AUTOINCREMENT,
+			 file_path TEXT UNIQUE, root_path TEXT, side TEXT, reason TEXT,
+			 size INTEGER, mtime TEXT, thumb BLOB,
+			 moved_to TEXT, moved_at TEXT, scan_time TEXT)`,
+		`CREATE TABLE IF NOT EXISTS scan_state(
+			 file_path TEXT NOT NULL, step TEXT NOT NULL,
+			 size INTEGER, mtime TEXT, done_at TEXT,
+			 PRIMARY KEY(file_path, step))`,
+		`CREATE TABLE IF NOT EXISTS todo(
+			 id INTEGER PRIMARY KEY AUTOINCREMENT,
+			 kind TEXT, key TEXT, text TEXT, ref_path TEXT, ref_name TEXT, created_at TEXT)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := d.sql.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return d.setSchemaVersion()
 }
 
 // Path 主库文件绝对路径（对齐 C# 的 StoreHub.CorePath）。

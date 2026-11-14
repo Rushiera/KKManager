@@ -18,6 +18,15 @@ G 段验收工具：同一样本、同一参数下跑 `kkgo.exe` 与 `KMR_A.exe`
 | plugin-log | **日志被运行中的游戏独占**（C# 侧 `FileShare.Read` 打不开真日志）——故走「临时库 + 日志副本」：真库快照各复制一份（C# / Go 各一）→ 两份库的 `pluginRoots` 都指向同一个临时 BepInEx 目录 → 两侧同日志跑 → 输出逐行比；第二例「日志缺失」两侧都应 `解析失败` + exit 1 |
 | plugin-match | 真库直比（只读主库 `plugin_file`）——键样本取自场景卡插件条目（vnge_sss / kkpe / timeline）+ 一个未装键 |
 | stats | **两段**：① 裁剪临时库（roots 只留预置条目 + 复制 7000 系列 32 片）→ 两侧 AllStores 组成一致 → 43 行逐行必须全同（四色聚合 / 缺失排行 / 未被引用 / 重复副本都真实跑）；② 真库全量——`KMR_A.exe` 是 0.21.6 产物，mod 侧库路由在 0.21.8 修过（0.21.6 的 `AllStores` 不含 mod 侧非预置库：kkc 的 `lib_5_0.db` 423 行不算；0.21.9 源码算）→「mod 文件副本」一行是**已知代际差异**，其余行必须全同 |
+| scan-mods | **三根样本**（main 锁定 tier1 走主库 / cache tier2 走主库 / cold tier3 走库文件；真实 zipmod ×7 含一份同 guid 跨根副本与一份子目录 + 非 mod 文本 + 坏 zip + 无 manifest 容器）跑三轮：首扫 / 增量复扫 / 删文件后复扫。判据 = stdout 逐行（库路径 / 耗时 / 预建行归一）+ `mod` / `mod_file` / `non_card` / `scan_state` 逐行（忽略 scan_time / done_at / id） |
+| scan-cards | 卡片样本（人物 ×2 / 服装 ×1 / 场景 ×1 + 纯图片 + 截断 + 非 PNG）跑两轮（首扫 / 增量复扫）；`scan_shards=4` 两侧同值、`KKM_SCAN_WORKERS=1`。判据 = stdout 逐行 + `card` / `card_mod` / `card_timeline` / `non_card` / `scan_state` 逐行（thumb 只比「有无」，不比字节——编码器不同） |
+| scan-main / scan-extra | 五根合一（mod 三根 + 卡片两根）+ 插件根**故意指向不存在目录**（两侧只报「插件库根不存在」）；按两个范围各跑一轮。判据 = stdout 逐行 + `mod` / `mod_file` / `card` / `card_mod` / `non_card` / `scan_state` 逐行 |
+
+**已知差异（不作判据）**
+
+- **并行 worker 段**：C# 卡片侧按 `scan_workers` 多线程跑分片（`并行扫描：卡片侧 worker 数 N`）；Go 侧当前**串行逐片**（布局与并行一致，只是同时只跑一片）。对拍固定 `KKM_SCAN_WORKERS=1` 口径。
+- **插件库落库**：`scan-main` 的插件连带段在插件库根**存在**时 Go 侧报「插件扫描尚未移植」并计入错误清单（不静默漏数据）；根不存在时两侧输出一致。
+- **缩略图字节**：C# ImageSharp / Go stdlib，只比「有无」与尺寸。
 
 ### card-analysis 的对拍管线（产物对拍，非命令对拍）
 
@@ -44,6 +53,9 @@ py tools\compare\compare.py libmap               :: 分片库读面对拍（Pyth
 py tools\compare\compare.py composition          :: 组成档案对拍（真库复制两份 → 输出行 + 落库字段）
 py tools\compare\compare.py pluginlog            :: BepInEx 日志对拍（临时库 + 日志副本；含日志缺失分支）
 py tools\compare\compare.py stats                :: 库统计对拍（裁剪临时库逐行 + 真库已知代际差异）
+py tools\compare\compare.py scanmods             :: mod 扫描对拍（三根样本 · 首扫 / 复扫 / 删文件后复扫）
+py tools\compare\compare.py scancards            :: 卡片扫描对拍（卡片样本 · 首扫 / 复扫 · 分片库逐片比）
+py tools\compare\compare.py scanall              :: 统一扫描对拍（scan-main / scan-extra 两轮 · 插件根缺失口径）
 ```
 
 ## 前置

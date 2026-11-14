@@ -24,3 +24,6 @@ revealer/kkc/
 # Go 重写（kkgo）构建产物
 kkgo/kkgo.exe
 kkgo/bin/
+
+# Python 缓存（对拍脚本）
+__pycache__/

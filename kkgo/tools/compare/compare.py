@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import zipfile
 
 GO = r"D:\Mau\WorkSpace\KKManager\kkgo\kkgo.exe"
 CS = r"D:\Mau\WorkSpace\KKManager\dist\KMR_A.exe"
@@ -41,6 +42,7 @@ SAMPLE_PLUGIN = r"D:\SteamLibrary\Koikatu\BepInEx\plugins\KKAPI.dll"
 SAMPLE_NONPLUGIN = r"D:\SteamLibrary\Koikatu\BepInEx\core\0Harmony.dll"
 REAL_DB = r"D:\Mau\WorkSpace\KKManager\dist\data\kkmanager.db"
 SCENE_DIR = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene"
+MOD_LIB_SRC = r"D:\SteamLibrary\Koikatu\Mods"
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CASES = [
@@ -112,7 +114,13 @@ def cmd_all():
         bad += 1
     if cmd_stats() != 0:
         bad += 1
-    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 6, bad))
+    if cmd_scanmods() != 0:
+        bad += 1
+    if cmd_scancards() != 0:
+        bad += 1
+    if cmd_scanall() != 0:
+        bad += 1
+    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 9, bad))
     return 0 if bad == 0 else 1
 
 
@@ -767,7 +775,534 @@ def main(argv):
         return cmd_pluginlog()
     if mode == "stats":
         return cmd_stats()
+    if mode == "scanmods":
+        return cmd_scanmods()
+    if mode == "scancards":
+        return cmd_scancards()
+    if mode == "scanall":
+        return cmd_scanall()
     return cmd_single(mode, argv[1:])
+
+
+def _prepare_scan_sample(tmp):
+    """样本：三条 mod 库根覆盖三条写入路径——main（预置锁定 tier1 · 走主库）/
+    cache（tier2 · 走主库）/ cold（tier3 · 自有库文件）。
+    文件：真实 zipmod（含一份同 guid 跨根副本 → dup_count、一份在子目录）+
+    非 mod 文本 + 坏 zip（不是容器）+ 无 manifest 容器。"""
+    dirs = {name: os.path.join(tmp, "mods_" + name) for name in ("main", "cache", "cold")}
+    for d in dirs.values():
+        os.makedirs(d)
+    cands = []
+    for name in os.listdir(MOD_LIB_SRC):
+        p = os.path.join(MOD_LIB_SRC, name)
+        if os.path.isfile(p) and os.path.getsize(p) < 4 * 1024 * 1024:
+            cands.append((os.path.getsize(p), name))
+    cands.sort()
+    if len(cands) < 6:
+        print("  真实 mod 库可用样本不足（<6 个小 zipmod）")
+        return None
+    a, b, c, d1, d2 = [name for _, name in cands[:5]]
+    for name in (a, b, c):
+        shutil.copy2(os.path.join(MOD_LIB_SRC, name), os.path.join(dirs["main"], name))
+    shutil.copy2(os.path.join(MOD_LIB_SRC, a), os.path.join(dirs["cache"], a))
+    shutil.copy2(os.path.join(MOD_LIB_SRC, d1), os.path.join(dirs["cold"], d1))
+    sub = os.path.join(dirs["cold"], "sub")
+    os.makedirs(sub)
+    shutil.copy2(os.path.join(MOD_LIB_SRC, d2), os.path.join(sub, d2))
+    with open(os.path.join(dirs["main"], "readme.txt"), "w", encoding="utf-8") as f:
+        f.write("not a mod\n")
+    with open(os.path.join(dirs["main"], "broken.zipmod"), "wb") as f:
+        f.write(b"not a zip at all")
+    with zipfile.ZipFile(os.path.join(dirs["main"], "noentry.zipmod"), "w") as z:
+        z.writestr("readme/abc.txt", "hello")
+    return {"main": dirs["main"], "cache": dirs["cache"], "cold": dirs["cold"], "del_name": b}
+
+
+def _trim_roots_for_scan(db, sample):
+    """把临时库的 roots 裁成样本三条 mod 库根（main 锁定 tier1 / cache tier2 / cold tier3）——
+    避免预建 96 个卡片分片库文件，并覆盖主库与库文件两条写入路径。"""
+    def entry(tier, path, locked):
+        return {"tier": tier, "path": path, "recurse": True, "readOnly": tier == 3,
+                "locked": locked, "offline": False, "note": "", "replacedFrom": ""}
+
+    cfg = {
+        "gameRoot": "",
+        "modRoots": [entry(1, sample["main"], True),
+                     entry(2, sample["cache"], False),
+                     entry(3, sample["cold"], False)],
+        "cardRoots": [],
+        "pluginRoots": [],
+        "seeded": True,
+    }
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO setting(key,value) VALUES('roots',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(cfg, ensure_ascii=False),))
+    con.commit()
+    con.close()
+
+
+def _read_scan_state(dbdir):
+    """读扫描结果：主库 + 全部库文件的 mod / mod_file / non_card / scan_state（忽略时间戳与 id）。
+    主库持 mod 主表与走主库的副本行；库文件持走库文件的副本行。"""
+    out = {"mod": [], "mod_file": [], "non_card": [], "scan_state": []}
+    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
+    for idx, p in enumerate(targets):
+        c = ro_connect(p)
+        if idx == 0:
+            try:
+                out["mod"] = c.execute(
+                    "select guid,name,version,author,website,description,schema_ver,tier,root_path,file_path,"
+                    "file_name,size,mtime,entry_count,dup_count,error from mod order by guid").fetchall()
+            except sqlite3.Error as exc:
+                print("   读主库 mod 失败：%s" % exc)
+        for name, sql in (
+            ("mod_file", "select file_path,guid,tier,root_path,file_name,size,mtime from mod_file order by file_path"),
+            ("non_card", "select file_path,root_path,side,reason,size,mtime from non_card order by file_path"),
+            ("scan_state", "select file_path,step,size,mtime from scan_state order by file_path,step"),
+        ):
+            try:
+                out[name].extend(c.execute(sql).fetchall())
+            except sqlite3.Error as exc:
+                print("   读 %s 的 %s 失败：%s" % (os.path.basename(p), name, exc))
+        c.close()
+    for name in out:
+        out[name].sort()
+    return out
+
+
+def _norm_scan_line(ln):
+    ln = re.sub(r"^库: .*$", "库: <DB>", ln)
+    ln = re.sub(r"(mod 扫描完成：)[\d.]+ 秒", r"\1<TS> 秒", ln)
+    ln = re.sub(r"^\[库数据\] 预建库文件 (\d+) 个.*$", r"[库数据] 预建库文件 \1 个", ln)
+    return "".join(ch if ord(ch) < 128 else "?" for ch in ln)
+
+
+def _safe(text):
+    """把非 ASCII 折成 ?——控制台编码不稳时保证差异行仍可读。"""
+    return "".join(ch if ord(ch) < 128 else "?" for ch in str(text))
+
+
+def cmd_scanmods():
+    """scan-mods 对拍：三根样本（main 锁定 tier1 走主库 / cache tier2 走主库 / cold tier3 走库文件）
+    跑三轮——首扫 / 增量复扫 / 删文件后复扫。
+    判据：① stdout 逐行（库路径 / 耗时 / 预建行归一）② mod / mod_file / non_card / scan_state 逐行
+    （忽略 scan_time / done_at / id）③ 退出码。"""
+    print("—— scan-mods 专项（临时库 + 三根样本；首扫 / 增量复扫 / 删文件后复扫）")
+    tmp = os.path.join(OUT_DIR, "_scan_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_scan_sample(tmp)
+    if not sample:
+        return 3
+    print("  样本：main 3 个 zipmod + cache 1 个同 guid 副本 + cold 2 个（含 sub/ 子目录一份）"
+          "+ 非 mod 文本 + 坏 zip + 无 manifest 容器")
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_scan(db, sample)
+        dirs[tag] = db
+    ok = True
+    for label, delete in (("首扫", False), ("增量复扫", False), ("删文件后复扫", True)):
+        if delete:
+            victim = os.path.join(sample["main"], sample["del_name"])
+            if os.path.exists(victim):
+                os.remove(victim)
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "scan-mods", "--db", dirs[tag]], capture_output=True)
+            outs[tag] = (p.returncode,
+                         [_norm_scan_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         p.stderr.decode(enc, "replace"))
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        state_cs = _read_scan_state(os.path.join(tmp, "cs"))
+        state_go = _read_scan_state(os.path.join(tmp, "go"))
+        table_bad = []
+        for table in ("mod", "mod_file", "non_card", "scan_state"):
+            if state_cs[table] != state_go[table]:
+                table_bad.append(table)
+        one = (not diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-10s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ mod %d · mod_file %d · 非 mod %d · 戳 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["mod"]), len(state_go["mod_file"]), len(state_go["non_card"]),
+                 len(state_go["scan_state"]), "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:8]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs.strip():
+                print("    C# stderr：%s" % _safe(err_cs[:300]))
+            if err_go.strip():
+                print("    Go stderr：%s" % _safe(err_go[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+FEMALE_DIR = r"D:\SteamLibrary\Koikatu\UserData\chara\female"
+COORD_DIR = r"D:\SteamLibrary\Koikatu\UserData\coordinate"
+
+
+def _pick_small_cards(src_dir, count, max_size=8 * 1024 * 1024):
+    """从真卡片库挑最小的若干张（限体积——缩略图步耗时与卡片体积成正比）。"""
+    cands = []
+    if not os.path.isdir(src_dir):
+        return cands
+    for name in os.listdir(src_dir):
+        p = os.path.join(src_dir, name)
+        if os.path.isfile(p) and name.lower().endswith(".png") and os.path.getsize(p) <= max_size:
+            cands.append((os.path.getsize(p), name))
+    cands.sort()
+    return [name for _, name in cands[:count]]
+
+
+def _png_image_end(path):
+    """解析 PNG 块链，返回 IEND 结束偏移（找不到 -1）。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 8 or data[:4] != b"\x89PNG":
+        return -1
+    pos = 8
+    while pos + 8 <= len(data):
+        clen = int.from_bytes(data[pos:pos + 4], "big")
+        typ = data[pos + 4:pos + 8]
+        if typ == b"IEND":
+            return pos + 12
+        pos += 12 + clen
+    return -1
+
+
+def _prepare_card_sample(tmp):
+    """样本：人物卡 ×2 + 服装卡 ×1 + 场景卡 ×1 + 纯图片 PNG + 截断 PNG + 非 PNG（.png 扩展名）。"""
+    cardlib = os.path.join(tmp, "cards")
+    os.makedirs(cardlib)
+    picked = []
+    for src, n in ((FEMALE_DIR, 2), (COORD_DIR, 1), (SCENE_DIR, 1)):
+        for name in _pick_small_cards(src, n):
+            shutil.copy2(os.path.join(src, name), os.path.join(cardlib, name))
+            picked.append(name)
+    if not picked:
+        print("  真卡片库没有可用样本")
+        return None
+    first = os.path.join(cardlib, picked[0])
+    end = _png_image_end(first)
+    if end > 0:
+        with open(first, "rb") as f:
+            head = f.read(end)
+        with open(os.path.join(cardlib, "pure-image.png"), "wb") as f:
+            f.write(head)
+    with open(first, "rb") as f:
+        head = f.read(2048)
+    with open(os.path.join(cardlib, "truncated.png"), "wb") as f:
+        f.write(head)
+    with open(os.path.join(cardlib, "notpng.png"), "wb") as f:
+        f.write(b"this is not a png file\n")
+    return {"cards": cardlib, "picked": picked, "del_name": picked[0] if len(picked) > 1 else None}
+
+
+def _trim_roots_for_cards(db, cardlib, shards):
+    """卡片侧 roots 裁剪：只留样本卡片库根（tier1 非锁定）+ 分片数写死（两侧同值）。"""
+    cfg = {
+        "gameRoot": "",
+        "modRoots": [],
+        "cardRoots": [{"tier": 1, "path": cardlib, "recurse": True, "readOnly": False,
+                       "locked": False, "offline": False, "note": "", "replacedFrom": ""}],
+        "pluginRoots": [],
+        "seeded": True,
+    }
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO setting(key,value) VALUES('roots',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(cfg, ensure_ascii=False),))
+    con.execute("INSERT INTO setting(key,value) VALUES('scan_shards',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(shards),))
+    con.commit()
+    con.close()
+
+
+def _read_card_state(dbdir):
+    """读卡片侧扫描结果：主库 + 全部库文件的 card / card_mod / card_timeline / non_card / scan_state。"""
+    out = {"card": [], "card_mod": [], "card_timeline": [], "non_card": [], "scan_state": []}
+    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
+    for p in targets:
+        c = ro_connect(p)
+        try:
+            out["card"].extend(c.execute(
+                "select file_path,file_name,size,mtime,tier,root_path,folder,card_type,data_version,"
+                "image_end,uar_blocks,mod_count,(thumb IS NOT NULL),chara_name from card").fetchall())
+            out["card_mod"].extend(c.execute(
+                "select c.file_path,cm.mod_guid,cm.property,cm.slot,cm.local_slot,cm.category_no,"
+                "cm.rec_name,cm.rec_author,cm.rec_website from card_mod cm join card c on c.id=cm.card_id").fetchall())
+            out["card_timeline"].extend(c.execute(
+                "select c.file_path,t.has_entry,t.is_empty,t.duration,t.time_scale,t.keyframes,t.xml_length,"
+                "t.hit_stage,t.error from card_timeline t join card c on c.id=t.card_id").fetchall())
+            out["non_card"].extend(c.execute(
+                "select file_path,root_path,side,reason,size,mtime from non_card").fetchall())
+            out["scan_state"].extend(c.execute(
+                "select file_path,step,size,mtime from scan_state").fetchall())
+        except sqlite3.Error as exc:
+            print("   读 %s 失败：%s" % (os.path.basename(p), exc))
+        c.close()
+    for name in out:
+        out[name].sort()
+    return out
+
+
+def _norm_card_line(ln):
+    ln = re.sub(r"^库: .*$", "库: <DB>", ln)
+    ln = re.sub(r"(扫描完成：)[\d.]+ 秒", r"\1<TS> 秒", ln)
+    ln = re.sub(r"^\[库数据\] 预建库文件 (\d+) 个.*$", r"[库数据] 预建库文件 \1 个", ln)
+    ln = re.sub(r"\[分片\] 首建 (\d+) 个分片库：.*$", r"[分片] 首建 \1 个分片库", ln)
+    return "".join(ch if ord(ch) < 128 else "?" for ch in ln)
+
+
+def cmd_scancards():
+    """scan-cards 对拍：同一批卡片（人物 / 服装 / 场景 + 纯图片 + 截断 + 非 PNG）跑两轮
+    （首扫 / 增量复扫）。判据：① stdout 逐行 ② card / card_mod / card_timeline / non_card /
+    scan_state 逐行（thumb 只比「有无」，不比字节——编码器不同）③ 退出码。"""
+    print("—— scan-cards 专项（临时库 + 卡片样本；首扫 / 增量复扫）")
+    tmp = os.path.join(OUT_DIR, "_cards_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_card_sample(tmp)
+    if not sample:
+        return 3
+    shards = 4
+    print("  样本 %d 张真实卡（人物 ×2 / 服装 ×1 / 场景 ×1）+ 纯图片 / 截断 / 非 PNG；分片数 %d"
+          % (len(sample["picked"]), shards))
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_cards(db, sample["cards"], shards)
+        dirs[tag] = db
+    ok = True
+    scan_env = dict(os.environ)
+    # 并行 worker 段是 C# 的加速策略（Go 侧当前串行）——对拍固定 worker=1，避免「并行提示行」计入差异；
+    # 该差异在 README「已知差异」里登记。
+    scan_env["KKM_SCAN_WORKERS"] = "1"
+    for label in ("首扫", "增量复扫"):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "scan-cards", "--db", dirs[tag]], capture_output=True, env=scan_env)
+            outs[tag] = (p.returncode,
+                         [_norm_card_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         p.stderr.decode(enc, "replace"))
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        state_cs = _read_card_state(os.path.join(tmp, "cs"))
+        state_go = _read_card_state(os.path.join(tmp, "go"))
+        table_bad = [t for t in ("card", "card_mod", "card_timeline", "non_card", "scan_state")
+                     if state_cs[t] != state_go[t]]
+        one = (not diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-8s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ card %d · card_mod %d · timeline %d · 非卡 %d · 戳 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["card"]), len(state_go["card_mod"]), len(state_go["card_timeline"]),
+                 len(state_go["non_card"]), len(state_go["scan_state"]), "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:8]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs.strip():
+                print("    C# stderr：%s" % _safe(err_cs[:300]))
+            if err_go.strip():
+                print("    Go stderr：%s" % _safe(err_go[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _prepare_scanall_sample(tmp):
+    """四根合一：mod 主库（锁定 tier1）/ 缓存库（tier2）/ 冷冻库（tier3）+ 卡片主库（锁定）/ 附加库。
+    插件根故意指向不存在的目录——两侧应报同一句「插件库根不存在」。"""
+    mod_sample = _prepare_scan_sample(tmp)
+    card_sample = _prepare_card_sample(tmp)
+    if not mod_sample or not card_sample:
+        return None
+    extra = os.path.join(tmp, "cards_extra")
+    os.makedirs(extra)
+    picked = card_sample["picked"]
+    if len(picked) > 1:
+        shutil.copy2(os.path.join(card_sample["cards"], picked[1]), os.path.join(extra, picked[1]))
+    return {
+        "mod": mod_sample,
+        "cards": card_sample["cards"],
+        "cards_extra": extra,
+        "plugin_missing": os.path.join(tmp, "no-such-plugin-root"),
+    }
+
+
+def _trim_roots_for_scanall(db, sample, shards):
+    """五条库根（mod 三条 + 卡片两条）+ 插件根指向不存在目录；分片数写死两侧同值。"""
+    def entry(tier, path, locked, readonly=False):
+        return {"tier": tier, "path": path, "recurse": True, "readOnly": readonly,
+                "locked": locked, "offline": False, "note": "", "replacedFrom": ""}
+
+    mod = sample["mod"]
+    cfg = {
+        "gameRoot": "",
+        "modRoots": [entry(1, mod["main"], True), entry(2, mod["cache"], False),
+                     entry(3, mod["cold"], False, True)],
+        "cardRoots": [entry(1, sample["cards"], True), entry(1, sample["cards_extra"], False)],
+        "pluginRoots": [entry(1, sample["plugin_missing"], True)],
+        "seeded": True,
+    }
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO setting(key,value) VALUES('roots',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(cfg, ensure_ascii=False),))
+    con.execute("INSERT INTO setting(key,value) VALUES('scan_shards',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(shards),))
+    con.commit()
+    con.close()
+
+
+def cmd_scanall():
+    """scan-main / scan-extra 对拍：同一样本按两个范围各跑一轮（两轮共用库）。
+    判据：① stdout 逐行 ② mod / mod_file / card / card_mod / non_card / scan_state 逐行 ③ 退出码。
+    插件根故意缺失——两侧都应只在错误清单里报「插件库根不存在」。"""
+    print("—— scan-main / scan-extra 专项（mod 三根 + 卡片两根 + 插件根缺失）")
+    tmp = os.path.join(OUT_DIR, "_scanall_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_scanall_sample(tmp)
+    if not sample:
+        return 3
+    shards = 4
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_scanall(db, sample, shards)
+        dirs[tag] = db
+    scan_env = dict(os.environ)
+    scan_env["KKM_SCAN_WORKERS"] = "1"
+    ok = True
+    for mode, label in (("scan-main", "主要库"), ("scan-extra", "追加库")):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, mode, "--db", dirs[tag]], capture_output=True, env=scan_env)
+            outs[tag] = (p.returncode,
+                         [_norm_card_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         p.stderr.decode(enc, "replace"))
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        state_cs = _read_scanall_state(os.path.join(tmp, "cs"))
+        state_go = _read_scanall_state(os.path.join(tmp, "go"))
+        table_bad = [t for t in ("mod", "mod_file", "card", "card_mod", "non_card", "scan_state")
+                     if state_cs[t] != state_go[t]]
+        one = (not diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-8s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ mod %d · mod_file %d · card %d · card_mod %d · 非卡 %d · 戳 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["mod"]), len(state_go["mod_file"]), len(state_go["card"]),
+                 len(state_go["card_mod"]), len(state_go["non_card"]), len(state_go["scan_state"]),
+                 "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:10]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs.strip():
+                print("    C# stderr：%s" % _safe(err_cs[:300]))
+            if err_go.strip():
+                print("    Go stderr：%s" % _safe(err_go[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _read_scanall_state(dbdir):
+    """读统一扫描结果：mod / mod_file / card / card_mod / non_card / scan_state（忽略时间戳与 id）。"""
+    out = {"mod": [], "mod_file": [], "card": [], "card_mod": [], "non_card": [], "scan_state": []}
+    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
+    for idx, p in enumerate(targets):
+        c = ro_connect(p)
+        if idx == 0:
+            try:
+                out["mod"] = c.execute(
+                    "select guid,name,version,author,website,description,schema_ver,tier,root_path,file_path,"
+                    "file_name,size,mtime,entry_count,dup_count,error from mod order by guid").fetchall()
+            except sqlite3.Error as exc:
+                print("   读主库 mod 失败：%s" % exc)
+        try:
+            out["mod_file"].extend(c.execute(
+                "select file_path,guid,tier,root_path,file_name,size,mtime from mod_file").fetchall())
+            out["card"].extend(c.execute(
+                "select file_path,file_name,size,mtime,tier,root_path,folder,card_type,data_version,"
+                "image_end,uar_blocks,mod_count,(thumb IS NOT NULL),chara_name from card").fetchall())
+            out["card_mod"].extend(c.execute(
+                "select c.file_path,cm.mod_guid,cm.property,cm.slot,cm.local_slot,cm.category_no,"
+                "cm.rec_name,cm.rec_author,cm.rec_website from card_mod cm join card c on c.id=cm.card_id").fetchall())
+            out["non_card"].extend(c.execute(
+                "select file_path,root_path,side,reason,size,mtime from non_card").fetchall())
+            out["scan_state"].extend(c.execute(
+                "select file_path,step,size,mtime from scan_state").fetchall())
+        except sqlite3.Error as exc:
+            print("   读 %s 失败：%s" % (os.path.basename(p), exc))
+        c.close()
+    for name in out:
+        out[name].sort()
+    return out
 
 
 if __name__ == "__main__":

@@ -83,6 +83,14 @@ func run(args []string) int {
 		return cmdSetGameRoot(rest)
 	case "scan-plan":
 		return cmdScanPlan(rest)
+	case "scan-mods":
+		return cmdScanMods(rest)
+	case "scan-cards":
+		return cmdScanCards(rest)
+	case "scan-main":
+		return cmdScanScope(rest, core.ScanScopePreset)
+	case "scan-extra":
+		return cmdScanScope(rest, core.ScanScopeExtra)
 	case "stats":
 		return cmdStats(rest)
 	case "card-timeline":
@@ -2084,3 +2092,196 @@ func padRight(s string, width int) string {
 
 // itoa 十进制整数（无千分位）。
 func itoa(v int) string { return strconv.Itoa(v) }
+
+// ---------- 扫描链（G4）——mod 侧 ----------
+
+// loadPlan 读已保存的扫描计划；steps 非空时以它为顺序与勾选（并落盘）——对齐 C# Program.cs §BuildPlan。
+func loadPlan(hub *store.Hub, steps string) (*core.ScanPlan, error) {
+	if steps != "" {
+		plan := core.LoadScanPlan(steps, steps)
+		if err := hub.Core().SetSetting(core.ScanPlanOrderKey, core.ScanPlanOrderText(plan)); err != nil {
+			return nil, err
+		}
+		if err := hub.Core().SetSetting(core.ScanPlanOnKey, core.ScanPlanOnText(plan)); err != nil {
+			return nil, err
+		}
+		return plan, nil
+	}
+	orderText, _, err := hub.Core().GetSetting(core.ScanPlanOrderKey)
+	if err != nil {
+		return nil, err
+	}
+	onText, _, err := hub.Core().GetSetting(core.ScanPlanOnKey)
+	if err != nil {
+		return nil, err
+	}
+	return core.LoadScanPlan(orderText, onText), nil
+}
+
+// cmdScanMods 扫描 mod 库——契约对齐 Program.cs §ScanModsCommand（输出行与计数口径逐字对齐）。
+func cmdScanMods(rest []string) int {
+	dbPath := dbFlag(&rest)
+	force := takeSwitch(&rest, "--force")
+	steps := takeFlag(&rest, "--steps")
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	// 命令行给了目录则临时按级别 1 构造配置（对齐 C# BuildConfig）
+	if len(rest) > 0 {
+		list := make([]core.RootEntry, 0, len(rest))
+		for _, dir := range rest {
+			list = append(list, core.RootEntry{Tier: core.TierMain, Path: dir, Recurse: true})
+		}
+		cfg.ModRoots = list
+	}
+	plan, err := loadPlan(hub, steps)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	result, err := core.ScanMods(hub, cfg, nil, core.ScanScopeAll, force, plan, func(msg string) {
+		fmt.Println(msg)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println()
+	fmt.Printf("mod 扫描完成：%.1f 秒\n", result.Elapsed.Seconds())
+	fmt.Printf("  枚举 %d  新增/更新 %d  跳过 %d  非 mod %d  失败 %d  清理 %d\n",
+		result.Seen, result.Added, result.Skipped, result.NonMod, result.Failed, result.Removed)
+	for _, e := range result.Errors {
+		fmt.Println("  ! " + e)
+	}
+	return 0
+}
+
+// cmdScanCards 扫描卡片库——契约对齐 Program.cs §ScanCardsCommand（输出行与计数口径逐字对齐）。
+func cmdScanCards(rest []string) int {
+	dbPath := dbFlag(&rest)
+	force := takeSwitch(&rest, "--force")
+	steps := takeFlag(&rest, "--steps")
+	thumb := 256
+	if v := takeFlag(&rest, "--thumb"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			thumb = n
+		}
+	}
+	quality := 82
+	if v := takeFlag(&rest, "--quality"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			quality = n
+		}
+	}
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if len(rest) > 0 {
+		list := make([]core.RootEntry, 0, len(rest))
+		for _, dir := range rest {
+			list = append(list, core.RootEntry{Tier: core.TierMain, Path: dir, Recurse: true})
+		}
+		cfg.CardRoots = list
+	}
+	plan, err := loadPlan(hub, steps)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	result, err := core.ScanCards(hub, cfg, nil, core.ScanScopeAll, force, thumb, quality, plan, func(msg string) {
+		fmt.Println(msg)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println()
+	fmt.Printf("卡片扫描完成：%.1f 秒\n", result.Elapsed.Seconds())
+	fmt.Printf("  枚举 %d  新增/更新 %d  跳过 %d  非卡 %d  非 mod %d  失败 %d  清理 %d\n",
+		result.Seen, result.Added, result.Skipped, result.NonCard, result.NonMod, result.Failed, result.Removed)
+	fmt.Printf("  引用条目 %d  缩略图 %.1f MB\n", result.RefEntries, float64(result.ThumbBytes)/1024.0/1024.0)
+	fmt.Printf("  角色名：新读 %d  存量补读 %d\n", result.NamesRead, result.NamesFilled)
+	fmt.Printf("  卡类型补正 %d\n", result.TypesFixed)
+	fmt.Printf("  timeline 读取 %d\n", result.TimelineRead)
+	for _, e := range result.Errors {
+		fmt.Println("  ! " + e)
+	}
+	return 0
+}
+
+// cmdScanScope 按范围扫描（面板「扫描主要 / 追加库扫描」的 CLI 通道）——契约对齐 Program.cs §ScanScopeCommand。
+func cmdScanScope(rest []string, scope core.ScanScope) int {
+	dbPath := dbFlag(&rest)
+	force := takeSwitch(&rest, "--force")
+	steps := takeFlag(&rest, "--steps")
+	thumb := 256
+	if v := takeFlag(&rest, "--thumb"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			thumb = n
+		}
+	}
+	quality := 82
+	if v := takeFlag(&rest, "--quality"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			quality = n
+		}
+	}
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	plan, err := loadPlan(hub, steps)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	if scope == core.ScanScopePreset {
+		fmt.Println("范围: 主要库——预置条目（mod 主库 / 缓存库槽位 + 卡片 female / coordinate / Studio）")
+	} else {
+		fmt.Println("范围: 追加库——使用者添加的库根（mod 冷冻库 + 卡片附加库）")
+	}
+	result, err := core.ScanAll(hub, cfg, nil, scope, force, thumb, quality, plan, func(msg string) {
+		fmt.Println(msg)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println()
+	fmt.Printf("扫描完成：%.1f 秒\n", result.Elapsed.Seconds())
+	fmt.Printf("  枚举 %d  新增/更新 %d  跳过 %d  非卡 %d  非 mod %d  失败 %d  清理 %d\n",
+		result.Seen, result.Added, result.Skipped, result.NonCard, result.NonMod, result.Failed, result.Removed)
+	fmt.Printf("  角色名：新读 %d  存量补读 %d\n", result.NamesRead, result.NamesFilled)
+	fmt.Printf("  卡类型补正 %d\n", result.TypesFixed)
+	fmt.Printf("  timeline 读取 %d\n", result.TimelineRead)
+	if result.PluginDlls > 0 {
+		fmt.Printf("  插件库：%d 个 dll · 插件 %d 项 · 配置文件 %d 个\n", result.PluginDlls, result.Plugins, result.PluginConfigs)
+	}
+	for _, e := range result.Errors {
+		fmt.Println("  ! " + e)
+	}
+	return 0
+}
