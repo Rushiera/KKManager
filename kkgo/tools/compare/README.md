@@ -13,6 +13,8 @@ G 段验收工具：同一样本、同一参数下跑 `kkgo.exe` 与 `KMR_A.exe`
 | 诊断文本 | 异常 message 措辞差异只比对分类，不比对原文（本工具涉及的读面命令目前无此差异） |
 | card-analysis | C# 命令面**没有**这条命令——对拍落库产物：临时库单卡扫描后比 `card_analysis.data` 的 JSON（键集 / 键序 / 值 / 类型四层） |
 | roots / scan-plan | **交互相**：C# 从模板建库 → 同一串写操作分别由 C# 与 Go 写到两份库 → 每份库再由两侧各读一遍（四向读回）；首行「库: <路径>」不比（两份库文件名本就不同） |
+| libmap（分片库读面） | C# 命令面**没有** `modfiles`——真相源侧用 Python 按 C# 规则（`libdb:` / `libshards:` 设置键 + roots JSON → `lib_<基>_<分片>.db`）直读库算副本清单，与 `kkgo modfiles <guid>` 逐行比；样本 = 主库前 2 个 guid + 只在 kkc 库的 3 个 guid |
+| composition | **真库复制两份**（主库文件）→ 各自 C# / Go 跑一次（读容器 + 建档）→ 输出行比对（「建档于」时间戳归一为 `<TS>`）+ 落库 10 字段比对（analyzed_at 按设计不同，不比）；临时库的 roots 裁剪为只留走主库的 mod 库根（避免 C# 预建分片库文件；样本 guid 副本都在主库） |
 
 ### card-analysis 的对拍管线（产物对拍，非命令对拍）
 
@@ -35,6 +37,8 @@ py tools\compare\compare.py thumb                :: 缩略图专项
 py tools\compare\compare.py timeline             :: 轨道专项（自动挑关键帧最多的场景卡）
 py tools\compare\compare.py card-analysis [card] :: 分项分析落库 JSON 对拍（缺省用 SAMPLE_CARD）
 py tools\compare\compare.py roots                :: 库根 / 扫描计划交互相（四向读回）
+py tools\compare\compare.py libmap               :: 分片库读面对拍（Python 直读库作真相源 vs Go modfiles）
+py tools\compare\compare.py composition          :: 组成档案对拍（真库复制两份 → 输出行 + 落库字段）
 ```
 
 ## 前置

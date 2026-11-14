@@ -8,11 +8,13 @@
   - thumb 例外：只比尺寸 / 卡类型 / 图片区（编码器不同，字节数不作判据）。
 
 用法：
-  py compare.py all                        # 批量跑 CASES 里全部命令 + card-analysis 落库对拍
+  py compare.py all                        # 批量跑 CASES 里全部命令 + card-analysis / roots / libmap / composition 专项
   py compare.py card-detail <card.png>     # 单命令对拍
   py compare.py thumb                      # 缩略图专项（Go 与 C# 各出 jpg 再比尺寸）
   py compare.py timeline                   # timeline 轨道专项（自动挑关键帧最多的场景卡）
   py compare.py card-analysis [card.png]   # 分项分析落库 JSON 对拍（C# 侧无同名命令——见下）
+  py compare.py libmap                     # 分片库读面对拍（Python 按 C# 规则直读库算副本清单 vs Go modfiles）
+  py compare.py composition                # 组成档案对拍（真库复制两份，C# / Go 各自建档→输出行 + 落库字段）
 
 card-analysis 的判据（C# 命令面没有 card-analysis，只能对产物）：
   1) 临时库：把样本卡复制到临时目录，C# 侧 roots-add + scan-plan set（开 coord/detail/scene）+ scan-cards；
@@ -35,6 +37,9 @@ CS = r"D:\Mau\WorkSpace\KKManager\dist\KMR_A.exe"
 SAMPLE_CARD = r"D:\SteamLibrary\Koikatu\UserData\chara\female\100065348_p6.png"
 SAMPLE_SCENE = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene\2021_0403_1423_03_837.png"
 SAMPLE_MOD = r"D:\SteamLibrary\Koikatu\Mods\Cissoia.zipmod"
+SAMPLE_PLUGIN = r"D:\SteamLibrary\Koikatu\BepInEx\plugins\KKAPI.dll"
+SAMPLE_NONPLUGIN = r"D:\SteamLibrary\Koikatu\BepInEx\core\0Harmony.dll"
+REAL_DB = r"D:\Mau\WorkSpace\KKManager\dist\data\kkmanager.db"
 SCENE_DIR = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene"
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -49,6 +54,12 @@ CASES = [
     ("card-scene", [SAMPLE_SCENE]),
     ("card-timeline", [SAMPLE_SCENE]),
     ("card-timeline", [SAMPLE_SCENE, "tracks"]),
+    ("plugin-info", [SAMPLE_PLUGIN]),
+    ("plugin-info", [SAMPLE_NONPLUGIN]),
+    ("plugins", ["--db", REAL_DB]),
+    ("plugins", ["--db", REAL_DB, "--unnoted"]),
+    ("plugin-config", ["--db", REAL_DB]),
+    ("plugin-config", ["BepInEx.EnableResize", "--db", REAL_DB]),
 ]
 
 # 扫描计划全集顺序（临时库准备时用——内置顺序，见 C# ScanPlanCatalog.Defs）
@@ -59,7 +70,9 @@ ORDER_ANALYZE = "coord,detail,scene"
 
 def projection(raw, encoding):
     lines = raw.decode(encoding, "replace").splitlines()
-    return ["".join(ch if ord(ch) < 128 else "." for ch in ln) for ln in lines]
+    # 非 ASCII 统一映射为 `?`：C# 控制台是 GBK（不可表示字符编码为 ?），Go 是 UTF-8——
+    # 两侧都落到同一占位符，编码伪差异被剔除，而「一侧有字符、另一侧无」仍能显示为差异。
+    return ["".join(ch if ord(ch) < 128 else "?" for ch in ln) for ln in lines]
 
 
 def compare_one(cmd, args):
@@ -90,7 +103,11 @@ def cmd_all():
         bad += 1
     if cmd_roots() != 0:
         bad += 1
-    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 2, bad))
+    if cmd_libmap() != 0:
+        bad += 1
+    if cmd_composition() != 0:
+        bad += 1
+    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 4, bad))
     return 0 if bad == 0 else 1
 
 
@@ -98,6 +115,19 @@ def cmd_single(cmd, args):
     ok, rgo, rcs, ngo, ncs, diff = compare_one(cmd, args)
     print("命令 %s 附加 %s" % (cmd, args[1:]))
     print("exit go=%d cs=%d · 行 %d/%d · 差异 %d" % (rgo, rcs, ngo, ncs, diff))
+    if diff:
+        a = projection(subprocess.run([GO, cmd] + args, capture_output=True).stdout, "utf-8")
+        b = projection(subprocess.run([CS, cmd] + args, capture_output=True).stdout, "gbk")
+        shown = 0
+        for i in range(max(len(a), len(b))):
+            la = a[i] if i < len(a) else "<缺失>"
+            lb = b[i] if i < len(b) else "<缺失>"
+            if la != lb:
+                print("  [%d] Go %r" % (i, la))
+                print("      C# %r" % (lb,))
+                shown += 1
+                if shown >= 8:
+                    break
     print("判定：%s" % ("一致" if ok else "不一致"))
     return 0 if ok else 1
 
@@ -287,6 +317,198 @@ def cmd_roots():
     return 0 if ok else 1
 
 
+def lib_db_file_name(lib):
+    return "lib_%d_%d.db" % (lib // 1000, lib % 1000)
+
+
+def lib_of_shard(base_lib, shard):
+    return base_lib * 1000 + shard
+
+
+def ro_connect(path):
+    return sqlite3.connect("file:" + path.replace("\\", "/") + "?mode=ro", uri=True)
+
+
+def expected_modfiles(db_path, guid):
+    """按 C# 规则（libdb: / libshards: 设置键 + roots JSON，StoreHub.AllStores）直读库算副本清单——真相源侧实现。"""
+    data_dir = os.path.dirname(db_path)
+    con = ro_connect(db_path)
+    settings = {}
+    for key, value in con.execute("select key, value from setting"):
+        settings[key.lower()] = value or ""
+    con.close()
+    roots = json.loads(settings.get("roots") or "{}")
+
+    def lib_of(path):
+        return int(settings.get("libdb:" + (path or "").strip().lower(), "0") or 0)
+
+    def shard_count(lib):
+        return int(settings.get("libshards:%d" % lib, "0") or 0)
+
+    files = [db_path]
+    for e in roots.get("modRoots") or []:
+        if e.get("locked") or e.get("tier") == 2:
+            continue
+        lib = lib_of(e.get("path"))
+        if lib <= 0:
+            continue
+        p = os.path.join(data_dir, lib_db_file_name(lib))
+        if os.path.exists(p):
+            files.append(p)
+    for e in roots.get("cardRoots") or []:
+        lib = lib_of(e.get("path"))
+        if lib <= 0:
+            continue
+        n = shard_count(lib) or 1
+        for k in range(n):
+            p = os.path.join(data_dir, lib_db_file_name(lib_of_shard(lib, k)))
+            if os.path.exists(p):
+                files.append(p)
+    rows = []
+    for p in files:
+        try:
+            c = ro_connect(p)
+            rows.extend(c.execute(
+                "select guid, tier, root_path, file_path, file_name from mod_file where guid=? order by tier",
+                (guid,)).fetchall())
+            c.close()
+        except sqlite3.Error:
+            continue
+    rows.sort(key=lambda r: r[1])
+    return rows
+
+
+def cmd_libmap():
+    """分片库读面对拍：C# 侧无命令面——Python 按 C# 规则直读库算副本清单，与 Go modfiles 输出逐行比。"""
+    db = os.path.join(os.path.dirname(os.path.dirname(GO)), "dist", "data", "kkmanager.db")
+    if not os.path.exists(db):
+        print("真库不存在：%s" % db)
+        return 3
+    con = ro_connect(db)
+    core_guids = [r[0] for r in con.execute("select distinct guid from mod_file order by guid limit 2")]
+    all_core = set(r[0] for r in con.execute("select distinct guid from mod_file"))
+    con.close()
+    kkc = os.path.join(os.path.dirname(db), "lib_5_0.db")
+    only_kkc = []
+    if os.path.exists(kkc):
+        c = ro_connect(kkc)
+        only_kkc = [r[0] for r in c.execute("select distinct guid from mod_file order by guid")
+                    if r[0] not in all_core][:3]
+        c.close()
+    samples = list(dict.fromkeys(core_guids + only_kkc))
+    ok = True
+    print("样本 %d 个（真库直读）：" % len(samples))
+    for guid in samples:
+        exp = expected_modfiles(db, guid)
+        p = subprocess.run([GO, "modfiles", guid, "--db", db], capture_output=True)
+        got = []
+        for line in p.stdout.decode("utf-8", "replace").splitlines():
+            parts = line.split("\t")
+            if len(parts) != 4 or not parts[0].isdigit():
+                continue
+            got.append((int(parts[0]), parts[1], parts[2], parts[3]))
+        exp_n = [(r[1], r[2] or "", r[3], r[4] or "") for r in exp]
+        same = exp_n == got
+        print("  %-28s 期望 %d 份 / Go %d 份 → %s" % (guid, len(exp_n), len(got), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(exp_n), len(got))):
+                a = exp_n[i] if i < len(exp_n) else "<缺失>"
+                b = got[i] if i < len(got) else "<缺失>"
+                if a != b:
+                    print("    [%d] 期望 %r / Go %r" % (i, a, b))
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def trim_roots_for_comp(db):
+    """composition 对拍裁剪：只留走主库的 mod 库根（mods 锁定 + mods_cache 槽位），
+    避免 C# EnsureDatabases 在临时目录预建分片库文件；样本 guid 的副本都在主库。"""
+    con = sqlite3.connect(db)
+    raw = con.execute("select value from setting where key='roots'").fetchone()[0]
+    roots = json.loads(raw)
+    roots["modRoots"] = [e for e in roots.get("modRoots") or [] if e.get("locked") or e.get("tier") == 2]
+    roots["cardRoots"] = []
+    roots["pluginRoots"] = []
+    con.execute("update setting set value=? where key='roots'", (json.dumps(roots, ensure_ascii=False),))
+    con.commit()
+    con.close()
+
+
+def read_composition(db, guid):
+    con = ro_connect(db)
+    row = con.execute(
+        "select guid,file_path,file_name,size,mtime,entry_count,total_size,total_compressed,entries,texts,analyzed_at"
+        " from mod_composition where guid=?", (guid,)).fetchone()
+    con.close()
+    return row
+
+
+def cmd_composition():
+    """composition 对拍：真库复制两份 → 各自 C# / Go 跑一次（读容器 + 建档）→ 输出行与落库字段比对。"""
+    src = os.path.join(os.path.dirname(os.path.dirname(GO)), "dist", "data", "kkmanager.db")
+    if not os.path.exists(src):
+        print("真库不存在：%s" % src)
+        return 3
+    tmp = os.path.join(OUT_DIR, "_comp_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    a = os.path.join(tmp, "a.db")
+    b = os.path.join(tmp, "b.db")
+    shutil.copy2(src, a)
+    shutil.copy2(src, b)
+    trim_roots_for_comp(a)
+    trim_roots_for_comp(b)
+    guid = "Ktan_Fumika_3_dress"
+    pa = subprocess.run([CS, "composition", guid, "--db", a], capture_output=True)
+    pb = subprocess.run([GO, "composition", guid, "--db", b], capture_output=True)
+
+    def norm(raw, enc):
+        out = []
+        for ln in raw.decode(enc, "replace").splitlines():
+            ln = re.sub(r"(建档于\s*:\s*)\S+", r"\1<TS>", ln)
+            out.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+        return out
+
+    la = norm(pa.stdout, "gbk")
+    lb = norm(pb.stdout, "utf-8")
+    ok = pa.returncode == pb.returncode and len(la) == len(lb)
+    diff = [i for i in range(max(len(la), len(lb)))
+            if (la[i] if i < len(la) else "<缺失>") != (lb[i] if i < len(lb) else "<缺失>")]
+    print("输出：exit %d/%d · 行 %d/%d · 差异 %d → %s"
+          % (pa.returncode, pb.returncode, len(la), len(lb), len(diff), "一致" if not diff else "不一致"))
+    if diff:
+        ok = False
+        for i in diff[:8]:
+            print("    [%d] C# %r" % (i, la[i] if i < len(la) else "<缺失>"))
+            print("         Go %r" % (lb[i] if i < len(lb) else "<缺失>"))
+    row_a = read_composition(a, guid)
+    row_b = read_composition(b, guid)
+    if row_a is None or row_b is None:
+        print("落库：C# %s / Go %s → 不一致" % ("有" if row_a else "无", "有" if row_b else "无"))
+        ok = False
+    else:
+        names = ["guid", "file_path", "file_name", "size", "mtime", "entry_count", "total_size",
+                 "total_compressed", "entries", "texts"]
+        bad = []
+        for i, name in enumerate(names):
+            if row_a[i] != row_b[i]:
+                bad.append("%s 期望 %r vs Go %r" % (name, row_a[i] if name != "entries" and name != "texts"
+                                                   else str(row_a[i])[:120], row_b[i] if name != "entries" and name != "texts"
+                                                   else str(row_b[i])[:120]))
+        if bad:
+            ok = False
+            print("落库字段差异 %d 处：" % len(bad))
+            for d in bad[:8]:
+                print("    " + d)
+        else:
+            print("落库字段：10 项全同（analyzed_at 按设计不同，不比）")
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
 def cmd_cardanalysis(sample):
     """分项分析对拍：C# 侧只能靠落库产物（无命令行面），故先跑一次单卡扫描再比 JSON。"""
     tmp = os.path.join(OUT_DIR, "_ca_tmp")
@@ -364,6 +586,10 @@ def main(argv):
         return cmd_cardanalysis(argv[1] if len(argv) > 1 else SAMPLE_CARD)
     if mode == "roots":
         return cmd_roots()
+    if mode == "libmap":
+        return cmd_libmap()
+    if mode == "composition":
+        return cmd_composition()
     return cmd_single(mode, argv[1:])
 
 

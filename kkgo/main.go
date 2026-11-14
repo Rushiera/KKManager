@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"kkgo/internal/core"
@@ -97,6 +98,22 @@ func run(args []string) int {
 			return requireArgs("filehash <path>")
 		}
 		return cmdFileHash(rest[0])
+	case "modfiles":
+		if len(rest) < 1 {
+			return requireArgs("modfiles <guid> [--db <db>]")
+		}
+		return cmdModFiles(rest)
+	case "composition":
+		return cmdComposition(rest)
+	case "plugin-info":
+		if len(rest) < 1 {
+			return requireArgs("plugin-info <dll>")
+		}
+		return cmdPluginInfo(rest[0])
+	case "plugin-config":
+		return cmdPluginConfig(rest)
+	case "plugins":
+		return cmdPlugins(rest)
 	case "version":
 		fmt.Println("kkgo " + version)
 		return 0
@@ -838,6 +855,580 @@ func cmdFileHash(path string) int {
 	return 0
 }
 
+// ---------- 多库读面（分片库）——契约对齐 Data/StoreHub.cs §AllStores / §QueryModFiles ----------
+
+// openHub 打开多库协调器并读库根配置（已规范化）。
+func openHub(dbPath string) (*store.Hub, *core.RootsConfig, error) {
+	hub, err := store.OpenHub(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	text, _, err := hub.Core().GetSetting("roots")
+	if err != nil {
+		hub.Close()
+		return nil, nil, err
+	}
+	cfg := core.ParseRootsConfig(text)
+	core.Normalize(cfg)
+	return hub, cfg, nil
+}
+
+// usesCoreDB 该库根的数据是否落主库文件（对齐 C# RootsRules.UsesCoreDb）：
+// mod 侧预置条目（锁定主库 / 缓存库槽位）走主库；卡片侧一律自有库文件。
+func usesCoreDB(e core.RootEntry, isMods bool) bool {
+	if !isMods {
+		return false
+	}
+	return e.Locked || e.Tier == core.TierCache
+}
+
+// libOfEntry 取某条库根的库序号（走主库的条目返回 0）。
+func libOfEntry(hub *store.Hub, e core.RootEntry, isMods bool) (int, error) {
+	if usesCoreDB(e, isMods) {
+		return 0, nil
+	}
+	return hub.LibOf(e.Path)
+}
+
+// allStores 全部参与合并的库（主库 + 各库根库文件，去重）——对齐 C# StoreHub.AllStores：
+// mod 侧单片（库序号直接成文件名）；卡片侧按分片数展开（每片一个库文件）。
+// 缺片按空库跳过并在 stderr 出声（读面不创建文件）。
+func allStores(hub *store.Hub, cfg *core.RootsConfig) ([]*store.DB, error) {
+	list := []*store.DB{hub.Core()}
+	seen := map[int]bool{}
+	add := func(lib int) error {
+		if lib <= 0 || seen[lib] {
+			return nil
+		}
+		db, err := hub.StoreByLib(lib)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "  [库] 跳过缺失库文件："+err.Error())
+			return nil
+		}
+		seen[lib] = true
+		list = append(list, db)
+		return nil
+	}
+	for _, e := range cfg.ModRoots {
+		lib, err := libOfEntry(hub, e, true)
+		if err != nil {
+			return nil, err
+		}
+		if err = add(lib); err != nil {
+			return nil, err
+		}
+	}
+	for _, e := range cfg.CardRoots {
+		lib, err := libOfEntry(hub, e, false)
+		if err != nil {
+			return nil, err
+		}
+		if lib <= 0 {
+			continue
+		}
+		libs, err := hub.LibsOfBase(lib)
+		if err != nil {
+			return nil, err
+		}
+		for _, one := range libs {
+			if err = add(one); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return list, nil
+}
+
+// queryModFiles 某 guid 的全部文件副本（跨库，按级别升序）——对齐 C# StoreHub.QueryModFiles。
+func queryModFiles(hub *store.Hub, cfg *core.RootsConfig, guid string) ([]store.ModFileRow, error) {
+	stores, err := allStores(hub, cfg)
+	if err != nil {
+		return nil, err
+	}
+	var list []store.ModFileRow
+	for _, db := range stores {
+		rows, err := db.QueryModFileRows(guid)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", db.Path(), err)
+		}
+		list = append(list, rows...)
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].Tier < list[j].Tier })
+	return list, nil
+}
+
+// stampFormat 时间戳格式（对齐 C# Store.StampFormat = "yyyy-MM-ddTHH:mm:ss.fff"，UTC）。
+const stampFormat = "2006-01-02T15:04:05.000"
+
+// textEntryMaxBytes 文本类条目入档的字节上限（超过则不入档并出声——不静默丢内容）。
+const textEntryMaxBytes = 4 * 1024 * 1024
+
+// takeSwitch 取出一个布尔开关并从 rest 里移除。
+func takeSwitch(rest *[]string, name string) bool {
+	for i := 0; i < len(*rest); i++ {
+		if (*rest)[i] == name {
+			*rest = append((*rest)[:i], (*rest)[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// stampOf 取文件的修改时间戳文本（UTC）——对齐 C# Store.StampOf。
+func stampOf(path string) (string, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", 0, err
+	}
+	return info.ModTime().UTC().Format(stampFormat), info.Size(), nil
+}
+
+// nowStamp 当前 UTC 时间戳文本（对齐 C# Store.Now）。
+func nowStamp() string {
+	return time.Now().UTC().Format(stampFormat)
+}
+
+// analyzeComposition 读（必要时建立）某 mod 的组成档案——对齐 C# StoreHub.AnalyzeComposition：
+// 取该 guid 最优级别且磁盘上真实存在的副本；force=false 时按路径 / 大小 / 修改时间判失效（未变直接复用）；
+// force=true 强制重读容器；无副本时具名出声。
+func analyzeComposition(hub *store.Hub, cfg *core.RootsConfig, guid string, force bool) (*store.CompositionRow, error) {
+	if guid == "" {
+		return nil, fmt.Errorf("缺少 guid")
+	}
+	files, err := queryModFiles(hub, cfg, guid)
+	if err != nil {
+		return nil, err
+	}
+	var pick *store.ModFileRow
+	for i := range files {
+		if _, err = os.Stat(files[i].FilePath); err == nil {
+			pick = &files[i]
+			break
+		}
+	}
+	if pick == nil {
+		if len(files) == 0 {
+			return nil, fmt.Errorf("本地没有该 mod 的文件（库内无副本）")
+		}
+		return nil, fmt.Errorf("登记的副本都不在磁盘上（需重扫）")
+	}
+	mtime, size, err := stampOf(pick.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	// [段1] 非强制 + 已有档案且文件未变 → 直接复用（不重读容器）；档案缺文本内容而容器有文本条目时视为陈旧，重建一次
+	cached, err := hub.Core().LoadComposition(guid)
+	if err != nil {
+		return nil, err
+	}
+	staleTexts := cached != nil && cached.Texts == "" && core.HasTextEntry(cached.Entries)
+	if !force && cached != nil && !staleTexts &&
+		strings.EqualFold(cached.FilePath, pick.FilePath) &&
+		cached.Size == size && cached.Mtime == mtime {
+		cached.Cached = true
+		return cached, nil
+	}
+	// [段2] 读容器中央目录 → 建档落库
+	entries, err := core.ListZipEntries(pick.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("读容器失败：%s", err.Error())
+	}
+	var totalSize, totalCompressed int64
+	lines := make([]string, 0, len(entries))
+	texts := make([]string, 0)
+	for _, e := range entries {
+		totalSize += e.Size
+		totalCompressed += e.Compressed
+		lines = append(lines, e.Path+"\t"+strconv.FormatInt(e.Size, 10)+"\t"+strconv.FormatInt(e.Compressed, 10))
+	}
+	// [段3] 顺带捞文本类条目内容（csv / xml / txt…）——悬停预览用；读不到出声，不静默丢
+	for _, e := range entries {
+		if !core.IsTextEntry(e.Path) {
+			continue
+		}
+		data, readErr := core.ReadZipEntry(pick.FilePath, e.Path, textEntryMaxBytes)
+		if readErr != nil {
+			fmt.Println("[组成] 文本条目未入档：" + e.Path + " —— " + readErr.Error())
+			continue
+		}
+		decoded := core.DecodeText(data)
+		if decoded.Encoding == "gbk-unavailable" {
+			fmt.Println("[组成] GBK 编码不可用——" + e.Path + " 按 UTF-8 宽松解码")
+		}
+		texts = append(texts, "\u0001"+e.Path+"\t"+core.ClampTextEntry(decoded.Text))
+	}
+	rec := &store.CompositionRow{
+		Guid:            guid,
+		FilePath:        pick.FilePath,
+		FileName:        pick.FileName,
+		Size:            size,
+		Mtime:           mtime,
+		EntryCount:      int64(len(entries)),
+		TotalSize:       totalSize,
+		TotalCompressed: totalCompressed,
+		Entries:         strings.Join(lines, "\n"),
+		Texts:           strings.Join(texts, "\n"),
+		AnalyzedAt:      nowStamp(),
+	}
+	if err = hub.Core().SaveComposition(rec); err != nil {
+		return nil, err
+	}
+	fmt.Println("[组成] 建档：" + guid + " · " + itoa(len(entries)) + " 条目 · 文本 " + itoa(len(texts)) + " 份 · " + pick.FileName)
+	return rec, nil
+}
+
+// cmdComposition 查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容）。
+// 契约对齐 Program.cs §CompositionCommand / Data/StoreHub.cs §AnalyzeComposition。
+func cmdComposition(rest []string) int {
+	dbPath := dbFlag(&rest)
+	force := takeSwitch(&rest, "--force")
+	if len(rest) < 1 {
+		return requireArgs("composition <guid> [--force] [--text]")
+	}
+	guid := rest[0]
+	showText := takeSwitch(&rest, "--text")
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rec, err := analyzeComposition(hub, cfg, guid, force)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "失败: "+err.Error())
+		return 3
+	}
+	fmt.Println("guid       : " + rec.Guid)
+	fmt.Println("文件       : " + rec.FilePath)
+	fmt.Println("大小       : " + n0(rec.Size) + " 字节")
+	fmt.Println("条目数     : " + n0(rec.EntryCount))
+	fmt.Println("原始合计   : " + n0(rec.TotalSize) + " 字节")
+	fmt.Println("压缩合计   : " + n0(rec.TotalCompressed) + " 字节")
+	fmt.Println("文本条目   : " + itoa(core.TextEntryCount(rec.Texts)) + " 份")
+	origin := "（本次新建）"
+	if rec.Cached {
+		origin = "（命中已有档案）"
+	}
+	fmt.Println("建档于     : " + rec.AnalyzedAt + origin)
+	fmt.Println()
+	fmt.Println("目录聚合（按条目数降序，前 15）：")
+	dirs := core.BuildDirs(rec.Entries)
+	for i, d := range dirs {
+		if i >= 15 {
+			break
+		}
+		fmt.Println("  " + padLeft(itoa(d.Count), 6) + " 项  " + padLeft(n0(d.Size), 14) + " 字节  " + d.Path)
+	}
+	if showText {
+		fmt.Println()
+		fmt.Println("文本条目内容（前 200 字符）：")
+		for _, kv := range core.ParseTexts(rec.Texts) {
+			body := strings.ReplaceAll(kv.Body, "\r", "")
+			body = strings.ReplaceAll(body, "\n", " | ")
+			bodyLen := utf16Len(body)
+			if bodyLen > 200 {
+				body = string([]rune(body)[:utf16SafeCut(body, 200)]) + "…"
+			}
+			fmt.Println("  ● " + kv.Name + "（" + n0(int64(utf16Len(kv.Body))) + " 字符）")
+			fmt.Println("    " + body)
+		}
+	}
+	return 0
+}
+
+// utf16Len 字符串的 UTF-16 码元数（对齐 C# string.Length）。
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// utf16SafeCut 取 UTF-16 码元长度不超过 limit 时的 rune 个数（C# Substring(0,200) 可能切在代理对中间，
+// 这里按整 rune 截断——输出差异仅在样本含 emoji 且恰好切到时出现）。
+func utf16SafeCut(s string, limit int) int {
+	n := 0
+	used := 0
+	for _, r := range s {
+		step := 1
+		if r > 0xFFFF {
+			step = 2
+		}
+		if used+step > limit {
+			break
+		}
+		used += step
+		n++
+	}
+	return n
+}
+
+// cmdModFiles 某 guid 的跨库副本清单（分片库读面调试命令——C# 无同名命令，对拍由 compare.py libmap 直读库作真相源）。
+func cmdModFiles(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 1 {
+		return requireArgs("modfiles <guid> [--db <db>]")
+	}
+	guid := rest[0]
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rows, err := queryModFiles(hub, cfg, guid)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("guid       : " + guid)
+	fmt.Println("副本       : " + itoa(len(rows)) + " 份")
+	for _, r := range rows {
+		fmt.Println(itoa(r.Tier) + "\t" + r.RootPath + "\t" + r.FilePath + "\t" + r.FileName)
+	}
+	return 0
+}
+
+// cmdPluginInfo 解析一个插件 dll（PE / .NET 元数据只读通道）——对齐 C# Program.cs §PluginInfoCommand。
+func cmdPluginInfo(path string) int {
+	list, meta, errText := core.ReadPluginDll(path)
+	fmt.Println("文件: " + path)
+	if meta.Title != "" {
+		line := "程序集: " + meta.Title
+		if meta.FileVersion != "" {
+			line += " " + meta.FileVersion
+		}
+		fmt.Println(line)
+	}
+	if meta.Description != "" {
+		fmt.Println("说明: " + meta.Description)
+	}
+	if meta.Company != "" {
+		fmt.Println("公司: " + meta.Company)
+	}
+	if meta.Copyright != "" {
+		fmt.Println("版权: " + meta.Copyright)
+	}
+	if meta.TargetFramework != "" {
+		fmt.Println("框架: " + meta.TargetFramework)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(os.Stderr, "解析失败: "+errText)
+		return 1
+	}
+	fmt.Println("插件 " + itoa(len(list)) + " 项：")
+	for _, info := range list {
+		kind := "BepInEx"
+		if info.IsIpa {
+			kind = "IPA"
+		}
+		fmt.Println("  [" + kind + "] " + info.Name + " " + info.Version)
+		fmt.Println("      GUID: " + info.Guid)
+		if len(info.Processes) > 0 {
+			fmt.Println("      进程过滤: " + strings.Join(info.Processes, ", "))
+		}
+		if len(info.Dependencies) > 0 {
+			fmt.Println("      依赖: " + strings.Join(info.Dependencies, ", "))
+		}
+		note := core.LookupPluginNote(info.Guid, info.Name)
+		if note == "" {
+			note = "未收录（可在 plugin-notes.txt 补充）"
+		}
+		fmt.Println("      说明: " + note)
+	}
+	return 0
+}
+
+// cmdPlugins 列出插件库里的插件（与面板「插件清单」同一数据源；--unnoted 只列未收录说明的项）。
+// 契约对齐 Program.cs §PluginsCommand。
+func cmdPlugins(rest []string) int {
+	dbPath := dbFlag(&rest)
+	onlyUnnoted := takeSwitch(&rest, "--unnoted")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	rows, err := db.LoadPlugins()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	cfgs, err := db.LoadPluginConfigs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	cfgByGuid := map[string]*store.PluginConfigRow{}
+	cfgByName := map[string]*store.PluginConfigRow{}
+	for i := range cfgs {
+		cfg := &cfgs[i]
+		if cfg.Guid != "" {
+			if _, ok := cfgByGuid[strings.ToLower(cfg.Guid)]; !ok {
+				cfgByGuid[strings.ToLower(cfg.Guid)] = cfg
+			}
+		}
+		if cfg.PluginName != "" {
+			if _, ok := cfgByName[strings.ToLower(cfg.PluginName)]; !ok {
+				cfgByName[strings.ToLower(cfg.PluginName)] = cfg
+			}
+		}
+	}
+	withGuid := 0
+	noted := 0
+	unnoted := make([]string, 0)
+	for _, row := range rows {
+		if row.Guid != "" {
+			withGuid++
+		}
+		if core.LookupPluginNote(row.Guid, row.Name) != "" || core.LookupPluginNoteFile(row.FileName) != "" {
+			noted++
+		} else {
+			line := row.Guid + "  |  " + row.Name
+			if row.Guid == "" {
+				line += "  |  " + row.FileName + "（非插件 dll）"
+			}
+			unnoted = append(unnoted, line)
+		}
+	}
+	fmt.Println("—— 插件 " + itoa(withGuid) + " 项 · 非插件 dll " + itoa(len(rows)-withGuid) +
+		" 个 · 说明收录 " + itoa(noted) + " / " + itoa(len(rows)) + " 项（表内 " + itoa(core.PluginNotesCount()) +
+		" 条）· 配置文件 " + itoa(len(cfgs)) + " 个")
+	if !onlyUnnoted {
+		for _, row := range rows {
+			if row.Guid == "" {
+				continue
+			}
+			var cfg *store.PluginConfigRow
+			if hit, ok := cfgByGuid[strings.ToLower(row.Guid)]; ok {
+				cfg = hit
+			}
+			if cfg == nil && row.Name != "" {
+				if hit, ok := cfgByName[strings.ToLower(row.Name)]; ok {
+					cfg = hit
+				}
+			}
+			note := core.LookupPluginNote(row.Guid, row.Name)
+			line := row.Guid + "  |  " + row.Name + " " + row.Version + "  |  " + row.FileName
+			if row.Processes != "" {
+				line += "  |  进程 " + row.Processes
+			}
+			if row.IsIpa {
+				line += "  |  [IPA]"
+			}
+			if cfg != nil {
+				line += "  |  配置 " + itoa(int(cfg.SectionCount)) + " 节 " + itoa(int(cfg.OptionCount)) + " 项"
+			}
+			if note == "" {
+				note = "未收录"
+			}
+			line += "  |  " + note
+			fmt.Println(line)
+		}
+	}
+	fmt.Println()
+	fmt.Println("## 未收录说明（" + itoa(len(unnoted)) + "）——可在 Web\\wwwroot\\plugin-notes.txt 补一行（键 = GUID 或插件名）")
+	for _, u := range unnoted {
+		fmt.Println("  " + u)
+	}
+	return 0
+}
+
+// cmdPluginConfig 列插件配置文件——无参数列全部 cfg；给 GUID 或插件名则列出该插件的分节与配置项。
+// 契约对齐 Program.cs §PluginConfigCommand。
+func cmdPluginConfig(rest []string) int {
+	dbPath := dbFlag(&rest)
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	if len(rest) == 0 {
+		rows, err := db.LoadPluginConfigs()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		fmt.Println("—— 配置文件 " + itoa(len(rows)) + " 个")
+		for _, row := range rows {
+			guid := row.Guid
+			if guid == "" {
+				guid = "(无)"
+			}
+			line := row.FileName + "  |  " + row.PluginName + " " + row.PluginVersion +
+				"  |  GUID " + guid + "  |  " + itoa(int(row.SectionCount)) + " 节 " + itoa(int(row.OptionCount)) + " 项"
+			if row.Error != "" {
+				line += "  |  读取失败：" + row.Error
+			}
+			fmt.Println(line)
+		}
+		return 0
+	}
+	key := rest[0]
+	cfg, err := db.LoadPluginConfigByGuid(key)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if cfg.FilePath == "" {
+		rows, err := db.LoadPluginConfigs()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		for _, row := range rows {
+			if strings.EqualFold(row.PluginName, key) {
+				cfg, err = db.LoadPluginConfigByGuid(row.Guid)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+					return 1
+				}
+				if cfg.FilePath == "" {
+					cfg = &row
+				}
+				break
+			}
+		}
+	}
+	if cfg.FilePath == "" {
+		fmt.Fprintln(os.Stderr, "未找到该插件的配置文件："+key)
+		return 1
+	}
+	parsed := core.ParsePluginConfigJSON(cfg.Sections)
+	guid := cfg.Guid
+	if guid == "" {
+		guid = "(无)"
+	}
+	fmt.Println("配置: " + cfg.FileName + "  |  " + cfg.PluginName + " " + cfg.PluginVersion +
+		"  |  GUID " + guid + "  |  " + itoa(len(parsed.Sections)) + " 节")
+	for _, section := range parsed.Sections {
+		fmt.Println()
+		fmt.Println("[" + section.Name + "]")
+		for _, option := range section.Options {
+			line := "  " + option.Key + " = " + option.Value
+			if option.Type != "" {
+				line += "   (" + option.Type
+				if option.Def != "" {
+					line += " · 默认 " + option.Def
+				}
+				line += ")"
+			}
+			fmt.Println(line)
+			if option.Comment != "" {
+				fmt.Println("      " + option.Comment)
+			}
+		}
+	}
+	return 0
+}
+
 // ---------- 库根（roots）命令——契约对齐 Program.cs §RootsList / RootsAdd / RootsClear / SetGameRoot ----------
 
 // dbFlag 取出 --db（缺省 = exe 同级 data/kkmanager.db，对齐 C# 默认值）。
@@ -1182,6 +1773,11 @@ func usage() {
 	fmt.Println("  card-timeline <card.png> [tracks]     场景卡 timeline（长度 / timeScale / 关键帧 / 轨道树）")
 	fmt.Println("  thumb <card.png> <out.jpg>            缩略图（JPEG；--thumb N / --quality Q）")
 	fmt.Println("  filehash <path>                       文件 MD5（重复副本比对判据）")
+	fmt.Println("  modfiles <guid>                       某 mod 的跨库副本清单（分片库读面）")
+	fmt.Println("  composition <guid> [--force] [--text] 某 mod 的组成（按需建档：条目清单 + 目录聚合 + 文本条目）")
+	fmt.Println("  plugin-info <dll>                     插件 dll 元数据（BepInPlugin / IPA / 程序集信息）")
+	fmt.Println("  plugin-config [GUID|插件名]           插件配置文件（无参 = 全表；给键 = 分节与配置项）")
+	fmt.Println("  plugins [--unnoted]                   插件清单（与面板同一数据源；--unnoted 只列未收录说明）")
 	fmt.Println("  roots-list                            库根配置（插件 / mod / 卡片三段）")
 	fmt.Println("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]  登记一条库根")
 	fmt.Println("  roots-clear <mods|cards|all>          清空使用者库根（预置条目保留）")
