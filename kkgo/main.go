@@ -16,6 +16,7 @@ import (
 
 	"kkgo/internal/core"
 	"kkgo/internal/store"
+	"kkgo/internal/web"
 )
 
 // version 构建版本（发布时由 -ldflags "-X main.version=..." 注入）。
@@ -73,6 +74,8 @@ func run(args []string) int {
 			return requireArgs("card-analysis <card.png> [coord|detail|scene]...")
 		}
 		return cmdCardAnalysis(rest)
+	case "card-edit":
+		return cmdCardEdit(rest)
 	case "roots-list":
 		return cmdRootsList(rest)
 	case "roots-add":
@@ -93,8 +96,42 @@ func run(args []string) int {
 		return cmdScanScope(rest, core.ScanScopeExtra)
 	case "scan-plugins":
 		return cmdScanPlugins(rest)
+	case "keep-version":
+		return cmdOldOp(rest, "keep-version")
+	case "mark-old":
+		return cmdOldOp(rest, "mark-old")
+	case "swap":
+		return cmdOldOp(rest, "swap")
+	case "promote":
+		return cmdOldOp(rest, "promote")
+	case "sort":
+		return cmdSort(rest)
+	case "card-sort":
+		return cmdCardSort(dbFlag(&rest), rest)
+	case "dup":
+		return cmdDup(rest)
+	case "refs-read":
+		return cmdRefsRead(rest)
+	case "index-import":
+		return cmdIndexImport(rest)
+	case "idx":
+		return cmdIdx(rest)
 	case "stats":
 		return cmdStats(rest)
+	case "authors":
+		return cmdAuthors(rest)
+	case "cards":
+		return cmdCards(rest)
+	case "todos":
+		return cmdTodos(rest)
+	case "noncards":
+		return cmdNonCards(rest)
+	case "noncard-move":
+		return cmdNonCardMove(rest)
+	case "todo-add":
+		return cmdTodoAdd(rest)
+	case "todo-close":
+		return cmdTodoClose(rest)
 	case "card-timeline":
 		if len(rest) < 1 {
 			return requireArgs("card-timeline <card.png> [tracks]")
@@ -130,6 +167,12 @@ func run(args []string) int {
 		return cmdPluginMatch(rest)
 	case "plugins":
 		return cmdPlugins(rest)
+	case "u3d":
+		return cmdU3d(rest)
+	case "u3d-db":
+		return cmdU3dDb(dbFlag(&rest), rest)
+	case "serve":
+		return cmdServe(rest)
 	case "version":
 		fmt.Println("kkgo " + version)
 		return 0
@@ -2318,6 +2361,1141 @@ func cmdScanScope(rest []string, scope core.ScanScope) int {
 	}
 	for _, e := range result.Errors {
 		fmt.Println("  ! " + e)
+	}
+	return 0
+}
+
+// ---- G5 查询族（authors / cards / todos / todo-add / todo-close / noncards / noncard-move） ----
+
+// cmdAuthors 列出作者清单（按发布的 mod 数量倒序）——与面板「按作者筛选」同一数据源（聚合表 mod_author）。
+// 契约对齐 Program.cs §AuthorsCommand。
+func cmdAuthors(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, _, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	fmt.Println("库: " + hub.Core().Path())
+	list, err := core.QueryAuthorsHub(hub)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("作者数: " + n0(int64(len(list))))
+	var total int64
+	for _, a := range list {
+		total += a.Count
+	}
+	fmt.Println("mod 行合计: " + n0(total))
+	fmt.Println()
+	shown := 0
+	for _, a := range list {
+		if shown >= 30 {
+			break
+		}
+		name := a.Author
+		if strings.TrimSpace(name) == "" {
+			name = "（无作者）"
+		}
+		fmt.Println("  " + padLeft(strconv.FormatInt(a.Count, 10), 5) + " 个  " + name)
+		shown++
+	}
+	return 0
+}
+
+// cmdCards 列出卡片（按指定排序键）——与面板「卡片排序」同一实现（QueryCardsHub）。
+// 契约对齐 Program.cs §CardsCommand。
+func cmdCards(rest []string) int {
+	dbPath := dbFlag(&rest)
+	order := takeFlag(&rest, "--order")
+	if order == "" {
+		order = "mtime"
+	}
+	desc := takeSwitch(&rest, "--desc")
+	q := takeFlag(&rest, "--q")
+	limit := 40
+	if v := takeFlag(&rest, "--limit"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil {
+			limit = n
+		}
+	}
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	orderNote := " 升序"
+	switch order {
+	case "mtime":
+		orderNote = "（恒倒序）"
+	case "miss":
+		orderNote = "（固定序：黑 → 灰 → 黄 → 绿）"
+	default:
+		if desc {
+			orderNote = " 降序"
+		}
+	}
+	qNote := q
+	if q == "" {
+		qNote = "（无）"
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	fmt.Println("排序: " + order + orderNote + " · 关键词: " + qNote)
+	fmt.Println()
+	rows, err := core.QueryCardsHub(hub, cfg, 1, limit, "all", q, nil, "", order, desc)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("共列 " + strconv.Itoa(len(rows)) + " 张")
+	for _, r := range rows {
+		name := r.CharaName
+		if name == "" {
+			name = "（无名）"
+		}
+		tail := ""
+		if r.TimelineSet {
+			tail = "  |  timeline " + fmt3(r.TimelineSeconds) + " 秒"
+		}
+		fmt.Println("  " + name + "  |  " + r.Folder + "  |  " + r.FileName + tail)
+	}
+	return 0
+}
+
+// cmdTodos 列出待办——按分支输出（库已离线 / 卡片 / 手输三类，id 供 todo-close 用）。
+// 契约对齐 Program.cs §TodosCommand。
+func cmdTodos(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rows, err := hub.Core().ListTodoRows()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	all := append([]core.RootEntry{}, cfg.ModRootsOrdered()...)
+	all = append(all, cfg.CardRootsOrdered()...)
+	fmt.Println("库: " + hub.Core().Path())
+	fmt.Println("待办: " + strconv.Itoa(len(rows)) + " 条")
+	printTodoGroup("库已离线", "offline", rows, all)
+	printTodoGroup("卡片", "card", rows, all)
+	printTodoGroup("手输", "manual", rows, all)
+	return 0
+}
+
+// printTodoGroup 按分支打印一组待办——离线库条目的路径与备注从库根配置还原（配置是唯一真相源，不双写）。
+func printTodoGroup(title, kind string, rows []store.TodoRow, all []core.RootEntry) {
+	var group []store.TodoRow
+	for _, t := range rows {
+		if t.Kind == kind {
+			group = append(group, t)
+		}
+	}
+	if len(group) == 0 {
+		return
+	}
+	fmt.Println("  [" + title + "] " + strconv.Itoa(len(group)) + " 条")
+	for _, t := range group {
+		tail := "  （登记于 " + t.CreatedAt + "）"
+		switch kind {
+		case "offline":
+			path, note := t.Key, ""
+			for _, e := range all {
+				if strings.EqualFold(strings.TrimSpace(e.Path), t.Key) {
+					path, note = e.Path, e.Note
+					break
+				}
+			}
+			if strings.TrimSpace(note) == "" {
+				fmt.Println("    #" + strconv.FormatInt(t.Id, 10) + "  " + path + tail)
+			} else {
+				fmt.Println("    #" + strconv.FormatInt(t.Id, 10) + "  " + path + "  备注：" + note + tail)
+			}
+		case "card":
+			fmt.Println("    #" + strconv.FormatInt(t.Id, 10) + "  " + t.Text + "  —— " + t.RefName + "  <" + t.RefPath + ">" + tail)
+		default:
+			fmt.Println("    #" + strconv.FormatInt(t.Id, 10) + "  " + t.Text + tail)
+		}
+	}
+}
+
+// cmdTodoAdd 新建待办——`todo-add <文本>` 手输；`todo-add --card <卡片路径> <文本>` 挂到卡片上。
+// 契约对齐 Program.cs §TodoAddCommand。
+func cmdTodoAdd(rest []string) int {
+	dbPath := dbFlag(&rest)
+	card := takeFlag(&rest, "--card")
+	text := strings.TrimSpace(strings.Join(rest, " "))
+	hub, _, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	var problem string
+	if strings.TrimSpace(card) != "" {
+		problem, err = hub.Core().AddCardTodo(card, filepath.Base(card), text, nowStamp())
+	} else {
+		problem, err = hub.Core().AddManualTodo(text, nowStamp())
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if problem != "" {
+		fmt.Println("! " + problem)
+		return 1
+	}
+	if strings.TrimSpace(card) == "" {
+		fmt.Println("已登记手输待办：" + text)
+	} else {
+		fmt.Println("已登记卡片待办：" + text + "  —— " + card)
+	}
+	return 0
+}
+
+// cmdTodoClose 关闭待办——`todo-close <id>`（id 由 `todos` 列出）。
+func cmdTodoClose(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 1 {
+		fmt.Println("用法: todo-close <待办 id>")
+		return 2
+	}
+	id, convErr := strconv.ParseInt(rest[0], 10, 64)
+	if convErr != nil {
+		fmt.Println("用法: todo-close <待办 id>")
+		return 2
+	}
+	hub, _, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rows, err := hub.Core().ListTodoRows()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	found := false
+	for _, t := range rows {
+		if t.Id == id {
+			found = true
+			if err = hub.Core().CloseTodo(id); err != nil {
+				fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+				return 1
+			}
+			break
+		}
+	}
+	if !found {
+		fmt.Println("! 没有这条待办: #" + strconv.FormatInt(id, 10))
+		return 1
+	}
+	fmt.Println("已关闭待办 #" + strconv.FormatInt(id, 10))
+	return 0
+}
+
+// cmdNonCards 列出非卡 / 非 mod 清单——跨库合并，按字节数降序；--moved 含已搬走。
+// 契约对齐 Program.cs §NonCardsCommand。
+func cmdNonCards(rest []string) int {
+	dbPath := dbFlag(&rest)
+	includeMoved := takeSwitch(&rest, "--moved")
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	pending, err := core.CountNonCardsHub(hub, cfg, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	all, err := core.CountNonCardsHub(hub, cfg, true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	rows, err := core.ListNonCardsHub(hub, cfg, includeMoved)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	head := "非卡 / 非 mod: " + n0(pending) + " 个待处置"
+	if all > pending {
+		head += " · 已搬走 " + n0(all-pending) + " 个"
+	}
+	if includeMoved {
+		head += "（列出含已搬走）"
+	}
+	fmt.Println(head)
+	for _, r := range rows {
+		side := "卡片库"
+		if r.Side == "mod" {
+			side = "mod 库"
+		}
+		line := "  #" + strconv.FormatInt(r.Id, 10) + " [" + strconv.Itoa(r.Lib) + "] " + side + " · " + r.Reason +
+			" · " + n0(r.Size) + " 字节"
+		if r.HasThumb {
+			line += " [有图]"
+		} else {
+			line += " [无图]"
+		}
+		line += " · " + r.FilePath
+		if r.MovedTo != "" {
+			line += "  已搬走 → " + r.MovedTo
+		}
+		fmt.Println(line)
+	}
+	return 0
+}
+
+// cmdNonCardMove 一键把非卡 / 非 mod 文件搬到 mod 缓存库（游戏不读的那条库根）——逐条出声，失败项文件不动。
+func cmdNonCardMove(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rows, err := core.ListNonCardsHub(hub, cfg, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	movedCount, skipped := 0, 0
+	for _, r := range rows {
+		dest, detail, moveErr := core.MoveNonCardHub(hub, cfg, r.Lib, r.Id)
+		if moveErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+moveErr.Error())
+			return 1
+		}
+		if dest == "" {
+			skipped++
+			fmt.Println("  ! " + r.FilePath + " → " + detail)
+			continue
+		}
+		movedCount++
+		fmt.Println("  " + r.FilePath + " → " + dest)
+	}
+	left, err := core.CountNonCardsHub(hub, cfg, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("搬运完成：成功 " + strconv.Itoa(movedCount) + " · 跳过/失败 " + strconv.Itoa(skipped) +
+		" · 缓存库 " + core.ModCachePath(cfg))
+	fmt.Println("剩余待处置: " + n0(left))
+	return 0
+}
+
+// fmt3 小数格式化（对齐 C# 格式串 "0.###"——最多三位小数，去尾随 0）。
+func fmt3(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 3, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	return s
+}
+
+// cmdDup 列出重复副本组——同 guid 多份文件（版本 / 作者实时读 manifest，人工筛旧版的判据）。
+// 契约对齐 Program.cs §DupCommand：MD5 只算冲突文件、算过就忽略（档案落主库 mod_hash）；
+// 引用卡片与面板组标题行最右侧缩略图区同一数据源（每组总数 + 前三张）。
+func cmdDup(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	groups, err := core.ListDuplicateGroupsHub(hub, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	var allFiles []store.ModFileRec
+	guids := make([]string, 0, len(groups))
+	for _, g := range groups {
+		allFiles = append(allFiles, g.Files...)
+		guids = append(guids, g.Guid)
+	}
+	hashes, computed, hashErrs, err := core.FillHashesHub(hub, allFiles)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	_ = hashes
+	oldCount, err := hub.Core().CountModOld()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	cardRefs, err := core.QueryDupCardRefsHub(hub, cfg, guids, 3)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("库: " + hub.Core().Path())
+	fmt.Println("重复副本组: " + strconv.Itoa(len(groups)) + "（已登记旧版 " + n0(oldCount) + " 条）· MD5 本次新增 " + strconv.Itoa(computed) + " 条档案")
+	for _, e := range hashErrs {
+		fmt.Println("[哈希] 算不出：" + e)
+	}
+	for _, g := range groups {
+		fmt.Println()
+		fmt.Println("● " + g.Guid + "（" + strconv.Itoa(len(g.Files)) + " 份 · 主库 " + strconv.FormatInt(g.MainCount, 10) + "）")
+		refs := cardRefs[g.Guid]
+		refTotal := int64(0)
+		refNames := ""
+		if refs != nil {
+			refTotal = refs.Total
+			for _, c := range refs.Top {
+				if refNames != "" {
+					refNames += " · "
+				}
+				refNames += c.FileName
+			}
+		}
+		line := "    引用卡片 " + strconv.FormatInt(refTotal, 10) + " 张"
+		if refNames != "" {
+			line += "（前三张 " + refNames + "）"
+		}
+		fmt.Println(line)
+		for _, f := range g.Files {
+			info := core.ParseZipMod(f.FilePath)
+			tail := ""
+			if core.IsOldFileName(f.FileName) {
+				tail += "  [旧版]"
+			}
+			if info.Error != "" {
+				tail += "  ! " + info.Error
+			}
+			fmt.Println("    [" + core.TierName(f.Tier) + "] " + f.FileName +
+				"  版本 " + fieldOrNone(info.Version, info.Found["version"]) +
+				"  作者 " + fieldOrNone(info.Author, info.Found["author"]) +
+				"  " + strconv.FormatInt(f.Size/1024/1024, 10) + " MB" + tail)
+		}
+	}
+	return 0
+}
+
+// cmdRefsRead 引用补读——读某库根下已入库卡片的声明区写 mod 引用（一次性，不扫目录）。
+// 契约对齐 Program.cs §RefsReadCommand + Core/RefsReader.cs。
+func cmdRefsRead(rest []string) int {
+	dbPath := dbFlag(&rest)
+	root := strings.TrimRight(takeFlag(&rest, "--root"), "\\/")
+	onlyPending := takeSwitch(&rest, "--only-pending")
+	limit := 0
+	if v := takeFlag(&rest, "--limit"); v != "" {
+		limit, _ = strconv.Atoi(v)
+	}
+	if strings.TrimSpace(root) == "" {
+		fmt.Fprintln(os.Stderr, "用法：refs-read --root <库根路径> [--only-pending] [--limit N]")
+		return 2
+	}
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	r, err := core.RefsReadRootHub(hub, cfg, root, onlyPending, limit, func(m string) {
+		fmt.Println("  " + m)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("引用补读：卡 " + strconv.FormatInt(r.Cards, 10) +
+		" · 有引用 " + strconv.FormatInt(r.WithRefs, 10) +
+		" · 引用行 " + strconv.FormatInt(r.RefRows, 10) +
+		" · 失败 " + strconv.FormatInt(r.Failed, 10))
+	return 0
+}
+
+// cmdSort 「按作者整理」命令行通道——plan 生成计划 / show 读计划表并核对 /
+// exec 执行 / conflict 看冲突候选 / keep 保留一份（与面板端点同一实现）。
+func cmdSort(rest []string) int {
+	sub := "show"
+	if len(rest) > 0 {
+		sub = rest[0]
+		rest = rest[1:]
+	}
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+
+	if sub == "plan" {
+		roots := make([]string, 0, len(rest))
+		for _, a := range rest {
+			if !strings.HasPrefix(a, "--") {
+				roots = append(roots, a)
+			}
+		}
+		if len(roots) == 0 {
+			for _, e := range cfg.ModRoots {
+				if e.ReadOnly || e.Offline {
+					continue
+				}
+				roots = append(roots, e.Path)
+			}
+		}
+		if len(roots) == 0 {
+			fmt.Fprintln(os.Stderr, "没有可整理的库根（只读 / 离线库不参与）")
+			return 2
+		}
+		if err = hub.Core().ClearSortPlans(); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		job := &core.SortJobState{}
+		if err = core.BuildPlan(hub, cfg, roots, job); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		fmt.Println("计划 #" + strconv.FormatInt(job.PlanID, 10) + "：" + job.Message)
+		fmt.Println("  条目 " + strconv.FormatInt(job.Total, 10) + " · 冲突 " + strconv.FormatInt(job.Conflicts, 10))
+		if job.Conflicts > 0 {
+			return 1
+		}
+		return 0
+	}
+
+	plan, err := hub.Core().LatestSortPlan()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if plan == nil {
+		fmt.Println("还没有整理计划——先跑 sort plan")
+		return 0
+	}
+
+	switch sub {
+	case "conflict":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "用法: sort conflict <seq>")
+			return 2
+		}
+		seq, convErr := strconv.ParseInt(rest[0], 10, 64)
+		if convErr != nil {
+			fmt.Fprintln(os.Stderr, "用法: sort conflict <seq>")
+			return 2
+		}
+		group, groupErr := core.ConflictGroup(hub, plan.ID, seq)
+		if groupErr != "" {
+			fmt.Fprintln(os.Stderr, groupErr)
+			return 2
+		}
+		fmt.Println("冲突组 guid " + group.Guid + " ⇒ " + group.DestPath)
+		recs := make([]store.ModFileRec, 0, len(group.Items))
+		for _, c := range group.Items {
+			recs = append(recs, store.ModFileRec{
+				FilePath: c.FilePath, Guid: group.Guid, Tier: c.Tier, RootPath: c.RootPath,
+				FileName: c.FileName, Size: c.Size, Mtime: c.Mtime,
+			})
+		}
+		hashes, computed, hashErrors, hashErr := core.FillHashesHub(hub, recs)
+		if hashErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+hashErr.Error())
+			return 1
+		}
+		_ = computed
+		for _, c := range group.Items {
+			m := core.ParseZipMod(c.FilePath)
+			version := m.Version
+			if version == "" {
+				version = "<无>"
+			}
+			author := m.Author
+			if author == "" {
+				author = "<无>"
+			}
+			fmt.Println("  [seq " + strconv.FormatInt(c.Seq, 10) + " · " + strconv.Itoa(c.Tier) + " 级] " + c.FilePath)
+			fmt.Println("      版本 " + version + " · 作者 " + author + " · " + strconv.FormatInt(c.Size, 10) +
+				" 字节 · 建 " + "<读不到>" + " · 改 " + c.Mtime)
+			if md5, ok := hashes[c.FilePath]; ok && md5 != "" {
+				fmt.Println("      MD5 " + md5)
+			} else {
+				fmt.Println("      MD5 未算出（档案缺失或读不到）")
+			}
+			if m.Guid == "" && m.Name == "" {
+				fmt.Println("      manifest 读不到：容器内没有 manifest.xml 或缺 guid")
+			}
+		}
+		for _, e := range hashErrors {
+			fmt.Println("  ! MD5 算不出：" + e)
+		}
+		fmt.Println("挑一份保留：sort keep <seq>")
+		return 0
+
+	case "keep":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "用法: sort keep <seq>")
+			return 2
+		}
+		seq, convErr := strconv.ParseInt(rest[0], 10, 64)
+		if convErr != nil {
+			fmt.Fprintln(os.Stderr, "用法: sort keep <seq>")
+			return 2
+		}
+		detail, keepErr := core.ResolveConflict(hub, cfg, plan.ID, seq)
+		if keepErr != "" {
+			fmt.Fprintln(os.Stderr, keepErr)
+			return 2
+		}
+		fmt.Println("已处理：" + detail)
+		return 0
+
+	case "exec":
+		yes := false
+		for _, a := range rest {
+			if a == "--yes" {
+				yes = true
+			}
+		}
+		if !yes {
+			fmt.Fprintln(os.Stderr, "执行会移动磁盘文件——请加 --yes 确认（并确保 koikatsu 已关闭）")
+			return 2
+		}
+		conflicts, err := hub.Core().CountSortPlanItems(plan.ID, core.SortStateConflict)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		if conflicts > 0 {
+			fmt.Fprintln(os.Stderr, "还有 "+strconv.FormatInt(conflicts, 10)+" 条冲突未解决——先处理再执行")
+			return 2
+		}
+		job := &core.SortJobState{}
+		if err = core.ExecutePlan(hub, cfg, plan.ID, job); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		fmt.Println("执行：就位 " + strconv.FormatInt(job.Moved, 10) + " · 跳过 " + strconv.FormatInt(job.Skipped, 10) +
+			" · 失败 " + strconv.FormatInt(job.Failed, 10) + " · 冲突 " + strconv.FormatInt(job.Conflicts, 10) +
+			" · 清空目录 " + strconv.FormatInt(job.PrunedDirs, 10))
+		for _, e := range job.Errors {
+			fmt.Fprintln(os.Stderr, "  失败："+e)
+		}
+		if job.Failed > 0 {
+			return 1
+		}
+		return 0
+	}
+
+	if sub != "show" {
+		fmt.Fprintln(os.Stderr, "未知子命令: "+sub+"（可用：plan / show / exec / conflict / keep）")
+		return 2
+	}
+	conflicts, err := core.RecheckPlan(hub, plan.ID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if err = hub.Core().FinishSortPlan(plan.ID, plan.State, plan.ItemCount, conflicts, plan.Note); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("计划 #" + strconv.FormatInt(plan.ID, 10) + " · " + plan.CreatedAt + " · 状态 " + plan.State +
+		" · 条目 " + strconv.FormatInt(plan.ItemCount, 10))
+	for _, line := range strings.Split(plan.Scope, "\n") {
+		if strings.TrimSpace(line) != "" {
+			fmt.Println("  范围: " + line)
+		}
+	}
+	var pending, conflict, moved, failed, skipped int64
+	all, err := hub.Core().QuerySortPlanItems(plan.ID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	for _, r := range all {
+		switch r.State {
+		case core.SortStateMoved:
+			moved++
+		case core.SortStateConflict:
+			conflict++
+		case core.SortStateFailed:
+			failed++
+		case core.SortStateSkipped:
+			skipped++
+		default:
+			pending++
+		}
+	}
+	shownConflict := 0
+	for _, r := range all {
+		if r.State != core.SortStateConflict || shownConflict >= 40 {
+			continue
+		}
+		fmt.Println("  [冲突] seq " + strconv.FormatInt(r.Seq, 10) + "  " + r.SrcPath + " ⇒ " + r.DestPath + "（" + r.Note + "）")
+		shownConflict++
+	}
+	shown := 0
+	for _, r := range all {
+		if r.State != core.SortStatePending || shown >= 20 {
+			continue
+		}
+		fmt.Println("  [待搬] " + r.Folder + " ← " + r.SrcPath)
+		shown++
+	}
+	fmt.Println("统计：待搬 " + strconv.FormatInt(pending, 10) + " · 就位 " + strconv.FormatInt(moved, 10) +
+		" · 冲突 " + strconv.FormatInt(conflict, 10) + " · 失败 " + strconv.FormatInt(failed, 10) +
+		" · 跳过 " + strconv.FormatInt(skipped, 10))
+	if conflict > 0 {
+		fmt.Fprintln(os.Stderr, "冲突未清零——处理完（或改名 / 删掉目标同名文件）再跑一次 sort show 核对")
+		return 1
+	}
+	return 0
+}
+
+// ---------- 旧版管理（keep-version / mark-old / swap / promote） ----------
+// 契约对齐 Program.cs §OldOpCommand + Data/StoreHub.cs §KeepVersion / §MarkOld / §SwapVersion / §PromoteOld。
+
+// cmdOldOp 旧版管理四条命令的统一入口——失败 exit 3（与 C# 同档），成功打印「完成: <说明>」。
+func cmdOldOp(rest []string, op string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, "用法: "+op+" <guid> <文件路径>")
+		return 2
+	}
+	guid, path := rest[0], rest[1]
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	var detail string
+	switch op {
+	case "keep-version":
+		detail, err = core.KeepVersionHub(hub, cfg, guid, path)
+	case "mark-old":
+		detail, err = core.MarkOldHub(hub, cfg, guid, path)
+	case "swap":
+		detail, err = core.SwapVersionHub(hub, cfg, guid, path)
+	default:
+		detail, err = core.PromoteOldHub(hub, cfg, guid, path)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "失败: "+err.Error())
+		return 3
+	}
+	fmt.Println("完成: " + detail)
+	return 0
+}
+
+// cmdIndexImport 索引导入——读 kkc 风格索引（整理/index 分片或 index.tsv 全量）写库，不扫文件系统。
+// 契约对齐 Program.cs §IndexImportCommand + Core/IndexImporter.cs。
+func cmdIndexImport(rest []string) int {
+	root := strings.TrimRight(strings.TrimRight(takeFlag(&rest, "--root"), `\`), "/")
+	index := takeFlag(&rest, "--index")
+	oldRoot := takeFlag(&rest, "--old-root")
+	purgeFirst := takeSwitch(&rest, "--purge-first")
+	if root == "" {
+		fmt.Fprintln(os.Stderr, "用法：index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]")
+		return 2
+	}
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	if oldRoot != "" {
+		fmt.Fprintln(os.Stderr, "index-import：--old-root 未移植（库根路径迁移与旧记录清理归 card-sort 段一并补）")
+		return 3
+	}
+	if purgeFirst {
+		fmt.Fprintln(os.Stderr, "index-import：--purge-first 未移植（同根重建清理归 card-sort 段一并补）")
+		return 3
+	}
+	modRoot := findRootEntry(cfg.ModRoots, root)
+	cardRoot := findRootEntry(cfg.CardRoots, root)
+	if modRoot == nil && cardRoot == nil {
+		fmt.Fprintln(os.Stderr, "该路径不是已配置的库根："+root+"——先 roots-add，或加 --old-root 迁移")
+		return 2
+	}
+	useMod := modRoot
+	if useMod == nil {
+		useMod = cardRoot
+	}
+	res, err := core.ImportIndex(hub, useMod, cardRoot, index, func(msg string) { fmt.Println("  " + msg) })
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	if res.Error != "" {
+		fmt.Fprintln(os.Stderr, "导入失败："+res.Error)
+		return 3
+	}
+	fmt.Println("索引源登记：root=" + root + " · 摘要 " + res.Digest + " · 目录 " + res.IndexDir)
+	return 0
+}
+
+// findRootEntry 在库根列表里按路径（大小写不敏感、忽略尾分隔符）找条目。
+func findRootEntry(list []core.RootEntry, path string) *core.RootEntry {
+	for i := range list {
+		one := strings.TrimRight(strings.TrimRight(list[i].Path, `\`), "/")
+		if strings.EqualFold(one, path) {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
+// cmdIdx 查索引元数据（作品 / 作者 / 角色 / 来源）——索引导入独有字段。
+// 契约对齐 Program.cs §IdxCommand + Data/StoreHub.cs §QueryIndexMeta。
+func cmdIdx(rest []string) int {
+	dbPath := dbFlag(&rest)
+	kind := takeFlag(&rest, "--kind")
+	work := takeFlag(&rest, "--work")
+	author := takeFlag(&rest, "--author")
+	series := takeFlag(&rest, "--series")
+	vn := takeFlag(&rest, "--vn")
+	charaID := takeFlag(&rest, "--chara-id")
+	q := takeFlag(&rest, "--q")
+	root := takeFlag(&rest, "--root")
+	limit := 50
+	if v := takeFlag(&rest, "--limit"); v != "" {
+		if n, err := parseIntLoose(v); err == nil {
+			limit = n
+		}
+	}
+	wide := takeSwitch(&rest, "--wide")
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rows, err := core.QueryIndexMetaHub(hub, cfg, root, kind, work, author, q, series, vn, charaID, limit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	line := "索引元数据：命中 " + strconv.Itoa(len(rows)) + " 条（上限 " + strconv.Itoa(limit) + "）"
+	if wide {
+		line += " · 宽表 13 列"
+	}
+	fmt.Println(line)
+	for _, r := range rows {
+		s := "  " + r.IdxId + " | " + r.Kind + " | " + r.Work + " | " + r.Chara + " | " + r.Author + " | " + r.FilePath
+		if wide {
+			s += " | " + r.Series + " | " + r.VnId + " | " + r.VnName + " | " + r.VndbCharaId + " | " +
+				r.CharaIdConf + " | " + r.Category + " | " + r.SubCategory
+		}
+		fmt.Println(s)
+	}
+	return 0
+}
+
+// parseIntLoose 整数解析（失败返回错误）。
+func parseIntLoose(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	v := 0
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
+	}
+	if s == "" {
+		return 0, fmt.Errorf("空值")
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return 0, fmt.Errorf("非整数: %s", s)
+		}
+		v = v*10 + int(ch-'0')
+	}
+	if neg {
+		return -v, nil
+	}
+	return v, nil
+}
+
+// cmdCardEdit 改卡片字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 五项是否接受）——原版留档后最小改动写回。
+// 契约对齐 Program.cs §CardEditCommand + Core/CardEdit.cs §Apply。
+func cmdCardEdit(rest []string) int {
+	if len(rest) < 1 {
+		return requireArgs("card-edit <card.png> [--last X] [--first Y] [--nick Z] [--personality N] [--weak-point N] [--denial <键>=<yes|no>] [--archive <dir>]")
+	}
+	path := rest[0]
+	rest = rest[1:]
+	archive, _ := takeFlagPresent(&rest, "--archive")
+	var edit core.CardParamEdit
+	if v, ok := takeFlagPresent(&rest, "--last"); ok {
+		edit.LastName = &v
+	}
+	if v, ok := takeFlagPresent(&rest, "--first"); ok {
+		edit.FirstName = &v
+	}
+	if v, ok := takeFlagPresent(&rest, "--nick"); ok {
+		edit.NickName = &v
+	}
+	if v, ok := takeFlagPresent(&rest, "--personality"); ok {
+		n, err := parseIntLoose(v)
+		if err != nil {
+			fmt.Println("--personality 需要整数：" + v)
+			return 2
+		}
+		edit.Personality = &n
+	}
+	if v, ok := takeFlagPresent(&rest, "--weak-point"); ok {
+		n, err := parseIntLoose(v)
+		if err != nil {
+			fmt.Println("--weak-point 需要整数：" + v)
+			return 2
+		}
+		edit.WeakPoint = &n
+	}
+	denials := takeAllFlag(&rest, "--denial")
+	if len(denials) > 0 {
+		deny := make([]*bool, len(core.DenialKeys))
+		for _, d := range denials {
+			eq := strings.IndexByte(d, '=')
+			if eq <= 0 {
+				fmt.Println("--denial 参数格式应为 <键>=<yes|no>：" + d)
+				return 2
+			}
+			key := d[:eq]
+			val := d[eq+1:]
+			slot := -1
+			for i, k := range core.DenialKeys {
+				if k == key {
+					slot = i
+					break
+				}
+			}
+			if slot < 0 {
+				fmt.Println("未知的「是否接受」键：" + key + "（可用：" + strings.Join(core.DenialKeys, " ") + "）")
+				return 2
+			}
+			flag := false
+			switch val {
+			case "yes", "true":
+				flag = true
+			case "no", "false":
+				flag = false
+			default:
+				fmt.Println("--denial 的值应为 yes 或 no：" + d)
+				return 2
+			}
+			v := flag
+			deny[slot] = &v
+		}
+		edit.Denial = deny
+	}
+	layout := core.ParseCardLayout(path)
+	if layout.Error != "" {
+		fmt.Println("布局解析失败：" + layout.Error)
+		return 3
+	}
+	cur := core.ReadCardParams(path, layout)
+	if cur.Error != "" {
+		fmt.Println("字段读取失败：" + cur.Error)
+		return 3
+	}
+	fmt.Println("编辑前     : " + cardFieldSummary(cur))
+	r := core.ApplyCardEdit(path, layout, cur, edit, archive)
+	if !r.Ok {
+		fmt.Println("编辑失败   : " + r.Error)
+		return 3
+	}
+	fmt.Println("改动       : " + strings.Join(r.Changes, " · "))
+	fmt.Println("字节增量   : " + strconv.Itoa(r.Delta) + "（新大小 " + n0(r.NewSize) + " 字节）")
+	if r.ArchivedFile != "" {
+		fmt.Println("留档       : " + r.ArchivedFile + "（" + n0(r.ArchivedSize) + " 字节）")
+	}
+	after := core.ParseCardLayout(path)
+	now := core.ReadCardParams(path, after)
+	fmt.Println("编辑后     : " + cardFieldSummary(now))
+	fmt.Println("结构复验   : 块表 " + strconv.Itoa(len(after.Blocks)) + " 条 · 载荷 " + n0(after.PayloadSize) + " 字节 · 载荷起点 " + n0(after.PayloadStart))
+	for _, b := range after.Blocks {
+		fmt.Println("  " + padRight(b.Name, 12) + " pos=" + n0(b.Pos) + "  size=" + n0(b.Size))
+	}
+	return 0
+}
+
+// cardFieldSummary 可编辑字段的一行摘要（编辑前后打印用）——对齐 C# CardFieldSummary。
+func cardFieldSummary(info *core.CardParamInfo) string {
+	sb := strings.Builder{}
+	sb.WriteString("姓「" + info.LastName + "」 名「" + info.FirstName + "」 爱称「" + info.NickName + "」")
+	sb.WriteString(" 性格 " + strconv.Itoa(info.Personality))
+	wpName, wpKnown := core.WeakPointNameOf(info.WeakPoint)
+	if !wpKnown {
+		wpName = "(未收录)"
+	}
+	sb.WriteString(" 敏感带 " + strconv.Itoa(info.WeakPoint) + " " + wpName)
+	sb.WriteString(" 接受[")
+	for i, k := range core.DenialKeys {
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(core.DenialNames[i] + "=")
+		if i < len(info.Denial) && info.Denial[i] {
+			sb.WriteString("是")
+		} else {
+			sb.WriteString("否")
+		}
+		_ = k
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// takeFlagPresent 取出「<name> <值>」并从 rest 里移除；返回是否给了这个参数（区分「未给」与「给了空串」）。
+func takeFlagPresent(rest *[]string, name string) (string, bool) {
+	for i := 0; i < len(*rest); i++ {
+		if (*rest)[i] == name && i+1 < len(*rest) {
+			value := (*rest)[i+1]
+			*rest = append((*rest)[:i], (*rest)[i+2:]...)
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// takeAllFlag 取出全部同名参数值（可重复出现的选项）并移出列表。
+func takeAllFlag(rest *[]string, name string) []string {
+	out := make([]string, 0, 4)
+	for {
+		v, ok := takeFlagPresent(rest, name)
+		if !ok {
+			break
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// cmdU3d 列出 zipmod 容器内 unity3d 包中的贴图（可选导出缩小版 PNG）——对齐 C# §U3dCommand。
+func cmdU3d(rest []string) int {
+	if len(rest) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: u3d <zipmod> [--tex <目录>] [--max N]")
+		return 2
+	}
+	zipPath := rest[0]
+	outDir := takeFlag(&rest, "--tex")
+	maxCount := parseIntOr(takeFlag(&rest, "--max"), 0)
+	if _, statErr := os.Stat(zipPath); statErr != nil {
+		fmt.Fprintln(os.Stderr, "文件不存在: "+zipPath)
+		return 2
+	}
+	entries, err := core.ListZipEntries(zipPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "读取容器失败: "+err.Error())
+		return 2
+	}
+	found := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(strings.ToLower(e.Path), ".unity3d") {
+			continue
+		}
+		found++
+		fmt.Println("== " + e.Path + " · " + n0(int64(e.Size)) + " 字节")
+		bytes, readErr := core.ReadZipEntry(zipPath, e.Path, core.U3dEntryMaxBytes)
+		if readErr != nil {
+			fmt.Println("  读取失败：" + readErr.Error())
+			continue
+		}
+		texs, parseErr := core.ListTextures(bytes)
+		if parseErr != "" {
+			fmt.Println("  解析失败：" + parseErr)
+			continue
+		}
+		fmt.Println("  贴图 " + strconv.Itoa(len(texs)) + " 张")
+		for k, t := range texs {
+			fmt.Println("   #" + strconv.FormatInt(t.PathId, 10) + " " + t.Name + " · " +
+				strconv.Itoa(t.Width) + "×" + strconv.Itoa(t.Height) + " · 格式 " + strconv.Itoa(t.Format) +
+				" · " + n0(int64(t.DataLength)) + " 字节")
+			if outDir != "" && (maxCount <= 0 || k < maxCount) {
+				png, pngErr := core.RenderTexturePng(bytes, t.PathId, 512)
+				if pngErr != "" {
+					fmt.Println("     导出失败：" + pngErr)
+					continue
+				}
+				if err := os.MkdirAll(outDir, 0o755); err != nil {
+					fmt.Println("     导出失败：" + err.Error())
+					continue
+				}
+				file := filepath.Join(outDir, "u3d_"+strconv.FormatInt(t.PathId, 10)+".png")
+				if err := os.WriteFile(file, png, 0o644); err != nil {
+					fmt.Println("     导出失败：" + err.Error())
+					continue
+				}
+				fmt.Println("     → " + file)
+			}
+		}
+	}
+	if found == 0 {
+		fmt.Println("容器内没有 .unity3d 条目")
+	}
+	return 0
+}
+
+// cmdU3dDb 按库副本解析某 mod 的 unity3d 条目并落档（与面板端点共用同一实现）——对齐 C# §U3dDbCommand。
+func cmdU3dDb(dbPath string, rest []string) int {
+	force := takeSwitch(&rest, "--force")
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, "用法: u3d-db <guid> <条目路径> [--force]")
+		return 2
+	}
+	guid, entryPath := rest[0], rest[1]
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	rec, detail := core.AnalyzeU3d(hub, cfg, guid, entryPath, force)
+	if rec == nil {
+		fmt.Fprintln(os.Stderr, "失败: "+detail)
+		return 3
+	}
+	fmt.Println("guid       : " + rec.Guid)
+	fmt.Println("条目       : " + rec.EntryPath)
+	fmt.Println("容器文件   : " + rec.FilePath)
+	fmt.Println("大小       : " + n0(int64(rec.Size)) + " 字节")
+	fmt.Println("贴图张数   : " + n0(int64(rec.TextureCount)))
+	if rec.Cached {
+		fmt.Println("建档于     : " + rec.ParsedAt + "（命中已有档案）")
+	} else {
+		fmt.Println("建档于     : " + rec.ParsedAt + "（本次新建）")
+	}
+	fmt.Println()
+	fmt.Println("贴图清单：")
+	for _, t := range core.ParseU3dTextures(rec.Textures) {
+		fmt.Println("  #" + strconv.FormatInt(t.PathId, 10) + "  " + strconv.Itoa(t.Width) + "×" +
+			strconv.Itoa(t.Height) + "  格式 " + strconv.Itoa(t.Format) + "  " + n0(int64(t.DataLength)) + " 字节")
+	}
+	return 0
+}
+
+// cmdServe 起本地面板（阻塞到进程退出）——契约对齐 Program.cs §ServeCommand。
+func cmdServe(rest []string) int {
+	dbPath := dbFlag(&rest)
+	port := parseIntOr(takeFlag(&rest, "--port"), 8539)
+	openBrowser := takeSwitch(&rest, "--open")
+	takeSwitch(&rest, "--browse-debug")
+	app := web.New(dbPath, version)
+	if err := app.Serve(port, openBrowser); err != nil {
+		fmt.Fprintln(os.Stderr, "面板启动失败: "+err.Error())
+		return 1
 	}
 	return 0
 }

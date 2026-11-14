@@ -1,0 +1,415 @@
+# 插件中文说明表 —— 键 = 插件 GUID 或 插件显示名（先按 GUID 精确匹配，再按名称匹配；大小写不敏感）
+# 格式：<键>	<说明>（# 开头为注释行，空行忽略）
+# 范围：只收录本机插件库里实际存在的插件；未收录的在面板显示「未收录（可补充）」
+
+# ---------- BepInEx 框架自带 ----------
+BepInEx.EnableFullScreenToggle	让游戏窗口可在全屏与窗口模式之间切换
+BepInEx.EnableResize	让游戏窗口可自由拖拽边框改变大小
+BepInEx.InputHotkeyBlock	在输入框打字时拦截游戏热键，避免误触发插件功能
+BepInEx.IPALoader	兼容层——加载旧式 IPA 插件，让老架构插件也能在新 BepInEx 下运行
+BepInEx.MuteInBackground	游戏切到后台时自动静音
+BepInEx.OptimizeIMGUI	优化 Unity 内置 IMGUI 的内存分配，减少界面卡顿
+com.bepis.messagecenter	屏幕角落的消息提示条——插件的启动、报错、提示都从这里弹出来
+BepInEx.IPALoader	旧式 IPA 插件加载兼容层
+
+# ---------- BepisPlugins（官方插件包） ----------
+com.bepis.bepinex.configurationmanager	游戏内配置管理器（默认 F1 呼出）——所有插件的设置页都在这里；本软件读的 cfg 就是它渲染的那份
+KK_com.bepis.bepinex.configurationmanager	配置管理器在 Koikatsu 上的封装版（与上面同一个界面）
+com.bepis.bepinex.extendedsave	扩展存档数据框架——插件往卡片 / 存档附加自己数据的底层设施
+com.bepis.bepinex.sideloader	zipmod 加载器——读取 Mods 目录下的 zipmod 并把资产注入游戏
+com.bepis.bepinex.sliderunlocker	解锁角色制作器里滑条的数值上下限
+com.bepis.bepinex.inputunlocker	解锁输入框的字数长度限制
+com.bepis.bepinex.screenshotmanager	截图管理器——按快捷键截图并按规则命名保存
+com.bepis.bepinex.colorcorrector	移除游戏自带的那层色彩滤镜
+com.bepis.bgmloader	自定义 BGM——替换或追加游戏背景音乐
+
+# ---------- KKAPI 与 marco 系列 ----------
+marco.kkapi	插件开发接口（KKAPI）——大量插件依赖它，提供角色 / 场景 / 服装事件与界面工具
+marco.authordata	卡片作者信息——往卡片里写入 / 读取作者名
+marco.FolderBrowser	制作器与工作室的文件夹浏览器——卡片列表支持按文件夹分栏浏览
+marco.better_color_picker	更好用的取色器（色轮 + 取色笔 + 历史颜色）
+marco.RemoveToRecycleBin	删除卡片时改为移入回收站，而不是直接抹掉
+marco-gameplaymod	游戏性扩展合集
+Marco.SkinEffects	皮肤效果——汗、潮红、湿润等
+Marco.NightDarkener	夜晚变暗——夜景光照调整
+
+# ---------- DeathWeasel / KK_Plugins ----------
+com.deathweasel.bepinex.materialeditor	材质编辑器（ME）——改角色与道具的贴图、着色器、渲染参数
+com.deathweasel.bepinex.materialeditor.maker	材质编辑器在角色制作器内的入口
+com.deathweasel.bepinex.materialeditor.studio	材质编辑器在工作室内的入口
+com.deathweasel.bepinex.uncensorselector	解码选择器——给角色指定不同的身体模型
+com.deathweasel.bepinex.autosave	自动保存——按设定间隔自动存档，可设保留份数
+com.deathweasel.bepinex.accessoryclothes	把饰品当衣服用——饰品随服装槽位一起保存与切换
+com.deathweasel.bepinex.accessoryquickremove	快速移除饰品——快捷键一键清空饰品栏
+com.deathweasel.bepinex.animationcontroller	动画控制器——工作室里播放 / 暂停 / 调速角色动作
+com.deathweasel.bepinex.animationoverdrive	动画过载——把动作播放速度拉到更高倍率
+com.deathweasel.bepinex.characterexport	角色导出——把角色导出成可分发的格式
+com.deathweasel.bepinex.charamakerloadedsound	角色制作器加载完成时播放提示音
+com.deathweasel.bepinex.clothingunlocker	解锁服装槽位的数量限制
+com.deathweasel.bepinex.colliders	碰撞体开关——控制角色部位与道具的物理碰撞
+com.deathweasel.bepinex.dynamicboneeditor	动态骨骼编辑器——调头发、裙子等摆动骨骼的参数
+com.deathweasel.bepinex.eyecontrol	眼睛控制——视线方向、眨眼、瞳孔大小
+com.deathweasel.bepinex.eyeshaking	眼睛抖动效果（高潮时眼球颤动）
+com.deathweasel.bepinex.fadeadjuster	淡入淡出调整——场景切换时的黑屏时长
+com.deathweasel.bepinex.fkik	FK / IK 切换——工作室里用正向或反向运动学摆姿势
+com.deathweasel.bepinex.forcehighpoly	强制高模——远处角色也使用高精度模型
+com.deathweasel.bepinex.freehrandom	自由 H 随机——随机挑角色与体位
+com.deathweasel.bepinex.hairaccessorycustomizer	发饰定制——让饰品跟随头发一起摆动
+com.deathweasel.bepinex.hcharaadjustment	H 场景里的角色位置调整
+com.deathweasel.bepinex.invisiblebody	身体透明——按角色隐藏身体只留衣服与饰品
+com.deathweasel.bepinex.itemblacklist	道具黑名单——隐藏不想看到的道具
+com.deathweasel.bepinex.listoverride	列表覆盖——替换游戏内的列表内容（如裤袜修正）
+com.deathweasel.bepinex.makerdefaults	制作器默认值——新角色的初始参数
+com.deathweasel.bepinex.malejuice	男性体液效果
+com.deathweasel.bepinex.moreoutfits	更多服装槽位——默认 7 套扩展为更多套
+com.deathweasel.bepinex.posefolders	姿势文件夹——姿势按文件夹分类管理
+com.deathweasel.bepinex.posequickload	姿势快速加载——快捷键套用姿势
+com.deathweasel.bepinex.poseunlocker	姿势性别限制解锁——男性角色也能套用女性姿势
+com.deathweasel.bepinex.profile	角色档案——保存与切换角色的多套参数组合
+com.deathweasel.bepinex.pushup	托胸效果——服装对胸部的挤压变形
+com.deathweasel.bepinex.reloadcharalistonchange	角色列表有变更时自动重载列表
+com.deathweasel.bepinex.shaderswapper	着色器替换——给角色或道具换 Shader
+com.deathweasel.bepinex.studiocustommasking	工作室自定义遮罩——控制物体之间的遮挡关系
+com.deathweasel.bepinex.studioimageembed	图片嵌入场景卡——把用到的图片一起存进场景，分享时不丢图
+com.deathweasel.bepinex.studioobjectmovehotkeys	工作室物体移动快捷键
+com.deathweasel.bepinex.studiosceneloadedsound	场景加载完成时播放提示音
+com.deathweasel.bepinex.studioscenesettings	工作室场景设置——背景色、雾、光照等随场景一起保存
+com.deathweasel.bepinex.subtitles	字幕显示——H 场景对白字幕
+com.deathweasel.bepinex.twolut	工作室的双重 LUT 调色
+
+# ---------- IllusionFixes（官方修复包） ----------
+Fix_DynamicBones	动态骨骼修复——修头发 / 裙摆摆动异常
+Fix_GuideObjects	工作室操作轴（GuideObject）修复
+Fix_HairShadows	头发阴影渲染修复
+Fix_PoseLoad	姿势加载修复
+Fix_StudioOptimizations	工作室性能优化
+KK_Fix_CameraTarget	相机目标点修复
+KK_Fix_CenteredHSceneCursor	H 场景光标居中修复
+KK_Fix_CharacterListOptimizations	角色列表性能优化
+KK_Fix_DataCorruptionFixes	存档与场景数据损坏修复
+KK_Fix_ExpandShaderDropdown	着色器下拉菜单修复（列表过长时展开不全）
+KK_Fix_GarbageTruck	垃圾回收修复——减少运行时卡顿
+KK_Fix_Heterochromia	异色瞳修复
+KK_Fix_InvalidSceneFileProtection	非法场景文件保护——防止载入坏档把游戏搞崩
+KK_Fix_MainGameOptimizations	主游戏性能优化
+KK_Fix_MainParam	主参数修复
+KK_Fix_MakerOptimizations	角色制作器性能优化
+KK_Fix_ManifestCorrector	zipmod 清单（manifest）修正
+KK_Fix_ModdedHeadEyeliner	改造头模的眼线修复
+KK_Fix_NullChecks	空引用检查补丁——防止偶发崩溃
+KK_Fix_PartyCardCompatibility	Koikatsu Party 卡片兼容修复
+KK_Fix_PersonalityCorrector	性格编号修正
+KK_Fix_ResourceUnloadOptimizations	资源卸载优化
+KK_Fix_RestoreMissingFunctions	恢复被官方删掉的功能
+KK_Fix_ShowerAccessories	淋浴场景饰品修复
+KK_Fix_UnlimitedMapLights	解除地图灯光数量上限
+
+# ---------- KeelPlugins ----------
+keelhauled.animeassistant	动漫臀助手——自动调整臀部动作
+keelhauled.animeassassistant	动漫臀助手——自动调整臀部动作
+keelhauled.bettersceneloader	更好的场景加载器
+keelhauled.cameraframemask	相机画框遮罩——在画面上加取景框
+keelhauled.charastatex	角色状态扩展——多角色状态同步
+keelhauled.defaultparameditor	默认参数编辑器
+keelhauled.defaultstudioscene	默认工作室场景——进工作室自动载入指定场景
+keelhauled.draganddrop	拖放加载——把卡片 / 场景文件拖进窗口即加载
+keelhauled.graphicssettings	画质设置界面
+keelhauled.hideallui	隐藏全部 UI——一键净屏，方便截图
+keelhauled.itemlayeredit	道具图层编辑
+keelhauled.lightmanager	灯光管理器
+keelhauled.lockonplugin	锁定视角插件
+keelhauled.makerbridge	制作器桥接——制作器里快速切换 / 替换角色
+keelhauled.realpov	真实第一人称视角
+keelhauled.studioaddonlite	工作室附加功能合集
+keelhauled.titleshortcuts	标题界面快捷键
+
+# ---------- Madevil 系列 ----------
+madevil.kk.ass	AccStateSync——把饰品绑定到指定服装部位，随穿脱同步显示 / 隐藏
+madevil.kk.AAAPK	饰品附加功能包
+madevil.kk.AccGotHigh	饰品高位调整
+madevil.kk.ACDBS	饰品衣服的动态骨骼支持
+madevil.kk.AnotherUI.ABMX	AnotherUI 版 ABMX 骨骼界面
+madevil.kk.AnotherUI.ObjImport	AnotherUI 版 OBJ 导入
+madevil.kk.BendUrAcc	饰品弯曲
+madevil.kk.BonerStateSync	骨骼状态同步
+madevil.kk.ca	CharacterAccessory——角色饰品管理
+madevil.kk.CharaLight	角色灯光
+madevil.kk.cht	CharaHsceneTweak——H 场景调整
+madevil.kk.cmt	CharaMakerTweak——角色制作器调整
+madevil.kk.cst	CharaStudioTweak——工作室调整
+madevil.kk.CumOnOver	体液覆盖效果
+madevil.kk.dbebs	Dynamic Bone Editor 批量设置
+madevil.kk.DynamicBoner	动态勃起
+madevil.kk.HemorrhoidsBuster	臀部相关调整
+madevil.kk.ItemSearch	道具搜索——工作室里按名字找道具
+madevil.kk.LaunchPad	启动台——快捷启动与常用入口
+madevil.kk.mebs	材质编辑器批量设置
+madevil.kk.mec	材质编辑器剪贴板——跨角色复制材质
+madevil.kk.meh	材质编辑器助手
+madevil.kk.MovUrAcc	移动饰品——批量调整饰品位置
+madevil.kk.mr	Material Router——材质路由
+madevil.kk.PlusPack	PlusPack 扩展合集（总入口）
+madevil.kk.PlusPack.ABMX	PlusPack 版 ABMX
+madevil.kk.PlusPack.ChaAlphaMask	PlusPack 版角色 Alpha 遮罩
+madevil.kk.PlusPack.ClothingBlendShape	PlusPack 版服装 BlendShape
+madevil.kk.PlusPack.DynamicBoneEditor	PlusPack 版动态骨骼编辑
+madevil.kk.PlusPack.HairAccessoryCustomizer	PlusPack 版发饰定制
+madevil.kk.PlusPack.KCOX	PlusPack 版服装覆盖层
+madevil.kk.PlusPack.kkpe	PlusPack 版 KKPE 姿势编辑
+madevil.kk.PlusPack.KKUS	PlusPack 版 KKUS
+madevil.kk.PlusPack.KSOX	PlusPack 版皮肤覆盖层
+madevil.kk.PlusPack.MoreOutfits	PlusPack 版更多服装槽位
+madevil.kk.PlusPack.ObjImport	PlusPack 版 OBJ 导入
+madevil.kk.PlusPack.Pushup	PlusPack 版托胸
+madevil.kk.PlusPack.TreeNodeNaming	PlusPack 版树节点命名
+madevil.kk.PlusPack.UncensorSelector	PlusPack 版解码选择器
+madevil.kk.SceneEffectsManager	场景效果管理
+madevil.kk.SceneInfoManager	场景信息管理
+madevil.kk.tndnd	TreeNodeDragAndDrop——工作室树节点拖放
+madevil.kk.wtf	WhateverTheFuck——杂项调整合集
+madevil.JetPack	JetPack——工作室快捷功能合集
+CreamAssWipe	擦除体液效果
+KKPEHelper	KKPE 姿势编辑器助手
+MapNavi	地图导航
+OverlayLayers	覆盖层（贴图叠加分层）
+SendToQuickAccessBox	发送到快速访问框
+ShadowSettings	阴影设置
+SMAP	饰品父级刺激
+StudioEffectSettings	工作室效果设置
+TextureDictionaryHelper	贴图字典助手
+ParentSwitch	父级切换——改变物体的父子关系
+StudioCameraTweaks	工作室相机调整
+StudioWindowResize	工作室窗口尺寸调整
+KK_LaunchPad	启动台
+
+# ---------- jim60105 ----------
+com.jim60105.kk.coordinateloadoption	服装加载选项——加载服装时可选加载哪些部件
+com.jim60105.kk.coordinatecaptureposeunlock	服装截图姿势解锁
+com.jim60105.kk.pngcapturesizemodifier	PNG 截图尺寸修改——自定义截图分辨率
+com.jim60105.kk.saveloadcompression	存档读写压缩
+com.jim60105.kk.studiochikareplacer	工作室近位角色替换
+com.jim60105.kk.studiocharalightlinkedtocamera	角色灯光跟随相机移动
+com.jim60105.kk.studiomenuscrollingtext	工作室菜单文字滚动显示
+com.jim60105.kk.studioreflectfkfix	工作室 FK 反射修复
+com.jim60105.kk.studiosaveworkspaceorderfix	工作区保存顺序修复
+com.jim60105.kk.studiosimplecolorongirls	给角色上单色——整体染色
+com.jim60105.kk.studiotextplugin	工作室文字插件——在场景里放文字
+com.jim60105.kk.studiotransgenderloading	工作室跨性别加载
+
+# ---------- GeBo ----------
+com.gebo.BepInEx.GeBoAPI	GeBo 系列插件的公共接口
+com.gebo.BepInEx.GameDialogHelper	游戏对话框助手——把选项做成更清楚的对话框
+com.gebo.BepInEx.GameDressForSuccess	换装成功——游戏内快速换装
+com.gebo.BepInEx.studiomultiselectchara	工作室多选角色——批量操作多个角色
+com.gebo.bepinex.studioscenenavigation	工作室场景导航——快速定位场景里的对象
+
+# ---------- 2155X ----------
+KK_HLightControl	灯光控制
+KK_MakerAdditions	角色制作器附加功能
+KK_MakerRandomPicker	制作器随机选择——随机挑发型 / 眼睛等
+KK_MakerSearch	制作器搜索——按名字找选项
+KK_StudioAccessoryNames	工作室显示饰品名称
+KK_StudioPOV	工作室第一人称视角
+KK_TalkFreeCamera	对话场景自由相机
+
+# ---------- Sabakan ----------
+bero.cyu.cyunovr	VR 接吻
+KK_GirlsClothesChange	女孩换装
+KK_MapFriendlyOutfit	地图友好服装——按地图自动换合适的衣服
+KK_SubCamera	副相机——多机位
+LoadRandomMap	随机加载地图
+
+# ---------- nakay ----------
+nakay.kk.ChaAlphaMask	角色 Alpha 遮罩
+nakay.kk.ClothingBlendShape	服装 BlendShape（形变）支持
+nakay.kk.CopyChaBodyMat	复制角色身体材质
+
+# ---------- 工作室核心工具 ----------
+com.joan6694.illusionplugins.kkus	KKUS——工作室实用工具集（相机、角色、道具的批量操作）
+com.joan6694.illusionplugins.cameraeditor	相机编辑器——给相机加景深、滤镜等
+com.joan6694.illusionplugins.videoexport	视频导出——把工作室动画导出成视频
+com.joan6694.illusionplugins.timeline	Timeline 时间轴——工作室里做关键帧动画（跳舞 / 剧情）；场景卡的 timeline 数据就是它写的
+com.joan6694.illusionplugins.moreaccessories	MoreAccessories——给角色增加更多饰品槽位
+com.joan6694.illusionplugins.nodesconstraints	NodesConstraints——节点约束，让道具跟随角色部位运动
+com.joan6694.hsplugins.renderereditor	渲染器编辑器——直接改物体的渲染器参数
+com.rclcircuit.bepinex.modboneimplantor	Mod Bone Implantor——给 mod 模型注入骨骼
+com.animal42069.kkstudiobetterpenetration	工作室更好的穿透（物理穿透效果）
+com.liquid.shader.wobble	液体着色器晃动
+com.rskoi.particleeditor	粒子编辑器
+com.shallty.SceneEffectsPresets	场景效果预设
+com.shallty.shalltyutils	Shallty 工具集
+com.snw.bepinex.breastphysicscontroller	胸部物理控制器——细调胸部晃动
+com.cptgrey.bepinex.uniform	制服
+
+# ---------- 独立插件 ----------
+animal42069.KKbetterpenetration	更好的穿透（物理穿透效果）
+aa2g.kant.rim.remover	边缘光移除
+Bulge	裤子鼓起效果
+CheatTools	作弊工具——调试菜单，可改数值 / 跳场景
+ClothColliders	布料碰撞——衣服之间产生碰撞
+ClothingStateMenu	服装状态菜单——快速切换穿 / 半脱 / 全脱
+Countd360.CharaAnime.KK	CharaAnime——角色动画
+essuhauled.animationloader	动画加载器——加载自定义角色动作
+GamepadSupport	手柄支持
+HeightBar	身高条——制作器里直观显示身高
+horse.coder.tools.scriptloader	C# 脚本加载器——运行时加载自定义脚本
+IllusionMods.CharacterReplacer	角色替换——把场景里的角色换成别的卡
+ItemBlacklistHelper	道具黑名单助手
+JiarongGu.HighHeelPlugin.Modified	Stiletto——高跟鞋，让角色穿高跟鞋时脚型正确
+KCOX	服装覆盖层（Clothes Overlay）——往衣服上叠加自定义贴图
+KCOX_GUI	服装覆盖层的图形界面
+KSOX	皮肤覆盖层（Skin Overlay）——往皮肤上叠加纹身 / 湿身等贴图
+KSOX_GUI	皮肤覆盖层的图形界面
+KKABMX.Core	ABMX 高阶骨骼编辑——改身高、体型、裙长、袜痕等骨骼参数
+KK_ADVeditor	ADV 场景编辑器——编辑对话场景
+KK_Ahegao	阿黑颜表情
+KK_Autostart	自动开始——跳过开场直接进游戏
+KK_BetterColorPicker	更好用的取色器
+KK_BetterPenetration	更好的穿透
+KK_BrowserFolders	文件夹浏览器——卡片列表按文件夹分栏
+KK_Bulge	裤子鼓起
+KK_CharacterReplacer	角色替换
+KK_CheatTools	作弊工具
+KK_ClothColliders	布料碰撞
+KK_ClothingStateMenu	服装状态菜单
+KK_ExpandMaleMaker	男性制作器扩展
+KK_ExpressionControl	表情控制——精细调整角色表情
+KK_FKHeightAdjustUI	FK 身高调整界面
+KK_FreeHFullAuto	自由 H 全自动
+KK_HSceneOptions	H 场景选项
+KK_InsertAnimation	插入动画
+KK_LewdCrest	淫纹
+KK_LewdCrestX	淫纹扩展
+KK_MoreOutfits	更多服装槽位
+KK_NightDarkener	夜晚变暗——夜景光照调整
+KK_ObjImport	OBJ 模型导入——把外部模型导进游戏
+KK_OrthographicCamera	正交相机
+KK_OverlayMods	覆盖层 mod 合集（皮肤 + 服装叠加贴图）
+KK_PantyFairy	内裤妖精——内裤相关调整
+KK_Pregnancy	怀孕系统
+KK_PregnancyPlus	怀孕系统增强版（含乳汁等）
+KK_QuickAccessBox	快速访问框——把常用道具 / 饰品收藏起来随手取用
+KK_RemoveToRecycleBin	删除卡片时移入回收站
+KK_SkinEffects	皮肤效果——汗、潮红、湿润等
+KK_SliderHighlight	滑条高亮——当前滑条突出显示
+KK_Stiletto	高跟鞋
+KK_StudioCameraObjectTweaks	工作室相机物体调整
+KK_Studio_BetterPenetration	工作室更好的穿透
+KK_TreeNodeNaming	树节点命名——给工作室对象改名
+KK_UniformUniforms	制服
+KK_WarpToCharacters	传送到角色——快速移动到指定角色身边
+KoikatuGameplayMod	游戏性扩展合集
+kPlug.Katarsys	kPlug——大型剧情 / 互动扩展包
+LewdCrestX	淫纹扩展
+Liquid_shader_wobble	液体着色器晃动
+ModBoneImplantor	骨骼注入——给 mod 模型加骨骼
+MoreAccessories	更多饰品槽位
+NodesConstraints	节点约束
+PantyFairy	内裤妖精
+RendererEditor	渲染器编辑器
+RimRemover	边缘光移除
+RSkoi_ParticleEditor	粒子编辑器
+RuntimeUnityEditor	运行期 Unity 编辑器——开发者调试工具，可实时看对象树
+ScriptLoader	脚本加载器
+Specter	Specter——工作室实用工具（净屏截图、道具搜索、效果调整、相机巡航）
+SubCamera	副相机
+TexSwap	贴图交换
+Timeline	时间轴——关键帧动画
+TimelineButton	时间轴按钮
+Timeline_loop	时间轴循环播放
+UnityConsoleK_VNGE	Unity 控制台（VNGE 版）——游戏内控制台
+VideoExport	视频导出
+WarpToCharacters	传送到角色
+XUnity.AutoTranslator	自动翻译——实时机翻游戏文本
+XUnity.ResourceRedirector	资源重定向——替换游戏加载的资源
+gravydevsupreme.xunity.autotranslator	自动翻译——实时机翻游戏文本
+gravydevsupreme.xunity.resourceredirector	资源重定向——替换游戏加载的资源
+KK_Chinese	中文汉化——界面与文本汉化
+BreastPhysicsController	胸部物理控制器
+CameraEditor	相机编辑器
+KKUS	工作室工具集
+MakerCam	角色制作器相机
+Marco.SkinEffects	皮肤效果
+mosirnik.kk-main-game-vr	主游戏 VR 支持
+KK_MobAdder	添加游荡角色——街上多几个 NPC
+koikatsu.kk.chinese	中文汉化
+kokaiinum.KKExpandMaleMaker	男性制作器扩展
+orange.spork.fkheightadjustuiplugin	FK 身高调整界面
+org.bepinex.plugins.InsertAddAnimation	插入动画
+org.bepinex.plugins.Timeline_loop	时间轴循环
+org.njaecha.plugins.objimport	OBJ 模型导入
+org.njaecha.plugins.treenodenaming	树节点命名
+picolet21.koikatsu.LewdCrest	淫纹
+com.joan6694.kkplugins.kkpe	KKPE——姿势编辑器，精细调整角色关节与姿势
+kPlugVR.Katarsys	kPlug 的 VR 版本
+keelhauled.freehdefaults	自由 H 的默认设置
+madevil.kk.PlusPack.DragAndDrop	PlusPack 版拖放加载
+madevil.kk.PlusPack.HeightBar	PlusPack 版身高条
+madevil.kk.PlusPack.ItemBlacklist	PlusPack 版道具黑名单
+madevil.kk.PlusPack.KKUS	PlusPack 版 KKUS
+madevil.kk.PlusPack.TreeNodeNaming	PlusPack 版树节点命名
+madevil.kk.PlusPack.ObjImport	PlusPack 版 OBJ 导入
+# ---------- 非插件 dll（框架自带 / 依赖库 / 翻译器 / 补丁器） ----------
+0Harmony.dll	Harmony 补丁框架——插件改游戏代码的底层工具（BepInEx 自带）
+0Harmony20.dll	Harmony 2.0 兼容版（BepInEx 自带）
+BepInEx.dll	BepInEx 主程序集——插件加载框架本体
+BepInEx.Preloader.dll	BepInEx 预加载器——在游戏启动前注入（BepInEx 自带）
+BepInEx.Harmony.dll	BepInEx 的 Harmony 集成层
+HarmonyXInterop.dll	Harmony 兼容层
+Mono.Cecil.dll	程序集读写库——补丁器靠它改 dll（BepInEx 自带）
+Mono.Cecil.Mdb.dll	Mono.Cecil 的调试符号支持
+Mono.Cecil.Pdb.dll	Mono.Cecil 的 PDB 支持
+Mono.Cecil.Rocks.dll	Mono.Cecil 的语法糖扩展
+MonoMod.RuntimeDetour.dll	运行时方法钩子库（BepInEx 自带）
+MonoMod.Utils.dll	MonoMod 工具库
+XUnity.Common.dll	XUnity 系列插件的公共库
+BepInEx.BepIn4Patcher.dll	BepInEx 4 兼容补丁器
+BepInEx.IPAHarmonyShimmer.dll	IPA 插件 Harmony 兼容补丁器
+BepInEx.IPAVirtualizer.dll	IPA 插件虚拟化补丁器
+KK_ExtensibleSaveFormat_Patcher.dll	扩展存档框架的补丁器（在游戏启动前生效）
+KK_MainGameVR_Patcher	VR 支持补丁器目录
+PatcherLoader.dll	补丁器加载器
+native_patcher.dll	原生代码补丁器
+monoPatcher.dll	Mono 运行时补丁器
+ICSharpCode.SharpZipLib.dll	zip 读写库——Sideloader 解 zipmod 靠它
+Newtonsoft.Json.dll	JSON 解析库
+ExIni.dll	ini 配置解析库——XUnity 系列用
+NLayer.dll	MP3 解码库——Unity 控制台用
+PNGFileSupport.dll	PNG 读写支持——Unity 控制台用
+InputSimulator.dll	模拟键鼠输入库
+XInputDotNetPure.dll	手柄输入库——GamepadSupport 用
+VRGIN.dll	VR 注入框架——VR 版靠它
+WindowsInput.dll	Windows 输入模拟库——VR 版用
+IronPython.dll	IronPython 运行时——Unity 控制台（Python 控制台）用
+IronPython.Modules.dll	IronPython 模块库
+Microsoft.Dynamic.dll	IronPython 动态运行库
+Microsoft.Scripting.dll	IronPython 脚本引擎
+Microsoft.Scripting.Core.dll	IronPython 脚本引擎核心
+Microsoft.Scripting.Metadata.dll	IronPython 元数据支持
+StdLib.dll	Python 标准库（Unity 控制台用）
+Unity.Console.dll	Unity 控制台本体（UnityConsoleK_VNGE 的主体）
+Unity.Python.Modules.dll	Unity 控制台 Python 模块
+RuntimeUnityEditor.Core.dll	运行期 Unity 编辑器核心
+KK_BrowserFolders_Hooks_KK.dll	文件夹浏览器的游戏挂钩程序集
+KK_GaugeSlider.dll	好感度滑条（旧式 IPA 插件）
+XUnity.AutoTranslator.Plugin.Core.dll	自动翻译核心
+XUnity.AutoTranslator.Plugin.ExtProtocol.dll	自动翻译扩展协议
+XUnity.ResourceRedirector.dll	资源重定向核心
+BaiduTranslate.dll	百度翻译接口（自动翻译可选引擎）
+BingTranslate.dll	必应翻译接口
+BingTranslateLegitimate.dll	必应翻译接口（官方 API 版）
+CustomTranslate.dll	自定义翻译接口
+DeepLTranslate.dll	DeepL 翻译接口
+DeepLTranslate.ExtProtocol.dll	DeepL 翻译扩展协议
+GoogleTranslate.dll	谷歌翻译接口
+GoogleTranslateCompat.dll	谷歌翻译兼容接口
+GoogleTranslateLegitimate.dll	谷歌翻译接口（官方 API 版）
+LecPowerTranslator15.dll	LEC 电力翻译接口
+LingoCloudTranslate.dll	彩云小译接口
+PapagoTranslate.dll	Papago 翻译接口
+WatsonTranslate.dll	IBM Watson 翻译接口
+YandexTranslate.dll	Yandex 翻译接口
+ezTransXP.dll	ezTrans 翻译接口
+Common.ExtProtocol.dll	翻译扩展协议公共库
+Http.ExtProtocol.dll	翻译扩展协议 HTTP 支持
+GoogleTranslateCompat.ExtProtocol.dll	谷歌翻译兼容接口的扩展协议
