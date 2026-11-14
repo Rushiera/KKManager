@@ -18,6 +18,24 @@ import (
 type DB struct {
 	sql  *sql.DB
 	path string
+	// attachedCore 已挂上本连接的主库绝对路径（ATTACH 是连接级；空 = 未挂）。
+	attachedCore string
+}
+
+// errNilDB 空库句柄（调用方传了 nil——出声不静默）。
+var errNilDB = fmt.Errorf("库句柄为空")
+
+// attachCore 把主库挂到本连接上（名字 core）——已挂过同一主库则跳过（ATTACH 是连接级，重复挂会报错）。
+func (d *DB) attachCore(corePath string) error {
+	if d.attachedCore != "" {
+		return nil
+	}
+	escaped := strings.ReplaceAll(corePath, "'", "''")
+	if _, err := d.sql.Exec("ATTACH DATABASE '" + escaped + "' AS core"); err != nil {
+		return err
+	}
+	d.attachedCore = corePath
+	return nil
 }
 
 // Open 打开主库并启用与 C# 一致的连接参数（WAL · synchronous=NORMAL · busy_timeout 15 s）。

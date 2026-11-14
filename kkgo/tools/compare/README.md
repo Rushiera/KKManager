@@ -15,6 +15,9 @@ G 段验收工具：同一样本、同一参数下跑 `kkgo.exe` 与 `KMR_A.exe`
 | roots / scan-plan | **交互相**：C# 从模板建库 → 同一串写操作分别由 C# 与 Go 写到两份库 → 每份库再由两侧各读一遍（四向读回）；首行「库: <路径>」不比（两份库文件名本就不同） |
 | libmap（分片库读面） | C# 命令面**没有** `modfiles`——真相源侧用 Python 按 C# 规则（`libdb:` / `libshards:` 设置键 + roots JSON → `lib_<基>_<分片>.db`）直读库算副本清单，与 `kkgo modfiles <guid>` 逐行比；样本 = 主库前 2 个 guid + 只在 kkc 库的 3 个 guid |
 | composition | **真库复制两份**（主库文件）→ 各自 C# / Go 跑一次（读容器 + 建档）→ 输出行比对（「建档于」时间戳归一为 `<TS>`）+ 落库 10 字段比对（analyzed_at 按设计不同，不比）；临时库的 roots 裁剪为只留走主库的 mod 库根（避免 C# 预建分片库文件；样本 guid 副本都在主库） |
+| plugin-log | **日志被运行中的游戏独占**（C# 侧 `FileShare.Read` 打不开真日志）——故走「临时库 + 日志副本」：真库快照各复制一份（C# / Go 各一）→ 两份库的 `pluginRoots` 都指向同一个临时 BepInEx 目录 → 两侧同日志跑 → 输出逐行比；第二例「日志缺失」两侧都应 `解析失败` + exit 1 |
+| plugin-match | 真库直比（只读主库 `plugin_file`）——键样本取自场景卡插件条目（vnge_sss / kkpe / timeline）+ 一个未装键 |
+| stats | **两段**：① 裁剪临时库（roots 只留预置条目 + 复制 7000 系列 32 片）→ 两侧 AllStores 组成一致 → 43 行逐行必须全同（四色聚合 / 缺失排行 / 未被引用 / 重复副本都真实跑）；② 真库全量——`KMR_A.exe` 是 0.21.6 产物，mod 侧库路由在 0.21.8 修过（0.21.6 的 `AllStores` 不含 mod 侧非预置库：kkc 的 `lib_5_0.db` 423 行不算；0.21.9 源码算）→「mod 文件副本」一行是**已知代际差异**，其余行必须全同 |
 
 ### card-analysis 的对拍管线（产物对拍，非命令对拍）
 
@@ -39,6 +42,8 @@ py tools\compare\compare.py card-analysis [card] :: 分项分析落库 JSON 对�
 py tools\compare\compare.py roots                :: 库根 / 扫描计划交互相（四向读回）
 py tools\compare\compare.py libmap               :: 分片库读面对拍（Python 直读库作真相源 vs Go modfiles）
 py tools\compare\compare.py composition          :: 组成档案对拍（真库复制两份 → 输出行 + 落库字段）
+py tools\compare\compare.py pluginlog            :: BepInEx 日志对拍（临时库 + 日志副本；含日志缺失分支）
+py tools\compare\compare.py stats                :: 库统计对拍（裁剪临时库逐行 + 真库已知代际差异）
 ```
 
 ## 前置

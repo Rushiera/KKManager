@@ -83,6 +83,8 @@ func run(args []string) int {
 		return cmdSetGameRoot(rest)
 	case "scan-plan":
 		return cmdScanPlan(rest)
+	case "stats":
+		return cmdStats(rest)
 	case "card-timeline":
 		if len(rest) < 1 {
 			return requireArgs("card-timeline <card.png> [tracks]")
@@ -112,6 +114,10 @@ func run(args []string) int {
 		return cmdPluginInfo(rest[0])
 	case "plugin-config":
 		return cmdPluginConfig(rest)
+	case "plugin-log":
+		return cmdPluginLog(rest)
+	case "plugin-match":
+		return cmdPluginMatch(rest)
 	case "plugins":
 		return cmdPlugins(rest)
 	case "version":
@@ -939,6 +945,149 @@ func allStores(hub *store.Hub, cfg *core.RootsConfig) ([]*store.DB, error) {
 	return list, nil
 }
 
+// cmdStats 库统计——卡片 / mod / 副本 / 四色 / 未被引用 / 缺失排行（跨库合并）。
+// 契约对齐 Program.cs §StatsCommand + Data/StoreHub.cs §Snapshot / §DupCounts / §MissingRanking。
+// 四色聚合走逐库 SQL：每库用与 C# Store.ColorCte 同构的 CTE（库文件 ATTACH 主库取 mod 表），计数最后相加。
+func cmdStats(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	fmt.Println("库: " + hub.Core().Path())
+	coreSnap, err := hub.SnapshotOf(hub.Core())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	merged := &store.Snapshot{
+		Mods:      coreSnap.Mods,
+		ModsTier1: coreSnap.ModsTier1,
+		ModsTier2: coreSnap.ModsTier2,
+		ModsTier3: coreSnap.ModsTier3,
+		DupMods:   coreSnap.DupMods,
+	}
+	stores, err := allStores(hub, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	var modFiles int64
+	refSet := map[string]bool{}
+	dupAgg := map[string]*[2]int64{}
+	for _, one := range stores {
+		snap, snapErr := hub.SnapshotOf(one)
+		if snapErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+snapErr.Error())
+			return 1
+		}
+		merged.Cards += snap.Cards
+		merged.CardsReady += snap.CardsReady
+		merged.CardsWithRefs += snap.CardsWithRefs
+		merged.Refs += snap.Refs
+		merged.Green += snap.Green
+		merged.Yellow += snap.Yellow
+		merged.Red += snap.Red
+		merged.Black += snap.Black
+		count, countErr := one.CountModFiles()
+		if countErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+countErr.Error())
+			return 1
+		}
+		modFiles += count
+		guids, guidErr := one.DistinctRefGuids()
+		if guidErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+guidErr.Error())
+			return 1
+		}
+		for _, g := range guids {
+			refSet[g] = true
+		}
+		counts, listErr := one.ListModFileCounts()
+		if listErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+listErr.Error())
+			return 1
+		}
+		for _, c := range counts {
+			v, ok := dupAgg[c.Guid]
+			if !ok {
+				v = &[2]int64{}
+				dupAgg[c.Guid] = v
+			}
+			v[0] += c.Total
+			v[1] += c.Live
+		}
+	}
+	merged.ModFiles = modFiles
+	// 未被引用的 mod：主库级（tier=1）里 guid 不在全库引用集合的
+	sizes, err := hub.Core().MainModSizes()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	unused := int64(0)
+	for _, m := range sizes {
+		if !refSet[m.Guid] {
+			unused++
+		}
+	}
+	merged.UnusedMods = unused
+	// 重复副本组数 / 待确认组数（跨库合并：total > 1 成组，live ≥ 2 待确认）
+	var dupGroups, dupPending int64
+	for _, v := range dupAgg {
+		if v[0] <= 1 {
+			continue
+		}
+		dupGroups++
+		if v[1] >= 2 {
+			dupPending++
+		}
+	}
+	// 缺失排行（跨库合并：每库本地 mod 表里没有的 guid，被引用卡片数累加）
+	missCounts := map[string]int64{}
+	for _, one := range stores {
+		list, missErr := hub.MissingRankingOf(one, 0)
+		if missErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+missErr.Error())
+			return 1
+		}
+		for _, kv := range list {
+			missCounts[kv.Guid] += kv.Count
+		}
+	}
+	ranking := make([]store.MissingRow, 0, len(missCounts))
+	for guid, count := range missCounts {
+		ranking = append(ranking, store.MissingRow{Guid: guid, Count: count})
+	}
+	sort.Slice(ranking, func(i, j int) bool {
+		if ranking[i].Count != ranking[j].Count {
+			return ranking[i].Count > ranking[j].Count
+		}
+		return ranking[i].Guid < ranking[j].Guid
+	})
+	if len(ranking) > 30 {
+		ranking = ranking[:30]
+	}
+	fmt.Println()
+	fmt.Println("卡片总数     : " + n0(merged.Cards) + "（有引用 " + n0(merged.CardsWithRefs) + "，主库就绪 " + n0(merged.CardsReady) + "）")
+	fmt.Println("mod 总数     : " + n0(merged.Mods) + "（主库 " + strconv.FormatInt(merged.ModsTier1, 10) + " / 缓存 " + strconv.FormatInt(merged.ModsTier2, 10) + " / 冷冻 " + strconv.FormatInt(merged.ModsTier3, 10) + "）")
+	fmt.Println("mod 文件副本 : " + n0(merged.ModFiles) + "（重复副本 " + n0(dupGroups) + " 组 · " + n0(dupPending) + " 待确认）")
+	fmt.Println("引用（去重） : " + n0(merged.Refs))
+	fmt.Println("  绿（主库） : " + n0(merged.Green))
+	fmt.Println("  黄（缓存） : " + n0(merged.Yellow))
+	fmt.Println("  红（冷冻） : " + n0(merged.Red))
+	fmt.Println("  黑（全无） : " + n0(merged.Black))
+	fmt.Println("未被引用的 mod: " + n0(merged.UnusedMods))
+	fmt.Println()
+	fmt.Println("缺失排行（全库皆无，按被引用卡片数）：")
+	for _, kv := range ranking {
+		fmt.Println("  " + padLeft(strconv.FormatInt(kv.Count, 10), 5) + " 张  " + kv.Guid)
+	}
+	return 0
+}
+
 // queryModFiles 某 guid 的全部文件副本（跨库，按级别升序）——对齐 C# StoreHub.QueryModFiles。
 func queryModFiles(hub *store.Hub, cfg *core.RootsConfig, guid string) ([]store.ModFileRow, error) {
 	stores, err := allStores(hub, cfg)
@@ -1336,6 +1485,101 @@ func cmdPlugins(rest []string) int {
 	fmt.Println("## 未收录说明（" + itoa(len(unnoted)) + "）——可在 Web\\wwwroot\\plugin-notes.txt 补一行（键 = GUID 或插件名）")
 	for _, u := range unnoted {
 		fmt.Println("  " + u)
+	}
+	return 0
+}
+
+// cmdPluginLog 解析 BepInEx 日志（LogOutput.log）——插件加载 / 进程过滤跳过 / 错误三类实况。
+// 契约对齐 Program.cs §PluginLogCommand（含「装了但本次日志没提」的插件清单）。
+func cmdPluginLog(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	path := core.LogPathOf(cfg)
+	s := core.ReadPluginLog(path)
+	fmt.Println("日志: " + s.FilePath)
+	if s.Error != "" {
+		fmt.Fprintln(os.Stderr, "解析失败: "+s.Error)
+		return 1
+	}
+	fmt.Println("时刻: " + s.FileTime + " · " + strconv.FormatInt(s.FileSize/1024/1024, 10) + " MB")
+	fmt.Println("待加载 " + itoa(s.ToLoad) + " · 已加载 " + itoa(len(s.Loaded)) +
+		" · 进程过滤跳过 " + itoa(len(s.Skipped)) + " · 错误行 " + itoa(len(s.Errors)))
+	if len(s.Errors) > 0 {
+		fmt.Println()
+		fmt.Println("## 错误（" + itoa(len(s.Errors)) + "）")
+		for _, e := range s.Errors {
+			fmt.Println("  " + e)
+		}
+	}
+	if len(s.Skipped) > 0 {
+		fmt.Println()
+		fmt.Println("## 进程过滤跳过（" + itoa(len(s.Skipped)) + "）")
+		for _, k := range s.Skipped {
+			fmt.Println("  " + k)
+		}
+	}
+	// 装了但日志里完全没提（仅 plugins 目录下的插件——core / patchers 不在插件加载面）
+	rows, err := hub.Core().LoadPlugins()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	unmentioned := make([]string, 0)
+	for _, row := range rows {
+		if row.Guid == "" || !strings.Contains(strings.ToLower(row.FilePath), `\plugins\`) {
+			continue
+		}
+		if core.PluginLogStateOf(s, row.Name) != "none" {
+			continue
+		}
+		unmentioned = append(unmentioned, row.Guid+"  |  "+row.Name+" "+row.Version+"  |  "+row.FileName)
+	}
+	fmt.Println()
+	fmt.Println("## 装了但本次日志没提（" + itoa(len(unmentioned)) + "）——可疑：可能没被 BepInEx 扫到")
+	for _, u := range unmentioned {
+		fmt.Println("  " + u)
+	}
+	return 0
+}
+
+// cmdPluginMatch 场景卡插件键 ↔ 已装插件对照（键是卡片数据区里的简名——vnge_sss / kkpe / timeline）。
+// 契约对齐 Program.cs §PluginMatchCommand / Core/PluginMatcher.cs。
+func cmdPluginMatch(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 1 {
+		return requireArgs("plugin-match <键...> [--db <db>]")
+	}
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	plugins, err := db.LoadPlugins()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	for _, key := range rest {
+		var hits []store.PluginRow
+		for _, p := range plugins {
+			if core.PluginKeyMatches(p.Guid, p.Name, key) {
+				hits = append(hits, p)
+			}
+		}
+		if len(hits) == 0 {
+			fmt.Println(key + "  →  未装（插件库里没有匹配的插件）")
+			continue
+		}
+		fmt.Println(key + "  →  " + itoa(len(hits)) + " 项")
+		for _, p := range hits {
+			fmt.Println("      " + p.Guid + "  |  " + p.Name + " " + p.Version + "  |  " + p.FileName)
+		}
 	}
 	return 0
 }
@@ -1777,12 +2021,15 @@ func usage() {
 	fmt.Println("  composition <guid> [--force] [--text] 某 mod 的组成（按需建档：条目清单 + 目录聚合 + 文本条目）")
 	fmt.Println("  plugin-info <dll>                     插件 dll 元数据（BepInPlugin / IPA / 程序集信息）")
 	fmt.Println("  plugin-config [GUID|插件名]           插件配置文件（无参 = 全表；给键 = 分节与配置项）")
+	fmt.Println("  plugin-log                            解析 BepInEx 日志（加载 / 进程过滤跳过 / 错误 / 日志未提）")
+	fmt.Println("  plugin-match <键...>                  场景卡插件键 ↔ 已装插件对照（vnge_sss / kkpe / timeline）")
 	fmt.Println("  plugins [--unnoted]                   插件清单（与面板同一数据源；--unnoted 只列未收录说明）")
 	fmt.Println("  roots-list                            库根配置（插件 / mod / 卡片三段）")
 	fmt.Println("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]  登记一条库根")
 	fmt.Println("  roots-clear <mods|cards|all>          清空使用者库根（预置条目保留）")
 	fmt.Println("  set-game-root <路径>                  设游戏根（锁定条目重派生 / 缓存库槽位跟随）")
 	fmt.Println("  scan-plan [set <顺序> [启用]]         扫描计划（读 / 写；两键用于扫描链）")
+	fmt.Println("  stats                                 库统计（卡片 / mod / 四色 / 未被引用 / 缺失排行）")
 }
 
 // orNone 空值显示 <无>（对齐 C# ?? "<无>"）。

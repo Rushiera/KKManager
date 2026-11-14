@@ -60,6 +60,7 @@ CASES = [
     ("plugins", ["--db", REAL_DB, "--unnoted"]),
     ("plugin-config", ["--db", REAL_DB]),
     ("plugin-config", ["BepInEx.EnableResize", "--db", REAL_DB]),
+    ("plugin-match", ["vnge_sss", "kkpe", "timeline", "materialeditor", "does_not_exist_key", "--db", REAL_DB]),
 ]
 
 # 扫描计划全集顺序（临时库准备时用——内置顺序，见 C# ScanPlanCatalog.Defs）
@@ -107,7 +108,11 @@ def cmd_all():
         bad += 1
     if cmd_composition() != 0:
         bad += 1
-    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 4, bad))
+    if cmd_pluginlog() != 0:
+        bad += 1
+    if cmd_stats() != 0:
+        bad += 1
+    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 6, bad))
     return 0 if bad == 0 else 1
 
 
@@ -509,6 +514,174 @@ def cmd_composition():
     return 0 if ok else 1
 
 
+def _snapshot_db(src, dst, plugin_root):
+    """把真库做成一致快照（sqlite backup API——含未 checkpoint 的 WAL）并把 pluginRoots 指向临时目录。"""
+    s = sqlite3.connect(src)
+    d = sqlite3.connect(dst)
+    s.backup(d)
+    s.close()
+    row = d.execute("SELECT value FROM setting WHERE key='roots'").fetchone()
+    cfg = json.loads(row[0]) if row and row[0] else {}
+    cfg["pluginRoots"] = [{"tier": 1, "path": plugin_root, "recurse": True,
+                           "readOnly": False, "locked": False, "offline": False,
+                           "note": "", "replacedFrom": ""}]
+    d.execute("UPDATE setting SET value=? WHERE key='roots'",
+              (json.dumps(cfg, ensure_ascii=False),))
+    d.commit()
+    d.close()
+
+
+def cmd_pluginlog():
+    """plugin-log 对拍：真日志被运行中的游戏独占（C# 侧 FileShare.Read 打不开），
+    故走「临时库 + 日志副本」——真库快照各复制一份（C# / Go 各一）→ 两份库的 pluginRoots
+    都指向同一个临时 BepInEx 目录 → 两侧同日志跑 plugin-log → 输出逐行比。
+    第二例：临时目录不放日志 → 两侧都应「解析失败」+ exit 1（缺失分支）。"""
+    print("—— plugin-log 专项（临时库 + 日志副本）")
+    log_src = r"D:\SteamLibrary\Koikatu\BepInEx\LogOutput.log"
+    if not os.path.exists(log_src):
+        print("真日志不存在：%s" % log_src)
+        return 3
+    tmp = os.path.join(OUT_DIR, "_log_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    root = os.path.join(tmp, "BepInEx")
+    os.makedirs(root, exist_ok=True)
+    go_ok = True
+    for label, with_log in (("有日志", True), ("日志缺失", False)):
+        db_cs = os.path.join(tmp, "cs-%s.db" % ("on" if with_log else "off"))
+        db_go = os.path.join(tmp, "go-%s.db" % ("on" if with_log else "off"))
+        _snapshot_db(REAL_DB, db_cs, root)
+        _snapshot_db(REAL_DB, db_go, root)
+        log_path = os.path.join(root, "LogOutput.log")
+        if with_log:
+            shutil.copy2(log_src, log_path)
+        elif os.path.exists(log_path):
+            os.remove(log_path)
+        p_go = subprocess.run([GO, "plugin-log", "--db", db_go], capture_output=True)
+        p_cs = subprocess.run([CS, "plugin-log", "--db", db_cs], capture_output=True)
+        a = projection(p_go.stdout, "utf-8")
+        b = projection(p_cs.stdout, "gbk")
+        diff = 0
+        for i in range(max(len(a), len(b))):
+            la = a[i] if i < len(a) else "<缺失>"
+            lb = b[i] if i < len(b) else "<缺失>"
+            if la != lb:
+                diff += 1
+                if diff <= 6:
+                    print("  [%d] Go %r" % (i, la))
+                    print("      C# %r" % (lb,))
+        one = diff == 0 and len(a) == len(b) and p_go.returncode == p_cs.returncode
+        if not one:
+            go_ok = False
+        print("%-8s exit %d/%d 行 %d/%d 差异 %d → %s"
+              % (label, p_go.returncode, p_cs.returncode, len(a), len(b), diff,
+                 "一致" if one else "不一致"))
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if go_ok else "不一致"))
+    return 0 if go_ok else 1
+
+
+def cmd_stats():
+    """stats 对拍（两段）：
+    ① 裁剪临时库——roots 只留预置条目（mods / mods_cache / chara\\female）+ 复制 7000 系列卡片分片，
+       两侧 AllStores 组成一致 → 逐行必须全同（四色聚合 / 缺失排行 / 未被引用都真实跑）。
+    ② 真库全量——KMR_A.exe 是 0.21.6 产物，mod 侧库路由在 0.21.8 修过（0.21.6 的 AllStores
+       不含 mod 侧非预置库：kkc 的 lib_5_0.db 423 行不算；0.21.9 源码算）→「mod 文件副本」一行
+       是已知代际差异，其余行必须全同。差异行逐条打印两侧原文备查。"""
+    print("—— stats 专项（裁剪临时库逐行 + 真库已知代际差异）")
+    src_dir = os.path.dirname(REAL_DB)
+    tmp = os.path.join(OUT_DIR, "_stats_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    ok = True
+    # ① 裁剪临时库
+    for tag in ("cs", "go"):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        src = sqlite3.connect(REAL_DB)
+        dst = sqlite3.connect(os.path.join(d, "kkmanager.db"))
+        src.backup(dst)
+        src.close()
+        row = dst.execute("SELECT value FROM setting WHERE key='roots'").fetchone()
+        cfg = json.loads(row[0]) if row and row[0] else {}
+        cfg["modRoots"] = [e for e in (cfg.get("modRoots") or [])
+                           if e.get("locked") or e.get("tier") == 2]
+        cfg["cardRoots"] = [e for e in (cfg.get("cardRoots") or [])
+                            if (e.get("path") or "").lower().endswith("chara\\female")]
+        dst.execute("UPDATE setting SET value=? WHERE key='roots'",
+                    (json.dumps(cfg, ensure_ascii=False),))
+        dst.commit()
+        dst.close()
+        copied = 0
+        for name in os.listdir(src_dir):
+            if name.startswith("lib_7000_") and name.endswith(".db"):
+                shutil.copy2(os.path.join(src_dir, name), os.path.join(d, name))
+                copied += 1
+        print("  %s 复制分片 %d 个" % (tag, copied))
+    p_go = subprocess.run([GO, "stats", "--db", os.path.join(tmp, "go", "kkmanager.db")], capture_output=True)
+    p_cs = subprocess.run([CS, "stats", "--db", os.path.join(tmp, "cs", "kkmanager.db")], capture_output=True)
+
+    def norm_db(raw, enc):
+        out = []
+        for ln in raw.decode(enc, "replace").splitlines():
+            if ln.startswith("库:"):
+                ln = "库: <DB>"
+            out.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+        return out
+
+    a = norm_db(p_go.stdout, "utf-8")
+    b = norm_db(p_cs.stdout, "gbk")
+    diff = 0
+    for i in range(max(len(a), len(b))):
+        la = a[i] if i < len(a) else "<缺失>"
+        lb = b[i] if i < len(b) else "<缺失>"
+        if la != lb:
+            diff += 1
+            if diff <= 8:
+                print("  [%d] Go %r" % (i, la))
+                print("      C# %r" % (lb,))
+    one = diff == 0 and len(a) == len(b) and p_go.returncode == p_cs.returncode
+    if not one:
+        ok = False
+    print("裁剪库   exit %d/%d 行 %d/%d 差异 %d → %s"
+          % (p_go.returncode, p_cs.returncode, len(a), len(b), diff, "一致" if one else "不一致"))
+    # ② 真库全量（已知代际差异一行）
+    p_go = subprocess.run([GO, "stats", "--db", REAL_DB], capture_output=True)
+    p_cs = subprocess.run([CS, "stats", "--db", REAL_DB], capture_output=True)
+    raw_go = p_go.stdout.decode("utf-8", "replace").splitlines()
+    raw_cs = p_cs.stdout.decode("gbk", "replace").splitlines()
+    a = projection(p_go.stdout, "utf-8")
+    b = projection(p_cs.stdout, "gbk")
+    allowed = set(i for i, ln in enumerate(raw_cs) if ln.startswith("mod 文件副本"))
+    unknown = 0
+    known = 0
+    for i in range(max(len(a), len(b))):
+        la = a[i] if i < len(a) else "<缺失>"
+        lb = b[i] if i < len(b) else "<缺失>"
+        if la == lb:
+            continue
+        if i in allowed:
+            known += 1
+            print("  [已知代际差异] C# %r" % (raw_cs[i] if i < len(raw_cs) else "<缺失>",))
+            print("                 Go %r" % (raw_go[i] if i < len(raw_go) else "<缺失>",))
+            continue
+        unknown += 1
+        if unknown <= 8:
+            print("  [%d] Go %r" % (i, la))
+            print("      C# %r" % (lb,))
+    two = unknown == 0 and len(a) == len(b) and p_go.returncode == p_cs.returncode
+    if not two:
+        ok = False
+    print("真库     exit %d/%d 行 %d/%d 已知差异 %d 行 · 其他差异 %d → %s"
+          % (p_go.returncode, p_cs.returncode, len(a), len(b), known, unknown,
+             "一致" if two else "不一致"))
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
 def cmd_cardanalysis(sample):
     """分项分析对拍：C# 侧只能靠落库产物（无命令行面），故先跑一次单卡扫描再比 JSON。"""
     tmp = os.path.join(OUT_DIR, "_ca_tmp")
@@ -590,6 +763,10 @@ def main(argv):
         return cmd_libmap()
     if mode == "composition":
         return cmd_composition()
+    if mode == "pluginlog":
+        return cmd_pluginlog()
+    if mode == "stats":
+        return cmd_stats()
     return cmd_single(mode, argv[1:])
 
 
