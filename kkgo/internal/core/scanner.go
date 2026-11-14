@@ -970,8 +970,30 @@ func runCardStep(db *store.DB, root RootEntry, f *ScanFile, step ScanStepDef, th
 		if ok, err := ensureHead(db, f, result); !ok || err != nil {
 			return ok, err
 		}
-		result.addError(filepath.Base(f.Path) + " → " + step.Id + " 分析步尚未移植（Go 侧 G4 余项）")
-		return false, nil
+		if f.CardId <= 0 {
+			id, err := db.CardIdOf(f.Path)
+			if err != nil {
+				return false, err
+			}
+			f.CardId = id
+		}
+		if f.CardId <= 0 {
+			return false, nil
+		}
+		res, done, analysisErr := AnalyzeScanFile(f, step.Id)
+		if analysisErr != nil {
+			result.addError(filepath.Base(f.Path) + " → " + step.Id + "：" + analysisErr.Error())
+			return false, nil
+		}
+		if !done {
+			return false, nil
+		}
+		if res != nil {
+			if err := db.SaveCardAnalysis(f.CardId, res.Kind, f.Path, f.Size, f.Mtime, res.JSON); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -1385,25 +1407,169 @@ func countPluginDlls(cfg *RootsConfig, result *ScanResult) int {
 	return n
 }
 
-// scanPlugins mod 侧的插件库连带段（可选组之外的一块）——插件落库写面尚未移植。
-// 根不存在的分支与 C# 逐字对齐（报错并继续）；根存在时明确出声「未移植」，不静默漏数据。
-func scanPlugins(db *store.DB, cfg *RootsConfig, result *ScanResult, log ScanLog) (dlls, plugins, configs int) {
+// PluginProgressEvery 插件库进度出声间隔（对齐 C# Scanner.PluginProgressEvery）。
+const PluginProgressEvery = 50
+
+// oldPluginStamp 旧插件行的增量判据索引（一个 dll 多行时取首行——各行 size / mtime 相同）。
+type oldPluginStamp struct {
+	// path 原始文件路径（保大小写——清理时按它删行）。
+	path string
+	// size 登记时的文件字节数。
+	size int64
+	// mtime 登记时的修改时间戳（UTC 文本）。
+	mtime string
+}
+
+// ScanPlugins 扫描插件库根下的全部 dll 与配置文件并落库（只读解析，不改动任何文件）。
+// 对齐 C# Scanner.ScanPlugins：旧戳索引（size + mtime 双等跳解析）→ 清理已消失的 dll →
+// 逐 dll 解析落库（未解析出插件特性也落一行 guid 空的，让「装了但不是插件」可见）→ cfg 全量重读。
+func ScanPlugins(db *store.DB, cfg *RootsConfig, result *ScanResult, log ScanLog) (dlls, plugins, configs int) {
+	if cfg == nil || db == nil {
+		return 0, 0, 0
+	}
+	old, loadErr := db.LoadPlugins()
+	if loadErr != nil {
+		result.addError("插件库旧行读取失败：" + loadErr.Error())
+		return 0, 0, 0
+	}
 	for _, root := range cfg.PluginRoots {
 		if strings.TrimSpace(root.Path) == "" {
+			result.addError("插件库根不存在：" + root.Path)
 			continue
 		}
-		if info, err := os.Stat(root.Path); err != nil || !info.IsDir() {
+		if info, statErr := os.Stat(root.Path); statErr != nil || !info.IsDir() {
 			result.addError("插件库根不存在：" + root.Path)
 			continue
 		}
 		report(log, "插件库 · "+root.Path)
-		result.addError("插件扫描尚未移植（Go 侧 G4 余项）——插件库：" + root.Path)
+		files, enumFailed := enumerateFiles(root.Path, "*.dll", root.Recurse, log)
+		if enumFailed {
+			result.addError("插件库枚举失败（" + root.Path + "）")
+			continue
+		}
+		dlls += len(files)
+		// [段1] 建本次清单与旧戳索引——未变的 dll 跳过解析（增量判据 = size + mtime 双等）
+		keep := make(map[string]bool, len(files))
+		for _, f := range files {
+			keep[strings.ToLower(f)] = true
+		}
+		oldIndex := make(map[string]oldPluginStamp, len(old))
+		for i := range old {
+			row := &old[i]
+			if !strings.EqualFold(row.RootPath, root.Path) {
+				continue
+			}
+			key := strings.ToLower(row.FilePath)
+			if _, ok := oldIndex[key]; !ok {
+				oldIndex[key] = oldPluginStamp{path: row.FilePath, size: row.Size, mtime: row.Mtime}
+			}
+		}
+		// [段2] 清理已消失的 dll——本次清单里没有的旧行直接删
+		for _, st := range oldIndex {
+			if keep[strings.ToLower(st.path)] {
+				continue
+			}
+			if err := db.DeletePluginFile(st.path); err != nil {
+				result.addError("插件行清理失败（" + st.path + "）：" + err.Error())
+			}
+		}
+		// [段3] 逐 dll 解析（C# 侧并行、落库串行；Go 串行）——未变的跳过
+		done := 0
+		total := len(files)
+		for _, filePath := range files {
+			done++
+			if log != nil && (done%PluginProgressEvery == 0 || done == total) {
+				log("  插件库 " + itoaInt(done) + "/" + itoaInt(total))
+			}
+			var size int64
+			var mtime string
+			if info, statErr := os.Stat(filePath); statErr == nil {
+				size = info.Size()
+				mtime = pluginFileStamp(info.ModTime())
+			}
+			if st, ok := oldIndex[strings.ToLower(filePath)]; ok && st.size == size && st.mtime == mtime {
+				continue
+			}
+			list, meta, readErr := ReadPluginDll(filePath)
+			if err := db.DeletePluginFile(filePath); err != nil {
+				result.addError("插件行清理失败（" + filePath + "）：" + err.Error())
+			}
+			if len(list) == 0 {
+				// 未解析出插件特性（原生 dll / 无特性）——仍落一行（guid 空），让「装了但不是插件」可见
+				bad := &store.PluginRow{
+					FilePath: filePath, RootPath: root.Path, FileName: filepath.Base(filePath),
+					Size: size, Mtime: mtime, Note: readErr,
+					Title: meta.Title, Description: meta.Description, Company: meta.Company,
+					Copyright: meta.Copyright, Product: meta.Product, FileVersion: meta.FileVersion,
+					TargetFramework: meta.TargetFramework,
+				}
+				if err := db.SavePlugin(bad); err != nil {
+					result.addError("插件行写入失败（" + filePath + "）：" + err.Error())
+				}
+				continue
+			}
+			for i := range list {
+				info := &list[i]
+				row := &store.PluginRow{
+					FilePath: filePath, Guid: info.Guid, RootPath: root.Path, FileName: info.FileName,
+					Name: info.Name, Version: info.Version,
+					Processes:    strings.Join(info.Processes, ","),
+					Dependencies: strings.Join(info.Dependencies, ","),
+					IsIpa:        info.IsIpa, Size: size, Mtime: mtime,
+					Title: info.Title, Description: info.Description, Company: info.Company,
+					Copyright: info.Copyright, Product: info.Product, FileVersion: info.FileVersion,
+					TargetFramework: info.TargetFramework,
+				}
+				if err := db.SavePlugin(row); err != nil {
+					result.addError("插件行写入失败（" + filePath + "）：" + err.Error())
+				}
+			}
+		}
+		// [段4] 配置文件全量读取——config/*.cfg 逐个解析（分节 / 选项 / 作者注释）落库；
+		// cfg 数量有限，整段重读不留增量判据——改了立刻反映，不会读到半新半旧
+		if err := db.DeletePluginConfigsUnderRoot(root.Path); err != nil {
+			result.addError("配置行清理失败（" + root.Path + "）：" + err.Error())
+		}
+		cfgErrors := make([]string, 0, 4)
+		cfgs := ReadPluginConfigDir(root.Path, &cfgErrors)
+		for _, e := range cfgErrors {
+			result.addError(e)
+		}
+		for i := range cfgs {
+			cf := &cfgs[i]
+			row := &store.PluginConfigRow{
+				FilePath: cf.FilePath, FileName: cf.FileName, PluginName: cf.PluginName,
+				PluginVersion: cf.PluginVersion, Guid: cf.Guid, Size: cf.Size, Mtime: cf.Mtime,
+				Sections: ToPluginConfigJSON(cf), Error: cf.Error,
+			}
+			var sections, options int64
+			for k := range cf.Sections {
+				sections++
+				options += int64(len(cf.Sections[k].Options))
+			}
+			row.SectionCount = sections
+			row.OptionCount = options
+			if err := db.SavePluginConfig(row); err != nil {
+				result.addError("配置行写入失败（" + cf.FilePath + "）：" + err.Error())
+			}
+		}
+		configs += len(cfgs)
 	}
-	return 0, 0, 0
+	rows, err := db.LoadPlugins()
+	if err != nil {
+		result.addError("插件行回读失败：" + err.Error())
+		return dlls, 0, configs
+	}
+	for i := range rows {
+		if rows[i].Guid != "" {
+			plugins++
+		}
+	}
+	return dlls, plugins, configs
 }
 
 // ScanAll 统一编排入口——按计划的段顺序执行（跨侧交错），收尾做清扫 / 插件段 / 离线标记 / 作者索引。
-// 对齐 C# Scanner.ScanAll（先导段 + 插件段；插件落库写面为未移植项）。
+// 对齐 C# Scanner.ScanAll（先导段 + 插件段）。
 func ScanAll(hub *store.Hub, cfg *RootsConfig, only *RootEntry, scope ScanScope, force bool, thumbWidth, thumbQuality int, plan *ScanPlan, log ScanLog) (*ScanResult, error) {
 	start := time.Now()
 	result := &ScanResult{}
@@ -1487,7 +1653,7 @@ func ScanAll(hub *store.Hub, cfg *RootsConfig, only *RootEntry, scope ScanScope,
 		result.StepTotal = countPluginDlls(cfg, result)
 		result.StepDone = 0
 		report(log, fmt.Sprintf("步骤 %d/%d：插件库（dll 元数据 + 配置文件）（%d 个文件）", index, result.StepCount, result.StepTotal))
-		dlls, plugins, configs := scanPlugins(hub.Core(), cfg, result, log)
+		dlls, plugins, configs := ScanPlugins(hub.Core(), cfg, result, log)
 		result.PluginDlls = dlls
 		result.Plugins = plugins
 		result.PluginConfigs = configs

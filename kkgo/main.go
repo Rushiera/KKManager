@@ -91,6 +91,8 @@ func run(args []string) int {
 		return cmdScanScope(rest, core.ScanScopePreset)
 	case "scan-extra":
 		return cmdScanScope(rest, core.ScanScopeExtra)
+	case "scan-plugins":
+		return cmdScanPlugins(rest)
 	case "stats":
 		return cmdStats(rest)
 	case "card-timeline":
@@ -2222,6 +2224,40 @@ func cmdScanCards(rest []string) int {
 	for _, e := range result.Errors {
 		fmt.Println("  ! " + e)
 	}
+	return 0
+}
+
+// cmdScanPlugins 扫描插件库并落库——契约对齐 Program.cs §ScanPluginsCommand（输出行与计数口径逐字对齐）。
+func cmdScanPlugins(rest []string) int {
+	dbPath := dbFlag(&rest)
+	hub, cfg, err := openHub(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer hub.Close()
+	start := time.Now()
+	result := &core.ScanResult{}
+	dlls, _, configs := core.ScanPlugins(hub.Core(), cfg, result, func(msg string) {
+		fmt.Println(msg)
+	})
+	span := time.Since(start)
+	fmt.Printf("插件库扫描完成：%d 个 dll · 耗时 %.1f 秒 · 配置文件 %d 个\n", dlls, span.Seconds(), configs)
+	for _, e := range result.Errors {
+		fmt.Fprintln(os.Stderr, "  ! "+e)
+	}
+	rows, err := hub.Core().LoadPlugins()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	withGuid := 0
+	for _, row := range rows {
+		if row.Guid != "" {
+			withGuid++
+		}
+	}
+	fmt.Printf("插件项 %d 条 · 非插件 dll %d 个\n", withGuid, len(rows)-withGuid)
 	return 0
 }
 

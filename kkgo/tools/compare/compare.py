@@ -120,7 +120,13 @@ def cmd_all():
         bad += 1
     if cmd_scanall() != 0:
         bad += 1
-    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 9, bad))
+    if cmd_scancardsanalysis() != 0:
+        bad += 1
+    if cmd_scanallplugins() != 0:
+        bad += 1
+    if cmd_scanplugins() != 0:
+        bad += 1
+    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 12, bad))
     return 0 if bad == 0 else 1
 
 
@@ -779,8 +785,14 @@ def main(argv):
         return cmd_scanmods()
     if mode == "scancards":
         return cmd_scancards()
+    if mode == "scancardsanalysis":
+        return cmd_scancardsanalysis()
     if mode == "scanall":
         return cmd_scanall()
+    if mode == "scanallplugins":
+        return cmd_scanallplugins()
+    if mode == "scanplugins":
+        return cmd_scanplugins()
     return cmd_single(mode, argv[1:])
 
 
@@ -1041,34 +1053,6 @@ def _trim_roots_for_cards(db, cardlib, shards):
     con.close()
 
 
-def _read_card_state(dbdir):
-    """读卡片侧扫描结果：主库 + 全部库文件的 card / card_mod / card_timeline / non_card / scan_state。"""
-    out = {"card": [], "card_mod": [], "card_timeline": [], "non_card": [], "scan_state": []}
-    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
-    for p in targets:
-        c = ro_connect(p)
-        try:
-            out["card"].extend(c.execute(
-                "select file_path,file_name,size,mtime,tier,root_path,folder,card_type,data_version,"
-                "image_end,uar_blocks,mod_count,(thumb IS NOT NULL),chara_name from card").fetchall())
-            out["card_mod"].extend(c.execute(
-                "select c.file_path,cm.mod_guid,cm.property,cm.slot,cm.local_slot,cm.category_no,"
-                "cm.rec_name,cm.rec_author,cm.rec_website from card_mod cm join card c on c.id=cm.card_id").fetchall())
-            out["card_timeline"].extend(c.execute(
-                "select c.file_path,t.has_entry,t.is_empty,t.duration,t.time_scale,t.keyframes,t.xml_length,"
-                "t.hit_stage,t.error from card_timeline t join card c on c.id=t.card_id").fetchall())
-            out["non_card"].extend(c.execute(
-                "select file_path,root_path,side,reason,size,mtime from non_card").fetchall())
-            out["scan_state"].extend(c.execute(
-                "select file_path,step,size,mtime from scan_state").fetchall())
-        except sqlite3.Error as exc:
-            print("   读 %s 失败：%s" % (os.path.basename(p), exc))
-        c.close()
-    for name in out:
-        out[name].sort()
-    return out
-
-
 def _norm_card_line(ln):
     ln = re.sub(r"^库: .*$", "库: <DB>", ln)
     ln = re.sub(r"(扫描完成：)[\d.]+ 秒", r"\1<TS> 秒", ln)
@@ -1173,8 +1157,8 @@ def _prepare_scanall_sample(tmp):
     }
 
 
-def _trim_roots_for_scanall(db, sample, shards):
-    """五条库根（mod 三条 + 卡片两条）+ 插件根指向不存在目录；分片数写死两侧同值。"""
+def _trim_roots_for_scanall(db, sample, shards, plugin_root=None):
+    """五条库根（mod 三条 + 卡片两条）+ 插件根（缺省指向不存在目录——插件段错误行对拍用）；分片数写死两侧同值。"""
     def entry(tier, path, locked, readonly=False):
         return {"tier": tier, "path": path, "recurse": True, "readOnly": readonly,
                 "locked": locked, "offline": False, "note": "", "replacedFrom": ""}
@@ -1185,7 +1169,7 @@ def _trim_roots_for_scanall(db, sample, shards):
         "modRoots": [entry(1, mod["main"], True), entry(2, mod["cache"], False),
                      entry(3, mod["cold"], False, True)],
         "cardRoots": [entry(1, sample["cards"], True), entry(1, sample["cards_extra"], False)],
-        "pluginRoots": [entry(1, sample["plugin_missing"], True)],
+        "pluginRoots": [entry(1, plugin_root or sample["plugin_missing"], True)],
         "seeded": True,
     }
     con = sqlite3.connect(db)
@@ -1238,7 +1222,7 @@ def cmd_scanall():
                 if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
         state_cs = _read_scanall_state(os.path.join(tmp, "cs"))
         state_go = _read_scanall_state(os.path.join(tmp, "go"))
-        table_bad = [t for t in ("mod", "mod_file", "card", "card_mod", "non_card", "scan_state")
+        table_bad = [t for t in ("mod", "mod_file", "card", "card_mod", "card_timeline", "non_card", "scan_state")
                      if state_cs[t] != state_go[t]]
         one = (not diff) and (not table_bad) and rc_cs == rc_go
         if not one:
@@ -1271,9 +1255,373 @@ def cmd_scanall():
     return 0 if ok else 1
 
 
+def _prepare_plugin_sample(tmp):
+    """样本：临时 BepInEx——plugins/ 下真插件 dll ×2（含子目录一份同 guid 副本）+ 非插件 dll ×1；
+    config/ 下覆盖转义面（中文 / 引号 / < > & ' + / 反斜杠 / 制表符）+ 控制字符 + BOM + 空文件 + 子目录 cfg。
+    判据面：插件两表逐行（sections 逐字节）+ stdout 逐行 + 三轮（首扫 / 增量复扫 / 删 dll + 改 cfg 后复扫）。"""
+    root = os.path.join(tmp, "BepInEx")
+    cfgdir = os.path.join(root, "config")
+    plugdir = os.path.join(root, "plugins")
+    sub = os.path.join(plugdir, "sub")
+    os.makedirs(cfgdir)
+    os.makedirs(sub)
+    shutil.copy2(SAMPLE_PLUGIN, os.path.join(plugdir, "KKAPI.dll"))
+    shutil.copy2(SAMPLE_PLUGIN, os.path.join(sub, "KKAPI.dll"))
+    shutil.copy2(SAMPLE_NONPLUGIN, os.path.join(plugdir, "0Harmony.dll"))
+    probe = (
+        "## Settings file was created by plugin 测试插件 v1.2.3\n"
+        "## Plugin GUID: probe.test.plugin\n"
+        "\n"
+        "[测试分节]\n"
+        "## 中文注释：包含 <尖括号> & 和号 ' 单引号 + 加号 \"双引号\" 反斜杠 C:\\path\\file\n"
+        "## 第二行注释\n"
+        "# Setting type: Boolean\n"
+        "# Default value: true\n"
+        "# Acceptable values: true, false\n"
+        "测试键 = 值123\n"
+        "\n"
+        "[第二分节]\n"
+        "# Setting type: KeyboardShortcut\n"
+        "# Default value: Tab + LeftShift\n"
+        "shortcut = F9\n"
+        "tab\tkey = a\tb\n"
+    )
+    with open(os.path.join(cfgdir, "zz-probe.cfg"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(probe)
+    with open(os.path.join(cfgdir, "zz-ctrl.cfg"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("## Settings file was created by plugin CtrlTest\n# Setting type: String\nnoSectionKey = v\x01x\x1fy\n")
+    with open(os.path.join(cfgdir, "zz-bom.cfg"), "w", encoding="utf-8-sig", newline="\n") as f:
+        f.write("## Settings file was created by plugin BomTest v9\n[s]\nk = v\n")
+    open(os.path.join(cfgdir, "zz-empty.cfg"), "w").close()
+    subcfg = os.path.join(cfgdir, "zz-sub")
+    os.makedirs(subcfg)
+    with open(os.path.join(subcfg, "ignored.cfg"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("[s]\nk = v\n")
+    return {"root": root, "plugins": plugdir, "config": cfgdir,
+            "del_name": os.path.join(plugdir, "0Harmony.dll"),
+            "cfg_name": os.path.join(cfgdir, "zz-probe.cfg")}
+
+
+def _trim_roots_for_plugins(db, plugin_root):
+    """插件侧 roots 裁剪：只留样本插件库根（tier1 非锁定）。"""
+    cfg = {
+        "gameRoot": "",
+        "modRoots": [],
+        "cardRoots": [],
+        "pluginRoots": [{"tier": 1, "path": plugin_root, "recurse": True, "readOnly": False,
+                         "locked": False, "offline": False, "note": "", "replacedFrom": ""}],
+        "seeded": True,
+    }
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO setting(key,value) VALUES('roots',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(cfg, ensure_ascii=False),))
+    con.commit()
+    con.close()
+
+
+def _read_plugin_state(dbdir):
+    """读插件库扫描结果：plugin_file / plugin_config 逐行（忽略 scan_time / read_at——写入时刻）。"""
+    out = {"plugin_file": [], "plugin_config": []}
+    p = os.path.join(dbdir, "kkmanager.db")
+    c = ro_connect(p)
+    try:
+        out["plugin_file"] = c.execute(
+            "select file_path,guid,root_path,file_name,name,version,processes,dependencies,is_ipa,size,mtime,"
+            "title,description,company,copyright,product,file_version,target_framework,note "
+            "from plugin_file order by file_path,guid").fetchall()
+        out["plugin_config"] = c.execute(
+            "select file_path,file_name,plugin_name,plugin_version,guid,size,mtime,sections,"
+            "section_count,option_count,error from plugin_config order by file_path").fetchall()
+    except sqlite3.Error as exc:
+        print("   读 %s 失败：%s" % (os.path.basename(p), exc))
+    c.close()
+    return out
+
+
+def _norm_plugin_line(ln):
+    ln = re.sub(r"(插件库扫描完成：).*?秒", r"\1<TS> 秒", ln)
+    return "".join(ch if ord(ch) < 128 else "?" for ch in ln)
+
+
+def cmd_scanplugins():
+    """scan-plugins 对拍：临时 BepInEx（插件 dll ×2 含子目录同 guid 副本 / 非插件 dll / 四个 cfg 覆盖转义面）
+    跑三轮——首扫 / 增量复扫 / 删 dll + 改 cfg 后复扫。
+    判据：① stdout 逐行（耗时归一）② plugin_file / plugin_config 逐行（sections 逐字节）③ 退出码。"""
+    print("—— scan-plugins 专项（临时 BepInEx；首扫 / 增量复扫 / 删 dll + 改 cfg 后复扫）")
+    tmp = os.path.join(OUT_DIR, "_plugins_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_plugin_sample(tmp)
+    print("  样本：plugins/ KKAPI ×2（含 sub/ 同 guid 副本）+ 0Harmony（非插件）｜config/ 4 个 cfg"
+          "（转义面 / 控制字符 / BOM / 空）+ 子目录 1 个")
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_plugins(db, sample["root"])
+        dirs[tag] = db
+    ok = True
+    for label, mutate in (("首扫", ""), ("增量复扫", ""), ("删 dll+改 cfg 后复扫", "mutate")):
+        if mutate:
+            if os.path.exists(sample["del_name"]):
+                os.remove(sample["del_name"])
+            with open(sample["cfg_name"], "a", encoding="utf-8", newline="\n") as f:
+                f.write("追加键 = 追加值\n")
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "scan-plugins", "--db", dirs[tag]], capture_output=True)
+            outs[tag] = (p.returncode,
+                         [_norm_plugin_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         [_norm_plugin_line(ln) for ln in p.stderr.decode(enc, "replace").splitlines()])
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        err_diff = [i for i in range(max(len(err_cs), len(err_go)))
+                    if (err_cs[i] if i < len(err_cs) else "<缺失>") != (err_go[i] if i < len(err_go) else "<缺失>")]
+        state_cs = _read_plugin_state(os.path.join(tmp, "cs"))
+        state_go = _read_plugin_state(os.path.join(tmp, "go"))
+        table_bad = [t for t in ("plugin_file", "plugin_config") if state_cs[t] != state_go[t]]
+        one = (not diff) and (not err_diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-18s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ 插件行 %d · 配置行 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["plugin_file"]), len(state_go["plugin_config"]),
+                 "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:8]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs:
+                print("    C# stderr：%s" % _safe(" | ".join(err_cs)[:300]))
+            if err_go:
+                print("    Go stderr：%s" % _safe(" | ".join(err_go)[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _read_card_state(dbdir):
+    """读卡片侧扫描结果：主库 + 全部库文件的 card / card_mod / card_timeline / card_analysis /
+    non_card / scan_state（忽略时间戳与 id）。"""
+    out = {"card": [], "card_mod": [], "card_timeline": [], "card_analysis": [], "non_card": [], "scan_state": []}
+    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
+    for p in targets:
+        c = ro_connect(p)
+        try:
+            out["card"].extend(c.execute(
+                "select file_path,file_name,size,mtime,tier,root_path,folder,card_type,data_version,"
+                "image_end,uar_blocks,mod_count,(thumb IS NOT NULL),chara_name from card").fetchall())
+            out["card_mod"].extend(c.execute(
+                "select c.file_path,cm.mod_guid,cm.property,cm.slot,cm.local_slot,cm.category_no,"
+                "cm.rec_name,cm.rec_author,cm.rec_website from card_mod cm join card c on c.id=cm.card_id").fetchall())
+            out["card_timeline"].extend(c.execute(
+                "select c.file_path,t.has_entry,t.is_empty,t.duration,t.time_scale,t.keyframes,t.xml_length,"
+                "t.hit_stage,t.error from card_timeline t join card c on c.id=t.card_id").fetchall())
+            out["card_analysis"].extend(c.execute(
+                "select c.file_path,a.kind,a.size,a.mtime,a.data from card_analysis a join card c on c.id=a.card_id").fetchall())
+            out["non_card"].extend(c.execute(
+                "select file_path,root_path,side,reason,size,mtime from non_card").fetchall())
+            out["scan_state"].extend(c.execute(
+                "select file_path,step,size,mtime from scan_state").fetchall())
+        except sqlite3.Error as exc:
+            print("   读 %s 失败：%s" % (os.path.basename(p), exc))
+        c.close()
+    for name in out:
+        out[name].sort()
+    return out
+
+
+def cmd_scancardsanalysis():
+    """scan-cards 开「卡片分析」组（coord / detail / scene）的落库对拍：同批卡片跑两轮（首扫 / 增量复扫）。
+    判据：① stdout 逐行 ② card / card_mod / card_timeline / card_analysis / non_card / scan_state 逐行
+    ③ card_analysis.data 逐字节（System.Text.Json 口径：转义 / 键序 / 浮点）④ 退出码。"""
+    print("—— scan-cards 分析组专项（coord / detail / scene 落 card_analysis；首扫 / 增量复扫）")
+    tmp = os.path.join(OUT_DIR, "_cardsan_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_card_sample(tmp)
+    if not sample:
+        return 3
+    shards = 4
+    print("  样本 %d 张真实卡（人物 ×2 / 服装 ×1 / 场景 ×1）+ 纯图片 / 截断 / 非 PNG；分片数 %d"
+          % (len(sample["picked"]), shards))
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_cards(db, sample["cards"], shards)
+        p = subprocess.run([exe, "scan-plan", "set", ORDER_ALL, ORDER_ANALYZE, "--db", db], capture_output=True)
+        if p.returncode != 0:
+            print("  %s 扫描计划写入失败：exit %d" % (tag, p.returncode))
+            return 3
+        dirs[tag] = db
+    ok = True
+    scan_env = dict(os.environ)
+    scan_env["KKM_SCAN_WORKERS"] = "1"
+    for label in ("首扫", "增量复扫"):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "scan-cards", "--db", dirs[tag]], capture_output=True, env=scan_env,
+                               timeout=600)
+            outs[tag] = (p.returncode,
+                         [_norm_card_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         p.stderr.decode(enc, "replace"))
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        state_cs = _read_card_state(os.path.join(tmp, "cs"))
+        state_go = _read_card_state(os.path.join(tmp, "go"))
+        table_bad = [t for t in ("card", "card_mod", "card_timeline", "card_analysis", "non_card", "scan_state")
+                     if state_cs[t] != state_go[t]]
+        one = (not diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-8s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ card %d · 引用 %d · timeline %d · 分析 %d · 非卡 %d · 戳 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["card"]), len(state_go["card_mod"]), len(state_go["card_timeline"]),
+                 len(state_go["card_analysis"]), len(state_go["non_card"]), len(state_go["scan_state"]),
+                 "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:10]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs.strip():
+                print("    C# stderr：%s" % _safe(err_cs[:300]))
+            if err_go.strip():
+                print("    Go stderr：%s" % _safe(err_go[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    if table == "card_analysis" and i < len(a) and i < len(b):
+                        # data 是 JSON——逐字节差异定位（去掉公共前缀）
+                        sa, sb = str(a[i][4]), str(b[i][4])
+                        cut = 0
+                        while cut < min(len(sa), len(sb)) and sa[cut] == sb[cut]:
+                            cut += 1
+                        print("      首差字节偏移 %d" % cut)
+                        print("      C# …%s" % _safe(sa[max(0, cut - 40):cut + 120]))
+                        print("      Go …%s" % _safe(sb[max(0, cut - 40):cut + 120]))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def cmd_scanallplugins():
+    """scan-main 插件段专项：主要库扫描（插件根存在）——验证 withPlugins 编排（步数 / 进度行 / 计数）。
+    判据：① stdout / stderr 逐行 ② mod / mod_file / card / card_mod / card_timeline / non_card /
+    plugin_file / plugin_config / scan_state 逐行 ③ 退出码；两轮（首扫 / 增量复扫）。"""
+    print("—— scan-main 插件段专项（主要库 + 插件根存在；首扫 / 增量复扫）")
+    tmp = os.path.join(OUT_DIR, "_scanallp_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_scanall_sample(tmp)
+    plugin_sample = _prepare_plugin_sample(tmp)
+    if not sample:
+        return 3
+    shards = 4
+    print("  样本：mod 三根 + 卡片两根 + BepInEx（2 dll 含 sub/ 同 guid 副本 + 4 cfg）；分片数 %d" % shards)
+    dirs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d %s" % (tag, p.returncode, p.stdout.decode(enc, "replace")[:300]))
+            return 3
+        _trim_roots_for_scanall(db, sample, shards, plugin_root=plugin_sample["root"])
+        dirs[tag] = db
+    scan_env = dict(os.environ)
+    scan_env["KKM_SCAN_WORKERS"] = "1"
+    ok = True
+    for label in ("首扫", "增量复扫"):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "scan-main", "--db", dirs[tag]], capture_output=True, env=scan_env,
+                               timeout=600)
+            outs[tag] = (p.returncode,
+                         [_norm_card_line(ln) for ln in p.stdout.decode(enc, "replace").splitlines()],
+                         [_norm_card_line(ln) for ln in p.stderr.decode(enc, "replace").splitlines()])
+        rc_cs, lines_cs, err_cs = outs["cs"]
+        rc_go, lines_go, err_go = outs["go"]
+        diff = [i for i in range(max(len(lines_cs), len(lines_go)))
+                if (lines_cs[i] if i < len(lines_cs) else "<缺失>") != (lines_go[i] if i < len(lines_go) else "<缺失>")]
+        state_cs = _read_scanall_state(os.path.join(tmp, "cs"))
+        state_go = _read_scanall_state(os.path.join(tmp, "go"))
+        state_cs.update(_read_plugin_state(os.path.join(tmp, "cs")))
+        state_go.update(_read_plugin_state(os.path.join(tmp, "go")))
+        table_bad = [t for t in ("mod", "mod_file", "card", "card_mod", "card_timeline", "non_card",
+                                 "plugin_file", "plugin_config", "scan_state")
+                     if state_cs[t] != state_go[t]]
+        one = (not diff) and (not table_bad) and rc_cs == rc_go
+        if not one:
+            ok = False
+        print("  %-8s 输出 exit %d/%d · 行 %d/%d · 差异 %d ｜ mod %d · mod_file %d · card %d · 引用 %d · 非卡 %d · 插件 %d · 配置 %d · 戳 %d → %s"
+              % (label, rc_cs, rc_go, len(lines_cs), len(lines_go), len(diff),
+                 len(state_go["mod"]), len(state_go["mod_file"]), len(state_go["card"]),
+                 len(state_go["card_mod"]), len(state_go["non_card"]),
+                 len(state_go["plugin_file"]), len(state_go["plugin_config"]), len(state_go["scan_state"]),
+                 "一致" if one else "不一致"))
+        if diff:
+            for i in diff[:10]:
+                print("    [%d] C# %s" % (i, _safe(lines_cs[i] if i < len(lines_cs) else "<缺失>")))
+                print("         Go %s" % (_safe(lines_go[i] if i < len(lines_go) else "<缺失>"),))
+            if err_cs:
+                print("    C# stderr：%s" % _safe(" | ".join(err_cs)[:300]))
+            if err_go:
+                print("    Go stderr：%s" % _safe(" | ".join(err_go)[:300]))
+        for table in table_bad:
+            a, b = state_cs[table], state_go[table]
+            print("    %s 行 %d/%d 不一致，首条差异：" % (table, len(a), len(b)))
+            for i in range(max(len(a), len(b))):
+                va = a[i] if i < len(a) else "<缺失>"
+                vb = b[i] if i < len(b) else "<缺失>"
+                if va != vb:
+                    print("      C# %s" % _safe(va))
+                    print("      Go %s" % _safe(vb))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
 def _read_scanall_state(dbdir):
-    """读统一扫描结果：mod / mod_file / card / card_mod / non_card / scan_state（忽略时间戳与 id）。"""
-    out = {"mod": [], "mod_file": [], "card": [], "card_mod": [], "non_card": [], "scan_state": []}
+    """读统一扫描结果：mod / mod_file / card / card_mod / card_timeline / non_card / scan_state（忽略时间戳与 id）。"""
+    out = {"mod": [], "mod_file": [], "card": [], "card_mod": [], "card_timeline": [], "non_card": [], "scan_state": []}
     targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
     for idx, p in enumerate(targets):
         c = ro_connect(p)
@@ -1293,6 +1641,9 @@ def _read_scanall_state(dbdir):
             out["card_mod"].extend(c.execute(
                 "select c.file_path,cm.mod_guid,cm.property,cm.slot,cm.local_slot,cm.category_no,"
                 "cm.rec_name,cm.rec_author,cm.rec_website from card_mod cm join card c on c.id=cm.card_id").fetchall())
+            out["card_timeline"].extend(c.execute(
+                "select c.file_path,t.has_entry,t.is_empty,t.duration,t.time_scale,t.keyframes,t.xml_length,"
+                "t.hit_stage,t.error from card_timeline t join card c on c.id=t.card_id").fetchall())
             out["non_card"].extend(c.execute(
                 "select file_path,root_path,side,reason,size,mtime from non_card").fetchall())
             out["scan_state"].extend(c.execute(

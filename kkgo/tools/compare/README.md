@@ -20,13 +20,16 @@ G 段验收工具：同一样本、同一参数下跑 `kkgo.exe` 与 `KMR_A.exe`
 | stats | **两段**：① 裁剪临时库（roots 只留预置条目 + 复制 7000 系列 32 片）→ 两侧 AllStores 组成一致 → 43 行逐行必须全同（四色聚合 / 缺失排行 / 未被引用 / 重复副本都真实跑）；② 真库全量——`KMR_A.exe` 是 0.21.6 产物，mod 侧库路由在 0.21.8 修过（0.21.6 的 `AllStores` 不含 mod 侧非预置库：kkc 的 `lib_5_0.db` 423 行不算；0.21.9 源码算）→「mod 文件副本」一行是**已知代际差异**，其余行必须全同 |
 | scan-mods | **三根样本**（main 锁定 tier1 走主库 / cache tier2 走主库 / cold tier3 走库文件；真实 zipmod ×7 含一份同 guid 跨根副本与一份子目录 + 非 mod 文本 + 坏 zip + 无 manifest 容器）跑三轮：首扫 / 增量复扫 / 删文件后复扫。判据 = stdout 逐行（库路径 / 耗时 / 预建行归一）+ `mod` / `mod_file` / `non_card` / `scan_state` 逐行（忽略 scan_time / done_at / id） |
 | scan-cards | 卡片样本（人物 ×2 / 服装 ×1 / 场景 ×1 + 纯图片 + 截断 + 非 PNG）跑两轮（首扫 / 增量复扫）；`scan_shards=4` 两侧同值、`KKM_SCAN_WORKERS=1`。判据 = stdout 逐行 + `card` / `card_mod` / `card_timeline` / `non_card` / `scan_state` 逐行（thumb 只比「有无」，不比字节——编码器不同） |
-| scan-main / scan-extra | 五根合一（mod 三根 + 卡片两根）+ 插件根**故意指向不存在目录**（两侧只报「插件库根不存在」）；按两个范围各跑一轮。判据 = stdout 逐行 + `mod` / `mod_file` / `card` / `card_mod` / `non_card` / `scan_state` 逐行 |
+| scan-main / scan-extra | 五根合一（mod 三根 + 卡片两根）+ 插件根**故意指向不存在目录**（两侧只报「插件库根不存在」）；按两个范围各跑一轮。判据 = stdout 逐行 + `mod` / `mod_file` / `card` / `card_mod` / `card_timeline` / `non_card` / `scan_state` 逐行 |
+| scan-plugins | 临时 BepInEx（插件 dll ×2 含 `sub/` 同 guid 副本 + 非插件 dll ×1 + 四个 cfg 覆盖转义面 / 控制字符 / BOM / 空 + 子目录 cfg 不入库）跑三轮：首扫 / 增量复扫 / 删 dll + 改 cfg 后复扫。判据 = stdout/stderr 逐行 + `plugin_file` / `plugin_config` 逐行（`sections` 逐字节——含 System.Text.Json 的 `\uXXXX` 大写转义、`\u0022` 引号、7 位小数 mtime） |
+| scan-cards 分析组 | 同 `scan-cards` 样本，但开「卡片分析」组（`coord,detail,scene`）——落 `card_analysis` 三步。判据 = stdout 逐行 + `card` / `card_mod` / `card_timeline` / `card_analysis`（`data` 逐字节）/ `non_card` / `scan_state` 逐行；两轮（首扫 / 增量复扫——分析步有完成戳，第二轮应跳过） |
+| scan-main 插件段 | 同 `scan-main` 样本，但插件根**存在**（真 BepInEx）——验证 `withPlugins` 编排（步数 +1 / 进度行 / 计数行）。判据 = stdout/stderr 逐行 + 上述全表 + `plugin_file` / `plugin_config` 逐行；两轮（首扫 / 增量复扫） |
 
 **已知差异（不作判据）**
 
 - **并行 worker 段**：C# 卡片侧按 `scan_workers` 多线程跑分片（`并行扫描：卡片侧 worker 数 N`）；Go 侧当前**串行逐片**（布局与并行一致，只是同时只跑一片）。对拍固定 `KKM_SCAN_WORKERS=1` 口径。
-- **插件库落库**：`scan-main` 的插件连带段在插件库根**存在**时 Go 侧报「插件扫描尚未移植」并计入错误清单（不静默漏数据）；根不存在时两侧输出一致。
 - **缩略图字节**：C# ImageSharp / Go stdlib，只比「有无」与尺寸。
+- **mod 文件副本计数（stats 真库一段）**：`KMR_A.exe` 0.21.6 的 `AllStores` 不含 mod 侧非预置库（kkc `lib_5_0.db` 423 行）；Go 照 0.21.9。已在 `stats` 专项输出里标为已知代际差异。
 
 ### card-analysis 的对拍管线（产物对拍，非命令对拍）
 
@@ -56,6 +59,9 @@ py tools\compare\compare.py stats                :: 库统计对拍（裁剪临�
 py tools\compare\compare.py scanmods             :: mod 扫描对拍（三根样本 · 首扫 / 复扫 / 删文件后复扫）
 py tools\compare\compare.py scancards            :: 卡片扫描对拍（卡片样本 · 首扫 / 复扫 · 分片库逐片比）
 py tools\compare\compare.py scanall              :: 统一扫描对拍（scan-main / scan-extra 两轮 · 插件根缺失口径）
+py tools\compare\compare.py scanplugins          :: 插件库对拍（临时 BepInEx · 三轮 · 两表逐行含 sections 逐字节）
+py tools\compare\compare.py scancardsanalysis    :: 卡片分析组对拍（coord / detail / scene 落 card_analysis · 两轮）
+py tools\compare\compare.py scanallplugins       :: scan-main 插件段对拍（插件根存在 · 两轮）
 ```
 
 ## 前置

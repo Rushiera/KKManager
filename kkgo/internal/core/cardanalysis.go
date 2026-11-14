@@ -225,7 +225,7 @@ type blockJSON struct {
 // detailJSONOf 由解析结果构造 detail 线格式。
 func detailJSONOf(d *CardDetailResult) detailJSON {
 	w := detailJSON{
-		CharName:        optStr(d.CharName),
+		CharName:        setStr(d.CharName, d.CharNameSet),
 		FaceImageSize:   d.FaceImageSize,
 		FaceImageOffset: d.FaceImageOffset,
 		Parts:           make([]partJSON, 0, len(d.Parts)),
@@ -248,8 +248,8 @@ func detailJSONOf(d *CardDetailResult) detailJSON {
 			LocalSlot:  m.LocalSlot,
 			CategoryNo: m.CategoryNo,
 			Author:     setStr(m.Author, m.AuthorSet),
-			Website:    optStr(m.Website),
-			Name:       optStr(m.Name),
+			Website:    setStr(m.Website, m.WebsiteSet),
+			Name:       setStr(m.Name, m.NameSet),
 		})
 	}
 	for _, b := range d.Blocks {
@@ -474,4 +474,52 @@ func sceneJSONOf(s *SceneInfoResult) sceneJSON {
 		w.CharaData = append(w.CharaData, item)
 	}
 	return w
+}
+
+// AnalyzeScanFile 对扫描内存态的一张卡片执行一个分项步——返回（结果 · 是否完成 · 错误）。
+// done=true 表示该文件该步已完成（可落完成戳）；done=false 表示失败（不落戳，下次重试）。
+// 对齐 C# CardAnalysis.Run：coord 仅人物卡、scene 仅场景卡（不适用视为已完成、不落数据）；
+// detail 全卡型；ImageEnd / CardType 一律取扫描内存态（不重读头段）。
+func AnalyzeScanFile(f *ScanFile, kind string) (*AnalysisResult, bool, error) {
+	if f == nil {
+		return nil, false, &AnalysisError{Kind: kind, Message: "扫描态为空"}
+	}
+	switch kind {
+	case AnalysisCoord:
+		if !isCharaCard(f.CardType) {
+			return nil, true, nil
+		}
+		r := ReadCardCoordinate(f.Path)
+		if r.Error != "" {
+			return nil, false, &AnalysisError{Kind: kind, Message: r.Error}
+		}
+		text, err := marshalCSharp(coordJSONOf(r))
+		if err != nil {
+			return nil, false, err
+		}
+		return &AnalysisResult{Kind: kind, JSON: text}, true, nil
+	case AnalysisDetail:
+		d := ParseCardDetail(f.Path, f.ImageEnd)
+		text, err := marshalCSharp(detailJSONOf(d))
+		if err != nil {
+			return nil, false, err
+		}
+		return &AnalysisResult{Kind: kind, JSON: text}, true, nil
+	case AnalysisScene:
+		if f.CardType != SceneCardType {
+			return nil, true, nil
+		}
+		s := ReadSceneInfo(f.Path, f.ImageEnd)
+		if s.Error != "" {
+			return nil, false, &AnalysisError{Kind: kind, Message: s.Error}
+		}
+		// 逐份内嵌角色卡面图——与数据区图片清单对宽高 / 字节（同一遍 detail 扫描供图；对不上由 AttachCharaFaces 出声）
+		s.AttachCharaFaces(ParseCardDetail(f.Path, f.ImageEnd).Images)
+		text, err := marshalCSharp(sceneJSONOf(s))
+		if err != nil {
+			return nil, false, err
+		}
+		return &AnalysisResult{Kind: kind, JSON: text}, true, nil
+	}
+	return nil, false, &AnalysisError{Kind: kind, Message: "未知分项（可选 coord / detail / scene）"}
 }

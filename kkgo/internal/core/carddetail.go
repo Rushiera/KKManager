@@ -58,8 +58,12 @@ type CardModDetail struct {
 	AuthorSet bool
 	// Website 卡内记录的来源网址。
 	Website string
+	// WebsiteSet website 键是否读到（区分「未读到」与「读到空串」——C# 侧 null 与空串输出不同）。
+	WebsiteSet bool
 	// Name 卡内记录的名称。
 	Name string
+	// NameSet name 键是否读到（同上——C# 侧 null 与空串输出不同）。
+	NameSet bool
 }
 
 // CardImageInfo 数据区里的一张内嵌图片（PNG）。
@@ -104,6 +108,8 @@ type CardBlockInfo struct {
 type CardDetailResult struct {
 	// CharName 角色名（服装卡头段记录；人物卡为空）。
 	CharName string
+	// CharNameSet 角色名段是否读到（区分「未读到」与「读到空串」——C# 侧 null 与空串输出不同）。
+	CharNameSet bool
 	// FaceImageSize 卡面脸图字节数（人物卡头段记录的 int32；无则 0）。
 	FaceImageSize int64
 	// FaceImageOffset 卡面脸图在文件内的偏移（无则 0）。
@@ -195,6 +201,7 @@ func readDetailHead(f *os.File, size, imageEnd int64, r *CardDetailResult) error
 			return err
 		}
 		r.CharName = name
+		r.CharNameSet = true
 		return nil
 	}
 
@@ -467,8 +474,10 @@ func readModEntry(cur *msgCursor, r *CardDetailResult) bool {
 				d.AuthorSet = true
 			case "Website":
 				d.Website = v
+				d.WebsiteSet = true
 			default:
 				d.Name = v
+				d.NameSet = true
 			}
 		case "Slot", "LocalSlot", "CategoryNo":
 			v, ok := cur.tryReadLong()
