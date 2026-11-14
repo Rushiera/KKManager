@@ -48,6 +48,8 @@ type ModInfo struct {
 	Description string
 	// SchemaVer manifest schema-ver 属性。
 	SchemaVer string
+	// Found manifest 里实际出现的元素名集合（区分「元素缺失」与「元素为空」——C# 侧 null 与空串输出不同）。
+	Found map[string]bool
 	// FilePath zipmod 文件绝对路径。
 	FilePath string
 	// FileName zipmod 文件名（含扩展名）——仅供人定位。
@@ -80,7 +82,7 @@ type ZipEntryInfo struct {
 
 // ParseZipMod 解析一个 zipmod（失败时返回带 Error / ErrorKind 的 ModInfo，不抛异常）。
 func ParseZipMod(path string) *ModInfo {
-	info := &ModInfo{FilePath: path}
+	info := &ModInfo{FilePath: path, Found: make(map[string]bool)}
 	fi, err := os.Stat(path)
 	if err != nil {
 		info.FileName = filepath.Base(path)
@@ -212,10 +214,16 @@ func parseManifest(text string, info *ModInfo) string {
 		if !isField {
 			continue
 		}
+		info.Found[se.Name.Local] = true
 		var s string
 		if err := dec.DecodeElement(&s, &se); err != nil {
 			info.ErrorKind = ModErrBadManifest
 			return "manifest XML 解析失败: " + err.Error()
+		}
+		// XML 的纯空白文本节点在 .NET XmlDocument（PreserveWhitespace=false）里被剔除；
+		// Go 的 encoding/xml 会保留——这里按 C# 语义归一（空白-only → 空串）。
+		if strings.TrimSpace(s) == "" {
+			s = ""
 		}
 		if *target == "" {
 			*target = s
