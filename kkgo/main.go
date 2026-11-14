@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"kkgo/internal/core"
+	"kkgo/internal/store"
 )
 
 // version 构建版本（发布时由 -ldflags "-X main.version=..." 注入）。
@@ -66,6 +67,21 @@ func run(args []string) int {
 			return requireArgs("card-scene <card.png>")
 		}
 		return cmdCardScene(rest[0])
+	case "card-analysis":
+		if len(rest) < 1 {
+			return requireArgs("card-analysis <card.png> [coord|detail|scene]...")
+		}
+		return cmdCardAnalysis(rest)
+	case "roots-list":
+		return cmdRootsList(rest)
+	case "roots-add":
+		return cmdRootsAdd(rest)
+	case "roots-clear":
+		return cmdRootsClear(rest)
+	case "set-game-root":
+		return cmdSetGameRoot(rest)
+	case "scan-plan":
+		return cmdScanPlan(rest)
 	case "card-timeline":
 		if len(rest) < 1 {
 			return requireArgs("card-timeline <card.png> [tracks]")
@@ -367,6 +383,23 @@ func cmdCardScene(path string) int {
 	}
 	for _, w := range s.Warnings {
 		fmt.Println("提示       : " + w)
+	}
+	return 0
+}
+
+// cmdCardAnalysis 分项分析序列化（与 C# CardAnalysis.Run 落库的 JSON 同形状）。
+// 输出：每行「kind<TAB>紧凑 JSON」；被跳过的分项与失败原因走 stderr（不污染 JSON 行）。
+func cmdCardAnalysis(rest []string) int {
+	results, skipped, err := core.AnalyzeCard(rest[0], rest[1:])
+	for _, s := range skipped {
+		fmt.Fprintln(os.Stderr, "跳过 "+s)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 3
+	}
+	for _, r := range results {
+		fmt.Println(r.Kind + "\t" + r.JSON)
 	}
 	return 0
 }
@@ -805,6 +838,330 @@ func cmdFileHash(path string) int {
 	return 0
 }
 
+// ---------- 库根（roots）命令——契约对齐 Program.cs §RootsList / RootsAdd / RootsClear / SetGameRoot ----------
+
+// dbFlag 取出 --db（缺省 = exe 同级 data/kkmanager.db，对齐 C# 默认值）。
+func dbFlag(rest *[]string) string {
+	if v := takeFlag(rest, "--db"); v != "" {
+		return v
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return filepath.Join("data", "kkmanager.db")
+	}
+	return filepath.Join(filepath.Dir(exe), "data", "kkmanager.db")
+}
+
+// takeFlag 取出「<name> <值>」并从 rest 里移除；没有返回空串。
+func takeFlag(rest *[]string, name string) string {
+	for i := 0; i < len(*rest); i++ {
+		if (*rest)[i] == name && i+1 < len(*rest) {
+			value := (*rest)[i+1]
+			*rest = append((*rest)[:i], (*rest)[i+2:]...)
+			return value
+		}
+	}
+	return ""
+}
+
+// openRoots 打开主库并读库根配置（已规范化）。
+func openRoots(dbPath string) (*store.DB, *core.RootsConfig, error) {
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	text, _, err := db.GetSetting("roots")
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	cfg := core.ParseRootsConfig(text)
+	core.Normalize(cfg)
+	return db, cfg, nil
+}
+
+// rootTags 库根行的标记串（顺序对齐 C#：含子目录 / 只读 / 预置锁定 / 缓存库 / 离线）。
+func rootTags(e core.RootEntry, withTierName, withCache, withOffline bool) string {
+	tags := ""
+	if withTierName {
+		tags = "  级别 " + itoa(e.Tier) + "（" + core.TierName(e.Tier) + "）  "
+	} else {
+		tags = "  级别 " + itoa(e.Tier) + "  "
+	}
+	tags += e.Path
+	if e.Recurse {
+		tags += "  [含子目录]"
+	} else {
+		tags += "  [仅本目录]"
+	}
+	if e.ReadOnly {
+		tags += "  [只读]"
+	}
+	if e.Locked {
+		tags += "  [预置·锁定]"
+	}
+	if withCache && e.Tier == core.TierCache {
+		tags += "  [缓存库·不可删]"
+	}
+	if withOffline && e.Offline {
+		if strings.TrimSpace(e.Note) == "" {
+			tags += "  [已离线]"
+		} else {
+			tags += "  [已离线]（备注：" + e.Note + "）"
+		}
+	}
+	return tags
+}
+
+// cmdRootsList 列库根——插件库根 / mod 库根 / 卡片库根三段（对齐 C# RootsListCommand）。
+func cmdRootsList(rest []string) int {
+	db, cfg, err := openRoots(dbFlag(&rest))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	fmt.Println("库: " + db.Path())
+	fmt.Println("游戏根: " + cfg.GameRoot)
+	fmt.Println()
+	fmt.Println("## 插件库根")
+	for _, e := range cfg.PluginRoots {
+		fmt.Println(rootTags(e, true, false, false))
+	}
+	fmt.Println("## mod 库根")
+	for _, e := range cfg.ModRootsOrdered() {
+		fmt.Println(rootTags(e, true, true, true))
+	}
+	fmt.Println("## 卡片库根")
+	for _, e := range cfg.CardRootsOrdered() {
+		fmt.Println(rootTags(e, false, false, true))
+	}
+	return 0
+}
+
+// cmdRootsAdd 登记一条库根（同路径先删后加，再整体规范化）。
+func cmdRootsAdd(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 3 {
+		fmt.Fprintln(os.Stderr, "用法: roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]")
+		return 2
+	}
+	kind := rest[0]
+	tier, err := strconv.Atoi(rest[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "用法: roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]")
+		return 2
+	}
+	entry := core.RootEntry{Tier: tier, Path: rest[2], Recurse: true}
+	for _, arg := range rest[3:] {
+		switch arg {
+		case "含子目录", "recurse":
+			entry.Recurse = true
+		case "仅本目录", "norecurse":
+			entry.Recurse = false
+		case "只读", "readonly":
+			entry.ReadOnly = true
+		}
+	}
+	db, cfg, err := openRoots(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	list := append([]core.RootEntry{}, cfg.CardRoots...)
+	if kind == "mods" {
+		list = append([]core.RootEntry{}, cfg.ModRoots...)
+	}
+	kept := make([]core.RootEntry, 0, len(list)+1)
+	for _, e := range list {
+		if !strings.EqualFold(e.Path, entry.Path) {
+			kept = append(kept, e)
+		}
+	}
+	kept = append(kept, entry)
+	if kind == "mods" {
+		cfg.ModRoots = kept
+	} else {
+		cfg.CardRoots = kept
+	}
+	core.Normalize(cfg)
+	if err = saveRoots(db, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	label := "卡片"
+	if kind == "mods" {
+		label = "mod"
+	}
+	fmt.Println("已登记 " + label + " 库根：级别 " + itoa(tier) + " · " + entry.Path)
+	fmt.Println("（库根由你添加——扫描只覆盖你添加的文件夹，不做全库盲扫）")
+	fmt.Println("当前 mod 库根 " + itoa(len(cfg.ModRoots)) + " 个 / 卡片库根 " + itoa(len(cfg.CardRoots)) + " 个")
+	return 0
+}
+
+// cmdRootsClear 清空使用者条目（保留预置主库 / 缓存库槽位）。
+func cmdRootsClear(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 1 {
+		return requireArgs("roots-clear <mods|cards|all>")
+	}
+	db, cfg, err := openRoots(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	kind := rest[0]
+	kept := 0
+	if kind == "mods" || kind == "all" {
+		cfg.ModRoots, kept = keepPresets(cfg.ModRoots, true, kept)
+	}
+	if kind == "cards" || kind == "all" {
+		cfg.CardRoots, kept = keepPresets(cfg.CardRoots, false, kept)
+	}
+	if err = saveRoots(db, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("已清空：" + kind + "（保留预置条目 " + itoa(kept) + " 条——预置主库 / 缓存库槽位不可删除）")
+	return 0
+}
+
+// keepPresets 保留锁定条目（keepCacheSlot 时连缓存库槽位一并保留）；返回保留计数。
+func keepPresets(list []core.RootEntry, keepCacheSlot bool, kept int) ([]core.RootEntry, int) {
+	out := make([]core.RootEntry, 0, len(list))
+	for _, e := range list {
+		keep := e.Locked || (keepCacheSlot && e.Tier == core.TierCache)
+		if keep {
+			out = append(out, e)
+			kept++
+		}
+	}
+	return out, kept
+}
+
+// cmdSetGameRoot 设置游戏根——锁定条目重派生、缓存库槽位未被改过则跟随。
+func cmdSetGameRoot(rest []string) int {
+	dbPath := dbFlag(&rest)
+	if len(rest) < 1 {
+		return requireArgs("set-game-root <路径>")
+	}
+	db, cfg, err := openRoots(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	previousRoot := cfg.GameRoot
+	cfg.GameRoot = core.NormalizeGameRoot(rest[0])
+	warnings, _ := core.ApplyGameRootChange(cfg, previousRoot)
+	core.Normalize(cfg)
+	if err = saveRoots(db, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	fmt.Println("游戏根: " + cfg.GameRoot)
+	fmt.Println("插件库根 " + itoa(len(cfg.PluginRoots)) + " 个 / mod 库根 " + itoa(len(cfg.ModRoots)) +
+		" 个 / 卡片库根 " + itoa(len(cfg.CardRoots)) + " 个")
+	for _, w := range warnings {
+		fmt.Println("  ! " + w)
+	}
+	for _, e := range cfg.ModRootsOrdered() {
+		fmt.Println("  级别 " + itoa(e.Tier) + "（" + core.TierName(e.Tier) + "）  " + e.Path)
+	}
+	return 0
+}
+
+// cmdScanPlan 读 / 写扫描计划（对齐 C# ScanPlanCommand；键 scan_plan_order / scan_plan_on）。
+func cmdScanPlan(rest []string) int {
+	dbPath := dbFlag(&rest)
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	defer db.Close()
+	fmt.Println("库: " + db.Path())
+	if len(rest) > 0 && rest[0] == "set" {
+		order := ""
+		if len(rest) > 1 {
+			order = rest[1]
+		}
+		on := order
+		if len(rest) > 2 {
+			on = rest[2]
+		}
+		given := core.LoadScanPlan(order, on)
+		if err = db.SetSetting(core.ScanPlanOrderKey, core.ScanPlanOrderText(given)); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		if err = db.SetSetting(core.ScanPlanOnKey, core.ScanPlanOnText(given)); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		fmt.Println("扫描计划已保存：")
+		printScanPlan(given)
+		return 0
+	}
+	orderText, _, err := db.GetSetting(core.ScanPlanOrderKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	onText, _, err := db.GetSetting(core.ScanPlanOnKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
+	printScanPlan(core.LoadScanPlan(orderText, onText))
+	return 0
+}
+
+// printScanPlan 打印扫描计划——步骤（勾选 / 必选 / 灰置）+ 切出的段（对齐 C# PrintPlan）。
+func printScanPlan(p *core.ScanPlan) {
+	fmt.Println("步骤（顺序即执行顺序）：")
+	for _, id := range p.Order {
+		d := core.FindScanStep(id)
+		if d == nil {
+			continue
+		}
+		mark := "[ ]"
+		if d.Grayed {
+			mark = "（灰置）"
+		} else if p.IsOn(id) {
+			mark = "[x]"
+		}
+		required := ""
+		if d.Required {
+			required = "（必选）"
+		}
+		group := ""
+		if d.Group != "" {
+			group = "（组 " + d.Group + "）"
+		}
+		fmt.Println("  " + mark + " " + id + " —— " + d.Name + required + group + " · " + d.Note)
+	}
+	fmt.Println("段（同段共用一次文件打开）：")
+	for _, seg := range p.Segments() {
+		side := "卡片"
+		if seg.Mods {
+			side = "mod"
+		}
+		fmt.Println("  " + side + " / 档 " + itoa(seg.Tier) + "：" + seg.Label())
+	}
+}
+
+// saveRoots 写回库根配置（键 roots）。
+func saveRoots(db *store.DB, cfg *core.RootsConfig) error {
+	text, err := core.RootsConfigJSON(cfg)
+	if err != nil {
+		return err
+	}
+	return db.SetSetting("roots", text)
+}
+
 func requireArgs(usage string) int {
 	fmt.Fprintln(os.Stderr, "用法: "+usage)
 	return 2
@@ -821,9 +1178,15 @@ func usage() {
 	fmt.Println("  card-coord <card.png> [--all]         人物卡服装 / 饰品（Coordinate 七套槽位）")
 	fmt.Println("  card-params <card.png|dir> [--recurse] 可编辑字段（姓 / 名 / 爱称 / 性格 / 敏感带 / 五项是否接受）")
 	fmt.Println("  card-scene <card.png>                 场景卡（sd）插件条目 / 内嵌角色 / timeline 摘要")
+	fmt.Println("  card-analysis <card.png> [分项...]    分项分析序列化（coord / detail / scene——与 C# 落库 JSON 同形状）")
 	fmt.Println("  card-timeline <card.png> [tracks]     场景卡 timeline（长度 / timeScale / 关键帧 / 轨道树）")
 	fmt.Println("  thumb <card.png> <out.jpg>            缩略图（JPEG；--thumb N / --quality Q）")
 	fmt.Println("  filehash <path>                       文件 MD5（重复副本比对判据）")
+	fmt.Println("  roots-list                            库根配置（插件 / mod / 卡片三段）")
+	fmt.Println("  roots-add <mods|cards> <级别> <路径> [含子目录|仅本目录] [只读]  登记一条库根")
+	fmt.Println("  roots-clear <mods|cards|all>          清空使用者库根（预置条目保留）")
+	fmt.Println("  set-game-root <路径>                  设游戏根（锁定条目重派生 / 缓存库槽位跟随）")
+	fmt.Println("  scan-plan [set <顺序> [启用]]         扫描计划（读 / 写；两键用于扫描链）")
 }
 
 // orNone 空值显示 <无>（对齐 C# ?? "<无>"）。
