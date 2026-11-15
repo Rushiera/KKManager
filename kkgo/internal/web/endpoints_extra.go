@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"kkgo/internal/core"
@@ -108,7 +109,7 @@ func (a *App) handleCardStructure(w http.ResponseWriter, r *http.Request) {
 		detail := core.ParseCardDetail(path, st.ImageEnd)
 		detailOut = core.CardDetailJSON(detail)
 		if st.CardType == core.SceneCardType {
-			tl := core.ReadTimeline(path, st.ImageEnd)
+			tl := a.readTimelineCached(hub, lib, id, path, st.ImageEnd)
 			timelineOut = core.TimelineInfoJSON(tl)
 			if tl != nil {
 				if text := core.DescribeTimeline(tl); text != "" {
@@ -156,10 +157,13 @@ func cardStructureJSON(st *core.CardStructure) map[string]interface{} {
 	}
 }
 
-// handleCardTimeline GET /api/card/{id}/timeline?lib= 场景卡 timeline 摘要。
+// handleCardTimeline GET /api/card/{id}/timeline?lib=&full= 场景卡 timeline 完整模型（只读）。
+// 形状对齐 C# WebApp.cs TimelineSceneJson：组树 + 轨道 + 关键帧；full=1 附属性全集
+// （后续编辑 / 导出复用同一份格式）。三条失败分支都返回 200 + {ok:false,error}（与 C# 一致）。
 func (a *App) handleCardTimeline(w http.ResponseWriter, r *http.Request) {
 	id := parseID(r.PathValue("id"))
 	lib := atoiDefault(r.URL.Query().Get("lib"), 1)
+	full := atoiDefault(r.URL.Query().Get("full"), 0) != 0
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -168,7 +172,7 @@ func (a *App) handleCardTimeline(w http.ResponseWriter, r *http.Request) {
 	defer hub.Close()
 	path, why := core.CardPathOf(hub, cfg, lib, id)
 	if path == "" {
-		writeErr(w, 404, why)
+		writeJSON(w, map[string]interface{}{"ok": false, "error": why})
 		return
 	}
 	st := core.ParseCardStructure(path)
@@ -180,18 +184,74 @@ func (a *App) handleCardTimeline(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"ok": false, "error": "不是场景卡——只有 Studio 场景卡带 timeline 数据"})
 		return
 	}
-	tl := core.ReadTimeline(path, st.ImageEnd)
-	if tl == nil || !tl.HasEntry {
-		writeJSON(w, map[string]interface{}{"hasTimeline": false})
-		return
+	writeJSON(w, core.TimelineSceneJSON(readTimelineSceneCached(path, st.ImageEnd), full))
+}
+
+// timelineSceneCache 场景卡 timeline 模型的进程内缓存（键 = 路径 + 大小 + 修改时间；对齐 C# SceneCache）。
+var (
+	timelineSceneMu    sync.Mutex
+	timelineSceneCache = map[string]*core.TimelineScene{}
+)
+
+// readTimelineSceneCached 取一张场景卡的完整 timeline 模型——命中缓存直接返回，未命中现场解析并回填。
+// 失败或空时间轴不缓存（下次重试；与 C# 一致），容量超 4 条整表清空。
+func readTimelineSceneCached(path string, imageEnd int64) *core.TimelineScene {
+	key := path
+	if fi, statErr := os.Stat(path); statErr == nil {
+		key = path + "|" + strconv.FormatInt(fi.Size(), 10) + "|" + strconv.FormatInt(fi.ModTime().UnixNano(), 10)
 	}
-	writeJSON(w, map[string]interface{}{
-		"hasTimeline": true, "duration": tl.Duration, "timeScale": tl.TimeScale,
-		"keyframes": tl.Keyframes, "empty": tl.IsEmpty, "groups": tl.Groups,
-		"groupNames": tl.GroupNames, "realSeconds": tl.RealSeconds,
-		"maxKeyframeTime": tl.MaxKeyframeTime, "xmlLength": tl.XmlLength,
-		"truncated": tl.Truncated, "error": tl.Error,
-	})
+	timelineSceneMu.Lock()
+	hit, ok := timelineSceneCache[key]
+	timelineSceneMu.Unlock()
+	if ok {
+		return hit
+	}
+	scene := core.ReadTimelineScene(path, imageEnd)
+	if scene.Error == "" && scene.HasEntry {
+		timelineSceneMu.Lock()
+		if len(timelineSceneCache) >= 4 {
+			timelineSceneCache = map[string]*core.TimelineScene{}
+		}
+		timelineSceneCache[key] = scene
+		timelineSceneMu.Unlock()
+	}
+	return scene
+}
+
+// readTimelineCached 取一张场景卡的 timeline 长度——库缓存优先（card_timeline 行 + size/mtime 双等），
+// 未命中读盘一次并落表（读取失败不落表，下次重试）。对齐 C# WebApp.cs ReadTimelineCached：
+// 命中行只带库内落下的字段——XmlAt / HitStage / Groups / GroupNames / MaxKeyframeTime 等现场字段
+// 回落默认值（这是「命中缓存」与「现场解析」可观测的差别，照抄不补齐）。
+func (a *App) readTimelineCached(hub *store.Hub, lib int, id int64, path string, imageEnd int64) *core.TimelineInfo {
+	fi, statErr := os.Stat(path)
+	if statErr != nil {
+		return core.ReadTimeline(path, imageEnd)
+	}
+	size := fi.Size()
+	mtime := store.StampOf(fi.ModTime())
+	s, _ := hub.StoreByLib(lib)
+	if s != nil {
+		if row, err := s.GetCardTimeline(id); err == nil && row != nil && row.Size == size && row.Mtime == mtime {
+			scale := row.TimeScale
+			if scale <= 0 {
+				scale = 1
+			}
+			return &core.TimelineInfo{
+				Scanned: true, HasEntry: row.HasEntry, IsEmpty: row.IsEmpty,
+				Duration: row.Duration, TimeScale: scale, Keyframes: row.Keyframes,
+				XmlLength: row.XmlLength, RealSeconds: row.Duration / scale, Error: row.Error,
+			}
+		}
+	}
+	t := core.ReadTimeline(path, imageEnd)
+	if t.Error == "" && s != nil {
+		values := &store.TimelineValues{
+			HasEntry: t.HasEntry, IsEmpty: t.IsEmpty, Duration: t.Duration, TimeScale: t.TimeScale,
+			Keyframes: t.Keyframes, XmlLength: t.XmlLength, HitStage: t.HitStage, Error: t.Error,
+		}
+		_ = s.SaveCardTimeline(id, path, size, mtime, values)
+	}
+	return t
 }
 
 // handleNonCardThumb GET /api/noncard/thumb?lib=&id= 非卡登记项的缩略图（无图 → 404）。

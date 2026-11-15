@@ -49,8 +49,10 @@ const (
 type ScenePluginItem struct {
 	// Key 插件键名（MessagePack map 键，如 timeline / kkpe / vnge_actor）。
 	Key string
-	// Version 条目值之后的 version 串（timeline / kkpe 无此键 → 空串）。
+	// Version 条目值之后的 version 串（无此键 → 空串；未解析出字符串值时不赋值，序列化为 null）。
 	Version string
+	// VersionSet 是否读过 version（valueAt > 0 才读——区分「未读（null）」与「读到空串」）。
+	VersionSet bool
 	// Shape 值形态（sceneInfo(XML) / main(串) / main(map N 键) 等）。
 	Shape string
 	// Bytes 载荷字节数（0 = 未解析出长度）。
@@ -259,6 +261,7 @@ func ReadSceneInfo(path string, imageEnd int64) *SceneInfoResult {
 			if item != nil {
 				if item.valueAt > 0 {
 					item.Version = readSceneVersion(f, item.valueAt+item.valueLen, size)
+					item.VersionSet = true
 				}
 				r.Plugins = append(r.Plugins, *item)
 			}
@@ -493,20 +496,33 @@ func parseSceneItem(buf []byte, at92 int, at int64, key string, r *SceneInfoResu
 }
 
 // readSceneVersion 读条目值之后紧跟的 version 串（`A7 "version" 串`）；无则空串。
+// 对齐 C# SceneReader.ReadVersion：一次读 64 字节，读不满保留已读部分（不足 10 字节判无）——
+// 不能用「读满才算」的口径（文件尾附近的条目会漏掉 version）。
 func readSceneVersion(f *os.File, at, fileSize int64) string {
 	if at+2 > fileSize {
 		return ""
 	}
 	b := make([]byte, 64)
-	if !readFullAt(f, at, b) {
+	done := 0
+	for done < len(b) {
+		m, err := f.ReadAt(b[done:], at+int64(done))
+		done += m
+		if done == len(b) {
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+	if done < 10 {
 		return ""
 	}
 	for skip := 0; skip <= 1; skip++ {
-		if skip+len(sceneVersionKey) > len(b) || !matchAt(b, skip, sceneVersionKey) {
+		if skip+len(sceneVersionKey) > done || !matchAt(b, skip, sceneVersionKey) {
 			continue
 		}
 		p := skip + len(sceneVersionKey)
-		if s, ok := readStrAt(b, len(b), &p); ok {
+		if s, ok := readStrAt(b, done, &p); ok {
 			return s
 		}
 	}

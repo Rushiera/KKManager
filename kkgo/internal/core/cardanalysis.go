@@ -404,7 +404,7 @@ type sceneJSON struct {
 // sceneItemJSON C# ScenePluginItem 的序列化形状。
 type sceneItemJSON struct {
 	Key     string  `json:"key"`
-	Version string  `json:"version"`
+	Version *string `json:"version"`
 	Shape   string  `json:"shape"`
 	Bytes   int64   `json:"bytes"`
 	Offset  int64   `json:"offset"`
@@ -445,7 +445,7 @@ func sceneJSONOf(s *SceneInfoResult) sceneJSON {
 	for _, it := range s.Plugins {
 		w.Plugins = append(w.Plugins, sceneItemJSON{
 			Key:     it.Key,
-			Version: it.Version,
+			Version: setStr(it.Version, it.VersionSet),
 			Shape:   it.Shape,
 			Bytes:   it.Bytes,
 			Offset:  it.Offset,

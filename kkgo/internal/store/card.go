@@ -217,6 +217,68 @@ func (d *DB) DeleteCardsMissingUnderRoot(rootPath string, present map[string]boo
 	return len(gone), nil
 }
 
+// CardTimelineRow 一张卡片的 timeline 缓存行（对齐 C# CardTimelineRow——只带库内落下的字段）。
+type CardTimelineRow struct {
+	// CardId 卡片 id。
+	CardId int64
+	// FilePath 登记时的文件路径。
+	FilePath string
+	// Size 登记时的文件字节数。
+	Size int64
+	// Mtime 登记时的修改时间戳（UTC 文本）。
+	Mtime string
+	// HasEntry 是否存在 timeline 条目。
+	HasEntry bool
+	// IsEmpty 空时间轴。
+	IsEmpty bool
+	// Duration 原时长（秒）。
+	Duration float64
+	// TimeScale 时间缩放（DB 里 DBNull 按 1 读）。
+	TimeScale float64
+	// Keyframes 关键帧数。
+	Keyframes int
+	// XmlLength sceneInfo XML 字节数。
+	XmlLength int64
+	// ReadAt 读取时刻。
+	ReadAt string
+	// Error 上次读取失败的原因。
+	Error string
+}
+
+// GetCardTimeline 读一张卡片的 timeline 缓存（按 card_id；没有返回 nil · nil 不等于出错）。
+// 对齐 C# Store.GetCardTimeline 的取列与 DBNull 口径（time_scale 缺省 1）。
+func (d *DB) GetCardTimeline(cardId int64) (*CardTimelineRow, error) {
+	row := &CardTimelineRow{}
+	var filePath, mtime, readAt, errText sql.NullString
+	var size, hasEntry, isEmpty, keyframes, xmlLength sql.NullInt64
+	var duration, timeScale sql.NullFloat64
+	err := d.execer().QueryRow(`SELECT card_id, file_path, size, mtime, has_entry, is_empty,
+		duration, time_scale, keyframes, xml_length, read_at, error FROM card_timeline WHERE card_id=?`, cardId).
+		Scan(&row.CardId, &filePath, &size, &mtime, &hasEntry, &isEmpty,
+			&duration, &timeScale, &keyframes, &xmlLength, &readAt, &errText)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	row.FilePath = filePath.String
+	row.Size = size.Int64
+	row.Mtime = mtime.String
+	row.HasEntry = hasEntry.Int64 != 0
+	row.IsEmpty = isEmpty.Int64 != 0
+	row.Duration = duration.Float64
+	row.TimeScale = timeScale.Float64
+	if !timeScale.Valid {
+		row.TimeScale = 1
+	}
+	row.Keyframes = int(keyframes.Int64)
+	row.XmlLength = xmlLength.Int64
+	row.ReadAt = readAt.String
+	row.Error = errText.String
+	return row, nil
+}
+
 // SaveCardTimeline 写一张卡片的 timeline 缓存（按 card_id 覆盖；size + mtime 是失效判据）。
 func (d *DB) SaveCardTimeline(cardId int64, filePath string, size int64, mtime string, t *TimelineValues) error {
 	if t == nil {

@@ -34,6 +34,9 @@ import compare as C  # noqa: E402
 GO, CS = C.GO, C.CS
 GO_PORT, CS_PORT = 18611, 18612
 TMP = os.path.join(HERE, "_panel_tmp")
+# 场景卡分支样本（timeline 轨道模型 / structure 场景子对象）：真库里非空时间轴里最小的一张
+# （1.11 MB · 164 组 / 116 轨道 / 1,878 关键帧）——选中它是因为体积小且组树 / 轨道 / 属性都够覆盖。
+SCENE_SAMPLE = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene\tw4sq7.png"
 
 ID_KEYS = ("cardId", "id", "card_id")
 LIB_KEYS = ("lib", "libId", "lib_id")
@@ -176,6 +179,12 @@ def prepare_dbs():
     plugin = C._prepare_plugin_sample(TMP)
     if not sample:
         raise SystemExit("样本构造失败")
+    # 场景卡分支样本：追加一张带非空 timeline 的真场景卡——timeline 轨道模型 / structure
+    # 场景子对象（组树 / 轨道 / 关键帧 / 内嵌角色份数）对拍用它（交接件 §三-1）。
+    scene_src = SCENE_SAMPLE if os.path.exists(SCENE_SAMPLE) else C.SAMPLE_SCENE
+    scene_dst = os.path.join(sample["cards"], os.path.basename(scene_src))
+    if os.path.exists(scene_src) and not os.path.exists(scene_dst):
+        shutil.copy2(scene_src, scene_dst)
     dirs = {}
     for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
         d = os.path.join(TMP, tag)
@@ -347,6 +356,26 @@ def build_entries(side_dirs):
             p = ("/api/card/%s/image?lib=%s&offset=%s&size=%s&w=96"
                  % (cid, clib, pick.get("offset"), pick.get("length")))
             entries.append((p, "GET", p, None, "png"))
+    # 场景卡分支（交接件 §三-1）：带 timeline 的 sd 卡 → timeline 精简 / full=1 / structure 场景子对象；
+    # 库里若有第二张 sd 卡，再补一条 timeline（覆盖空轴 / 无条目形态）。
+    st, raw, _ = http(CS_PORT, "/api/cards?page=1&size=200&order=timeline")
+    tl_cards = json_of(raw) or []
+    sd_cards = [c for c in tl_cards if isinstance(c, dict) and c.get("cardType") == "sd"] if isinstance(tl_cards, list) else []
+    sd_live = [c for c in sd_cards if c.get("timelineSeconds") is not None]
+    scene_items = (sd_live[:1] or sd_cards[:1])
+    rest = [c for c in sd_cards if c not in scene_items]
+    if rest:
+        scene_items.append(rest[0])
+    for idx, item in enumerate(scene_items):
+        sid, slab = item.get("id"), item.get("lib") or 1
+        tag = "scene" if idx == 0 else "scene2"
+        entries.append(("%s /api/card/%s/timeline" % (tag, sid), "GET", "/api/card/%s/timeline?lib=%s" % (sid, slab), None, "json"))
+        if idx == 0:
+            entries += [
+                ("scene /api/card/%s/timeline?full=1" % sid, "GET", "/api/card/%s/timeline?lib=%s&full=1" % (sid, slab), None, "json"),
+                ("scene /api/card/%s/structure" % sid, "GET", "/api/card/%s/structure?lib=%s" % (sid, slab), None, "json"),
+            ]
+        print("  场景卡样本[%d]：id=%s lib=%s（timelineSeconds=%s）" % (idx, sid, slab, item.get("timelineSeconds")))
     # mod 条目面：composition 里挑一个图片条目 + 一个 unity3d 条目
     guid = find_first(mods_json, ("guid",))
     if guid:

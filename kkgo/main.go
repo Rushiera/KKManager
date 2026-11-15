@@ -22,14 +22,25 @@ import (
 // version 构建版本（发布时由 -ldflags "-X main.version=..." 注入）。
 var version = "0.1.0-dev"
 
+// releasePack 发布版标记（发布编译时由 -ldflags "-X main.releasePack=1" 注入）——
+// 非空 = 双击即用：无参等价于 serve --open，help / version 首行带发布标识。
+// 对照 C# 的 -p:ReleasePack=true（RELEASEPACK 条件编译）——漏传 = 静默失败（双击只打印用法），
+// 故发布前核验第 1 条以「双击 / 无参是否真起面板」为准。
+var releasePack = ""
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
 	if len(args) < 1 {
-		usage()
-		return 2
+		if releasePack != "" {
+			// 发布版双击即用——复用下方既有参数解析链，默认库路径 / 端口单点不重复
+			args = []string{"serve", "--open"}
+		} else {
+			usage()
+			return 2
+		}
 	}
 	cmd := args[0]
 	rest := args[1:]
@@ -169,14 +180,22 @@ func run(args []string) int {
 		return cmdPlugins(rest)
 	case "u3d":
 		return cmdU3d(rest)
+	case "u3d-types":
+		return cmdU3dTypes(rest)
 	case "u3d-db":
 		return cmdU3dDb(dbFlag(&rest), rest)
 	case "serve":
 		return cmdServe(rest)
 	case "version":
+		if releasePack != "" {
+			fmt.Println("发布版（ReleasePack 编译）——双击本 exe 即起面板。")
+		}
 		fmt.Println("kkgo " + version)
 		return 0
 	case "help":
+		if releasePack != "" {
+			fmt.Println("发布版（ReleasePack 编译）——双击本 exe 即起面板。")
+		}
 		usage()
 		return 0
 	default:
