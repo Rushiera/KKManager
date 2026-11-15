@@ -1,7 +1,9 @@
-// Package store 主库最小读写——G3 存储段的第一块砖。
+// Package store 主库 / 分片库读写——schema 对齐内嵌模板库，分片库 ATTACH 主库。
 //
-// 当前只覆盖 setting 表（库根配置 / 扫描计划都落在这一张表里），
-// 余下（schema 对齐 db-template.db / 分片库 / 预热 / 增量戳）待 G3 后续补。
+// 覆盖面：setting（库根配置 / 扫描计划）· mod 主表与副本 · card / card_mod / card_timeline ·
+// scan_state 增量戳 · idx_meta / index_source · 整理链四表（card_rule / card_move / card_delete / todo）·
+// 预热（WarmShard / OpenWarmLib）· 跨库搬行（MoveCardRow）与库根清理（DeleteRecordsUnderRoot）。
+// 对齐 C# Data/Store.cs 与 Data/StoreHub.cs；分层：本包不依赖 core / web。
 package store
 
 import (
@@ -332,6 +334,12 @@ func (d *DB) SetSetting(key, value string) error {
 	return err
 }
 
+// DeleteSetting 删一个设置项（库号迁移时清旧键）——对齐 C# Store.DeleteSetting。
+func (d *DB) DeleteSetting(key string) error {
+	_, err := d.sql.Exec("DELETE FROM setting WHERE key=?", key)
+	return err
+}
+
 // ModFileRow 一条 mod 副本行（对齐 C# Store.RefRow：guid / 级别 / 库根 / 文件 / 文件名）。
 type ModFileRow struct {
 	// Guid mod 的 manifest guid。
@@ -419,7 +427,7 @@ func (d *DB) LoadComposition(guid string) (*CompositionRow, error) {
 	var rec CompositionRow
 	var filePath, fileName, mtime, entries, texts sql.NullString
 	var analyzedAt sql.NullString
-	err := d.sql.QueryRow("SELECT guid, file_path, file_name, size, mtime, entry_count, total_size, total_compressed, entries, analyzed_at, texts FROM mod_composition WHERE guid=?", guid).
+	err := d.execer().QueryRow("SELECT guid, file_path, file_name, size, mtime, entry_count, total_size, total_compressed, entries, analyzed_at, texts FROM mod_composition WHERE guid=?", guid).
 		Scan(&rec.Guid, &filePath, &fileName, &rec.Size, &mtime, &rec.EntryCount, &rec.TotalSize, &rec.TotalCompressed, &entries, &analyzedAt, &texts)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -441,7 +449,7 @@ func (d *DB) SaveComposition(rec *CompositionRow) error {
 	if rec == nil || rec.Guid == "" {
 		return nil
 	}
-	_, err := d.sql.Exec(`INSERT INTO mod_composition(guid,file_path,file_name,size,mtime,entry_count,total_size,total_compressed,entries,analyzed_at,texts)
+	_, err := d.execer().Exec(`INSERT INTO mod_composition(guid,file_path,file_name,size,mtime,entry_count,total_size,total_compressed,entries,analyzed_at,texts)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(guid) DO UPDATE SET
 			file_path=excluded.file_path, file_name=excluded.file_name, size=excluded.size, mtime=excluded.mtime,

@@ -177,24 +177,4 @@ func (a *App) handleScanPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"order": order, "on": enable, "steps": steps, "groups": groups})
 }
 
-// handleWarmup 静默预热分片库（逐片打开并写一次，把 -wal 建出来）。
-func (a *App) handleWarmup(w http.ResponseWriter, r *http.Request) {
-	hub, cfg, err := openApp(a.DBPath)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	defer hub.Close()
-	stores := core.AllStoreRefs(hub, cfg)
-	opened := 0
-	for _, s := range stores {
-		if s.DB == nil {
-			continue
-		}
-		if _, execErr := hub.SnapshotOf(s.DB); execErr != nil {
-			continue
-		}
-		opened++
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "warmed": opened})
-}
+// handleWarmup 见 warmup.go（G10：进程级 warm keeper，后台建 -wal 并常驻连接）。

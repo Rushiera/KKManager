@@ -142,6 +142,8 @@ func (a *App) handleRootsPurge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"ok": false, "error": saveErr.Error()})
 		return
 	}
+	// 库文件将被删除——先释放该库根的常驻预热连接（占用中的文件删不掉）
+	a.warm.releaseLibs(hub, list[idx].Path)
 	hub.Close()
 	if libErr == nil && base > 0 {
 		if _, errs := purgeLibFiles(filepath.Dir(a.DBPath), base); len(errs) > 0 {

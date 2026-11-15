@@ -100,24 +100,34 @@ Koikatsu 卡片 ↔ zipmod 关联管理器——把「这张卡用了哪些 mod 
 
 ## 形态
 
-- Windows x64 单文件 exe（.NET 8 自包含，面客机器无需预装运行时）
+- Windows x64 单文件 exe（**Go 静态编译 · 免运行时**；2026-11-15 起为现行实现）
 - 双击即起本地面板（浏览器），端口 8539
 - 运行数据 = exe 同目录 `data\kkmanager.db`（首次运行自动创建）
+- C# 版（`KMR.exe` / .NET 8）自 0.21.9 起**冻结为只读参照**，不再更新
 
 ## 使用
 
 1. 下载 Release 里的发布包，解压到任意目录
-2. 双击 `KMR.exe` → 浏览器自动打开面板
+2. 双击 `kkgo.exe` → 浏览器自动打开面板
 3. 面板顶部「库根设置」先设游戏根（Koikatsu 安装目录），再点「更新本库」扫描
 4. 卡片边框四色 = 引用状态（绿=全部在主库 · 黄=仅缓存库 · 灰=仅冷冻库 · 红=有缺失）
 
 ## 构建
 
 ```
+cd kkgo
+go build -o kkgo.exe .
+```
+
+发布编译走 `revealer/RELEASE.md` §四-4.1 的固定通道（`go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1"`）。
+
+C# 参照（冻结，只在对拍基准需重编时）：
+
+```
 dotnet build KKManager/KKManager.csproj
 ```
 
-调试期产物走 `dist\` 双槽（`KMR_A.exe` / `KMR_B.exe` 交替发布），`dist\启动.bat` 起最新产物。
+调试期：Go 直接跑 `kkgo.exe serve --port 8539 --open`；`dist\` 双槽（`KMR_A.exe` / `KMR_B.exe` 交替发布 + `启动.bat`）为 **C# 参照的调试通道**，不再承载新功能。
 
 ## 发布
 
@@ -126,7 +136,7 @@ dotnet build KKManager/KKManager.csproj
 - `revealer/RELEASE.md`——发布版结构与命名 · 转换链 · 依赖自包含判据 · 发布前核验 · 台账
 - `revealer/SKILL.md`——一句「发布」的完整动作链
 
-发布版号独立编号（当前 1.0.11）。**exe 与压缩包不入仓库**——走 Release 附件。
+发布版号独立编号（当前 **1.0.12**）。**exe 与压缩包不入仓库**——走 Release 附件。
 
 ## 数据与隐私
 
@@ -143,8 +153,9 @@ dotnet build KKManager/KKManager.csproj
 ## 目录
 
 ```
-KKManager/          主程序（Core 解析 / Data 存储 / Web 面板）
-KKManagerProbe/     取证探针（不随发布）
+kkgo/               现行实现（Go：解析核 / 存储 / 扫描链 / 面板 / CLI）
+KKManager/          C# 参照（0.21.9 冻结，只读；Core 解析 / Data 存储 / Web 面板）
+KKManagerProbe/     C# 取证探针（不随发布）
 revealer/           发布区（规范 + 发布版目录）
-dist/               调试产物区（不入仓）
+dist/               C# 参照调试产物区（不入仓）
 ```

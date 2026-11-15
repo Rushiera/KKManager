@@ -1160,29 +1160,8 @@ func cmdStats(rest []string) int {
 	return 0
 }
 
-// queryModFiles 某 guid 的全部文件副本（跨库，按级别升序）——对齐 C# StoreHub.QueryModFiles。
-func queryModFiles(hub *store.Hub, cfg *core.RootsConfig, guid string) ([]store.ModFileRow, error) {
-	stores, err := allStores(hub, cfg)
-	if err != nil {
-		return nil, err
-	}
-	var list []store.ModFileRow
-	for _, db := range stores {
-		rows, err := db.QueryModFileRows(guid)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", db.Path(), err)
-		}
-		list = append(list, rows...)
-	}
-	sort.SliceStable(list, func(i, j int) bool { return list[i].Tier < list[j].Tier })
-	return list, nil
-}
-
 // stampFormat 时间戳格式（对齐 C# Store.StampFormat = "yyyy-MM-ddTHH:mm:ss.fff"，UTC）。
 const stampFormat = "2006-01-02T15:04:05.000"
-
-// textEntryMaxBytes 文本类条目入档的字节上限（超过则不入档并出声——不静默丢内容）。
-const textEntryMaxBytes = 4 * 1024 * 1024
 
 // takeSwitch 取出一个布尔开关并从 rest 里移除。
 func takeSwitch(rest *[]string, name string) bool {
@@ -1195,111 +1174,14 @@ func takeSwitch(rest *[]string, name string) bool {
 	return false
 }
 
-// stampOf 取文件的修改时间戳文本（UTC）——对齐 C# Store.StampOf。
-func stampOf(path string) (string, int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", 0, err
-	}
-	return info.ModTime().UTC().Format(stampFormat), info.Size(), nil
-}
-
 // nowStamp 当前 UTC 时间戳文本（对齐 C# Store.Now）。
 func nowStamp() string {
 	return time.Now().UTC().Format(stampFormat)
 }
 
-// analyzeComposition 读（必要时建立）某 mod 的组成档案——对齐 C# StoreHub.AnalyzeComposition：
-// 取该 guid 最优级别且磁盘上真实存在的副本；force=false 时按路径 / 大小 / 修改时间判失效（未变直接复用）；
-// force=true 强制重读容器；无副本时具名出声。
-func analyzeComposition(hub *store.Hub, cfg *core.RootsConfig, guid string, force bool) (*store.CompositionRow, error) {
-	if guid == "" {
-		return nil, fmt.Errorf("缺少 guid")
-	}
-	files, err := queryModFiles(hub, cfg, guid)
-	if err != nil {
-		return nil, err
-	}
-	var pick *store.ModFileRow
-	for i := range files {
-		if _, err = os.Stat(files[i].FilePath); err == nil {
-			pick = &files[i]
-			break
-		}
-	}
-	if pick == nil {
-		if len(files) == 0 {
-			return nil, fmt.Errorf("本地没有该 mod 的文件（库内无副本）")
-		}
-		return nil, fmt.Errorf("登记的副本都不在磁盘上（需重扫）")
-	}
-	mtime, size, err := stampOf(pick.FilePath)
-	if err != nil {
-		return nil, err
-	}
-	// [段1] 非强制 + 已有档案且文件未变 → 直接复用（不重读容器）；档案缺文本内容而容器有文本条目时视为陈旧，重建一次
-	cached, err := hub.Core().LoadComposition(guid)
-	if err != nil {
-		return nil, err
-	}
-	staleTexts := cached != nil && cached.Texts == "" && core.HasTextEntry(cached.Entries)
-	if !force && cached != nil && !staleTexts &&
-		strings.EqualFold(cached.FilePath, pick.FilePath) &&
-		cached.Size == size && cached.Mtime == mtime {
-		cached.Cached = true
-		return cached, nil
-	}
-	// [段2] 读容器中央目录 → 建档落库
-	entries, err := core.ListZipEntries(pick.FilePath)
-	if err != nil {
-		return nil, fmt.Errorf("读容器失败：%s", err.Error())
-	}
-	var totalSize, totalCompressed int64
-	lines := make([]string, 0, len(entries))
-	texts := make([]string, 0)
-	for _, e := range entries {
-		totalSize += e.Size
-		totalCompressed += e.Compressed
-		lines = append(lines, e.Path+"\t"+strconv.FormatInt(e.Size, 10)+"\t"+strconv.FormatInt(e.Compressed, 10))
-	}
-	// [段3] 顺带捞文本类条目内容（csv / xml / txt…）——悬停预览用；读不到出声，不静默丢
-	for _, e := range entries {
-		if !core.IsTextEntry(e.Path) {
-			continue
-		}
-		data, readErr := core.ReadZipEntry(pick.FilePath, e.Path, textEntryMaxBytes)
-		if readErr != nil {
-			fmt.Println("[组成] 文本条目未入档：" + e.Path + " —— " + readErr.Error())
-			continue
-		}
-		decoded := core.DecodeText(data)
-		if decoded.Encoding == "gbk-unavailable" {
-			fmt.Println("[组成] GBK 编码不可用——" + e.Path + " 按 UTF-8 宽松解码")
-		}
-		texts = append(texts, "\u0001"+e.Path+"\t"+core.ClampTextEntry(decoded.Text))
-	}
-	rec := &store.CompositionRow{
-		Guid:            guid,
-		FilePath:        pick.FilePath,
-		FileName:        pick.FileName,
-		Size:            size,
-		Mtime:           mtime,
-		EntryCount:      int64(len(entries)),
-		TotalSize:       totalSize,
-		TotalCompressed: totalCompressed,
-		Entries:         strings.Join(lines, "\n"),
-		Texts:           strings.Join(texts, "\n"),
-		AnalyzedAt:      nowStamp(),
-	}
-	if err = hub.Core().SaveComposition(rec); err != nil {
-		return nil, err
-	}
-	fmt.Println("[组成] 建档：" + guid + " · " + itoa(len(entries)) + " 条目 · 文本 " + itoa(len(texts)) + " 份 · " + pick.FileName)
-	return rec, nil
-}
-
 // cmdComposition 查看某 mod 的组成（按需建档：容器条目清单 + 目录聚合 + 文本条目内容）。
-// 契约对齐 Program.cs §CompositionCommand / Data/StoreHub.cs §AnalyzeComposition。
+// 契约对齐 Program.cs §CompositionCommand / Data/StoreHub.cs §AnalyzeComposition；
+// 实现单点在 core.AnalyzeCompositionHub（G14 薄壳化）。
 func cmdComposition(rest []string) int {
 	dbPath := dbFlag(&rest)
 	force := takeSwitch(&rest, "--force")
@@ -1314,7 +1196,7 @@ func cmdComposition(rest []string) int {
 		return 1
 	}
 	defer hub.Close()
-	rec, err := analyzeComposition(hub, cfg, guid, force)
+	rec, err := core.AnalyzeCompositionHub(hub, cfg, guid, force, func(msg string) { fmt.Println(msg) })
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "失败: "+err.Error())
 		return 3
@@ -1402,7 +1284,7 @@ func cmdModFiles(rest []string) int {
 		return 1
 	}
 	defer hub.Close()
-	rows, err := queryModFiles(hub, cfg, guid)
+	rows, err := core.QueryModFilesHub(hub, cfg, guid)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
 		return 1
@@ -3137,14 +3019,15 @@ func cmdOldOp(rest []string, op string) int {
 }
 
 // cmdIndexImport 索引导入——读 kkc 风格索引（整理/index 分片或 index.tsv 全量）写库，不扫文件系统。
-// 契约对齐 Program.cs §IndexImportCommand + Core/IndexImporter.cs。
+// 契约对齐 Program.cs §IndexImportCommand + Core/IndexImporter.cs——段 1 库根迁移 → 段 2 导入
+// （含导入前清理）→ 段 2.5 搬行消费 → 段 3 旧记录清理。
 func cmdIndexImport(rest []string) int {
 	root := strings.TrimRight(strings.TrimRight(takeFlag(&rest, "--root"), `\`), "/")
 	index := takeFlag(&rest, "--index")
 	oldRoot := takeFlag(&rest, "--old-root")
 	purgeFirst := takeSwitch(&rest, "--purge-first")
 	if root == "" {
-		fmt.Fprintln(os.Stderr, "用法：index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]")
+		fmt.Fprintln(os.Stderr, "用法：index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>] [--purge-first]")
 		return 2
 	}
 	dbPath := dbFlag(&rest)
@@ -3159,13 +3042,37 @@ func cmdIndexImport(rest []string) int {
 		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
 		return 1
 	}
+	// [段1] 库根路径迁移——把旧路径的条目改指向新路径（mod + 卡片两侧，同目录可能各有一条）
 	if oldRoot != "" {
-		fmt.Fprintln(os.Stderr, "index-import：--old-root 未移植（库根路径迁移与旧记录清理归 card-sort 段一并补）")
-		return 3
-	}
-	if purgeFirst {
-		fmt.Fprintln(os.Stderr, "index-import：--purge-first 未移植（同根重建清理归 card-sort 段一并补）")
-		return 3
+		oldRoot = strings.TrimRight(strings.TrimRight(oldRoot, `\`), "/")
+		if err = hub.RekeyRoot(oldRoot, root); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
+		moved := 0
+		for i := range cfg.ModRoots {
+			if samePath(cfg.ModRoots[i].Path, oldRoot) {
+				cfg.ModRoots[i].Path = root
+				cfg.ModRoots[i].Offline = false
+				moved++
+			}
+		}
+		for i := range cfg.CardRoots {
+			if samePath(cfg.CardRoots[i].Path, oldRoot) {
+				cfg.CardRoots[i].Path = root
+				cfg.CardRoots[i].Offline = false
+				moved++
+			}
+		}
+		if moved > 0 {
+			if err = saveRoots(hub.Core(), cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+				return 1
+			}
+			fmt.Println("库根路径迁移：" + oldRoot + " → " + root + "（" + strconv.Itoa(moved) + " 条）")
+		} else {
+			fmt.Println("未找到旧库根条目：" + oldRoot + "（跳过迁移）")
+		}
 	}
 	modRoot := findRootEntry(cfg.ModRoots, root)
 	cardRoot := findRootEntry(cfg.CardRoots, root)
@@ -3177,6 +3084,25 @@ func cmdIndexImport(rest []string) int {
 	if useMod == nil {
 		useMod = cardRoot
 	}
+	// [段2] 导入（不扫盘）——同根重建：导入前先清掉该根的旧记录（路径口径变了 / 索引重生成时用）
+	if purgeFirst {
+		purged, purgeErr := core.PurgeRootHub(hub, cfg, root)
+		if purgeErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+purgeErr.Error())
+			return 1
+		}
+		skipRows, skipErr := core.PurgeSkipRowsHub(hub, cfg)
+		if skipErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+skipErr.Error())
+			return 1
+		}
+		fmt.Println("导入前清理：root 旧记录（受影响 mod guid " + strconv.Itoa(purged) + " 个）· 跳过行 " + strconv.Itoa(skipRows) + " 条")
+	}
+	// [段 2.5] 消费已完成的移动记录——DB 行从旧路径迁到新路径（保 card_id / card_mod 引用），再导入
+	if _, err = core.ConsumeCardMovesHub(hub, cfg, root, func(msg string) { fmt.Println("  " + msg) }); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
 	res, err := core.ImportIndex(hub, useMod, cardRoot, index, func(msg string) { fmt.Println("  " + msg) })
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
@@ -3187,7 +3113,23 @@ func cmdIndexImport(rest []string) int {
 		return 3
 	}
 	fmt.Println("索引源登记：root=" + root + " · 摘要 " + res.Digest + " · 目录 " + res.IndexDir)
+	// [段3] 旧记录清理——路径已迁移时，旧路径下的记录全部作废（否则统计重复）
+	if oldRoot != "" && !samePath(oldRoot, root) {
+		purged, purgeErr := core.PurgeRootHub(hub, cfg, oldRoot)
+		if purgeErr != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+purgeErr.Error())
+			return 1
+		}
+		fmt.Println("旧记录清理：" + oldRoot + "（受影响 mod guid " + strconv.Itoa(purged) + " 个）")
+	}
 	return 0
+}
+
+// samePath 路径比较（忽略大小写与尾部分隔符）——对齐 C# Program.SamePath。
+func samePath(a, b string) bool {
+	na := strings.TrimRight(strings.TrimSpace(a), `\/`)
+	nb := strings.TrimRight(strings.TrimSpace(b), `\/`)
+	return strings.EqualFold(na, nb)
 }
 
 // findRootEntry 在库根列表里按路径（大小写不敏感、忽略尾分隔符）找条目。
@@ -3536,6 +3478,7 @@ func cmdServe(rest []string) int {
 	openBrowser := takeSwitch(&rest, "--open")
 	takeSwitch(&rest, "--browse-debug")
 	app := web.New(dbPath, version)
+	defer app.Close()
 	if err := app.Serve(port, openBrowser); err != nil {
 		fmt.Fprintln(os.Stderr, "面板启动失败: "+err.Error())
 		return 1

@@ -34,11 +34,20 @@ type App struct {
 	DBPath string
 	// Version 面板版本串（右上角显示）。
 	Version string
+	// warm 进程级预热器（分片库 -wal 常驻；见 warmup.go）。
+	warm *warmKeeper
 }
 
 // New 构造面板应用。
 func New(dbPath, version string) *App {
-	return &App{DBPath: dbPath, Version: version}
+	return &App{DBPath: dbPath, Version: version, warm: newWarmKeeper()}
+}
+
+// Close 关闭面板长驻资源（预热器的常驻连接）——进程退出前调用。
+func (a *App) Close() {
+	if a != nil && a.warm != nil {
+		a.warm.closeAll()
+	}
 }
 
 // Handler 组装全部路由。

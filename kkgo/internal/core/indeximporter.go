@@ -336,8 +336,11 @@ func importIndexRow(hub *store.Hub, modRoot, cardRoot *RootEntry, relBase string
 	}
 
 	// 跳过行（现路径 = 「（跳过…）」）——只登记元数据，不写卡片 / mod
+	// file_path 用「[跳过] + 索引 ID」（不带库根前缀）——对齐 C# IndexImporter：PurgeRoot 清不到，
+	// 由 PurgeSkipRows 按前缀单独清；重导索引会重写。
 	if strings.HasPrefix(rel, "（") || rel == "" {
-		meta.IdxId = "[跳过]" + idxId
+		meta.FilePath = "[跳过]" + idxId
+		meta.IdxId = idxId
 		if err := modStore.UpsertIndexMeta(meta); err != nil {
 			return err
 		}

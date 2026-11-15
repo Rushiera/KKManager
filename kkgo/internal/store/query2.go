@@ -52,7 +52,7 @@ func (d *DB) LoadModOldMap() map[string]ModOldRecord {
 // QueryModFileRecsByGuid 某 guid 在本库的副本记录（含大小 / 时间，按级别升序）——
 // 对齐 C# Store.QueryModFileRecords（跨库重算 mod 主表用）。
 func (d *DB) QueryModFileRecsByGuid(guid string) ([]ModFileRec, error) {
-	rows, err := d.sql.Query("SELECT file_path, guid, tier, root_path, file_name, size, mtime, scan_time FROM mod_file WHERE guid=? ORDER BY tier", guid)
+	rows, err := d.execer().Query("SELECT file_path, guid, tier, root_path, file_name, size, mtime, scan_time FROM mod_file WHERE guid=? ORDER BY tier", guid)
 	if err != nil {
 		return nil, err
 	}

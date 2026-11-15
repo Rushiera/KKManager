@@ -530,9 +530,25 @@ func runModStep(hub *store.Hub, cfg *RootsConfig, db *store.DB, st *ScanRootStat
 		}
 		return true, false, nil
 	case "composition":
-		// 组成档案段（默认计划不启用）——归档到 G4 余项：需要 hub.AnalyzeComposition 的 Go 版
-		result.addError(filepath.Base(f.Path) + " → composition 步骤尚未移植（Go 侧 G4 余项）")
-		return false, false, nil
+		// 组成档案段（默认计划不启用）——对齐 C# Scanner.cs 的 composition 步：
+		// guid 缺失先重解析一次（modrow 步可能被增量跳过）；仍无 guid 只记一条错。
+		if f.ModGuid == "" {
+			again := ParseZipMod(f.Path)
+			if again.ErrorKind == ModErrNotContainer || again.ErrorKind == ModErrNoManifest {
+				return false, true, nil
+			}
+			f.ModGuid = again.Guid
+		}
+		if f.ModGuid == "" {
+			result.addError(filepath.Base(f.Path) + " → 无 guid，跳过组成建档")
+			return false, false, nil
+		}
+		// force / size+mtime 增量判据在 AnalyzeCompositionHub 内（force=false 命中档案直接复用）
+		if _, compErr := AnalyzeCompositionHub(hub, cfg, f.ModGuid, force, func(msg string) { fmt.Println(msg) }); compErr != nil {
+			result.addError(filepath.Base(f.Path) + " 组成 → " + compErr.Error())
+			return false, false, nil
+		}
+		return true, false, nil
 	default:
 		return false, false, nil
 	}
