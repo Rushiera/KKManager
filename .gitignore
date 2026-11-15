@@ -8,10 +8,15 @@ dist/
 # 发布产物——exe / 压缩包不入仓，走 Release 附件
 revealer/*.zip
 revealer/kkmanager*/KMR.exe
+revealer/kkmanager*/kkgo.exe
 
 # 运行时数据库与卡片留档（🔴 只锚根目录——裸 data/ 会连源码目录 KKManager/Data/ 一起忽略，2026-09-27 修）
 /data/
 card_archive/
+
+# SQLite 边车文件（模板库被打开时生成，不入仓）
+*.db-shm
+*.db-wal
 
 # 编辑器 / 本地临时
 .vs/
@@ -24,6 +29,11 @@ revealer/kkc/
 # Go 重写（kkgo）构建产物
 kkgo/kkgo.exe
 kkgo/bin/
+
+# 对拍脚本的临时产物（每次跑都会重建）
+kkgo/tools/compare/_*_tmp/
+kkgo/tools/compare/thumb-cs.jpg
+kkgo/tools/compare/thumb-go.jpg
 
 # Python 缓存（对拍脚本）
 __pycache__/
