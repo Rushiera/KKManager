@@ -287,7 +287,8 @@ func ArchiveCard(path, archiveDir string, stamp time.Time) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
 	stem := base[:len(base)-len(ext)]
-	target := filepath.Join(archiveDir, stamp.Format("20060102_150405_000")+"_"+stem+ext)
+	target := filepath.Join(archiveDir, stamp.Format("20060102_150405")+"_"+
+		fmt.Sprintf("%03d", stamp.Nanosecond()/1e6)+"_"+stem+ext)
 	src, err := os.Open(path)
 	if err != nil {
 		fmt.Println("[卡片编辑] 留档失败：" + err.Error())

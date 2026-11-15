@@ -7,31 +7,39 @@ import (
 	"database/sql"
 )
 
-// GetCardListRow 按 id 取单张卡片行（面板卡片窗用）。
-// 四色计数（Green/Yellow/Red/Black）由调用方按 card_mod 现算或留零——本方法只出卡片自身字段。
+// GetCardListRow 按 id 取单张卡片行（面板卡片窗用）——对齐 C# Store.GetCard：
+// 四色聚合走 colorCte（库文件经 core.mod）；hasThumb 由 thumb 非空判定（card 表无 has_thumb 列）。
+// file_path 取出来给 CardPathOf 用（C# CardRow 不回传该字段，面板 JSON 不输出）。
 func (d *DB) GetCardListRow(id int64) (*CardListRow, error) {
-	row := d.execer().QueryRow(`SELECT id, file_path, file_name, card_type, size, mtime, root_path, tier, folder, has_thumb, chara_name
-		FROM card WHERE id=?`, id)
+	modTable := "mod"
+	if !d.isCore {
+		if err := d.attachCore(d.core); err != nil {
+			return nil, err
+		}
+		modTable = "core.mod"
+	}
+	row := d.execer().QueryRow(colorCte(modTable)+` SELECT c.id, c.file_path, c.file_name, c.card_type,
+		c.size, c.mtime, c.root_path, c.tier, c.folder, c.mod_count,
+		COALESCE(a.green,0), COALESCE(a.yellow,0), COALESCE(a.red,0), COALESCE(a.black,0),
+		(c.thumb IS NOT NULL)
+		FROM card c LEFT JOIN agg a ON a.card_id = c.id
+		WHERE c.id = ?`, id)
 	var r CardListRow
-	var filePath, cardType, mtime, rootPath, folder, charaName sql.NullString
-	var size, hasThumb sql.NullInt64
-	if err := row.Scan(&r.Id, &filePath, &cardType, &size, &mtime, &rootPath, &r.Tier, &folder, &hasThumb, &charaName); err != nil {
+	var filePath, fileName, cardType, mtime, rootPath, folder sql.NullString
+	var size, modCount, green, yellow, red, black, hasThumb sql.NullInt64
+	if err := row.Scan(&r.Id, &filePath, &fileName, &cardType, &size, &mtime, &rootPath, &r.Tier, &folder,
+		&modCount, &green, &yellow, &red, &black, &hasThumb); err != nil {
 		return nil, err
 	}
-	r.FilePath = filePath.String
-	r.FileName = ""
+	r.FilePath, r.FileName = filePath.String, fileName.String
 	r.CardType, r.CardTypeSet = cardType.String, cardType.Valid
 	r.Size = size.Int64
 	r.Mtime, r.MtimeSet = mtime.String, mtime.Valid
 	r.RootPath, r.RootPathSet = rootPath.String, rootPath.Valid
 	r.Folder = folder.String
+	r.ModCount = modCount.Int64
+	r.Green, r.Yellow, r.Red, r.Black = green.Int64, yellow.Int64, red.Int64, black.Int64
 	r.HasThumb = hasThumb.Int64 != 0
-	r.CharaName, r.CharaNameSet = charaName.String, charaName.Valid
-	// file_name 单独取（上面 Scan 顺序里已含）
-	var fileName sql.NullString
-	if err := d.execer().QueryRow("SELECT file_name FROM card WHERE id=?", id).Scan(&fileName); err == nil {
-		r.FileName = fileName.String
-	}
 	return &r, nil
 }
 
@@ -87,4 +95,48 @@ func (d *DB) AddCardEdit(cardPath, cardName string, lib int, archivedFile string
 		"(card_path,card_name,lib,archived_file,archived_size,archived_mtime,changes,edited_at) VALUES(?,?,?,?,?,?,?,?)",
 		cardPath, cardName, lib, archivedFile, archivedSize, archivedMtime, changes, editedAt)
 	return err
+}
+
+// QueryCardRefs 某张卡的引用明细（对齐 C# Store.QueryCardRefs）——
+// 同 guid 多部件聚合为一行（MIN(property) 等），tier 按跨库最优；tierFilter 0=不过滤，1/2/3/9 过滤。
+func (d *DB) QueryCardRefs(cardId int64, tierFilter int) ([]RefRow, error) {
+	modTable := "mod"
+	if !d.isCore {
+		if err := d.attachCore(d.core); err != nil {
+			return nil, err
+		}
+		modTable = "core.mod"
+	}
+	having := ""
+	switch tierFilter {
+	case 1:
+		having = " HAVING MIN(CASE WHEN m.tier IS NULL THEN 9 ELSE m.tier END) = 1"
+	case 2:
+		having = " HAVING MIN(CASE WHEN m.tier IS NULL THEN 9 ELSE m.tier END) = 2"
+	case 3:
+		having = " HAVING MIN(CASE WHEN m.tier IS NULL THEN 9 ELSE m.tier END) = 3"
+	case 9:
+		having = " HAVING MIN(CASE WHEN m.tier IS NULL THEN 9 ELSE m.tier END) = 9"
+	}
+	sqlText := `SELECT cm.mod_guid, MIN(CASE WHEN m.tier IS NULL THEN 9 ELSE m.tier END) AS tier,
+		MIN(COALESCE(m.root_path,'')), MIN(COALESCE(m.file_path,'')), MIN(COALESCE(m.file_name,'')),
+		MIN(COALESCE(cm.property,'')), MIN(COALESCE(cm.rec_name,'')), MIN(COALESCE(cm.rec_author,'')),
+		MIN(COALESCE(cm.rec_website,''))
+		FROM card_mod cm LEFT JOIN ` + modTable + ` m ON m.guid = cm.mod_guid
+		WHERE cm.card_id = ? GROUP BY cm.mod_guid` + having + ` ORDER BY tier, cm.mod_guid`
+	rows, err := d.execer().Query(sqlText, cardId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := make([]RefRow, 0, 16)
+	for rows.Next() {
+		var r RefRow
+		if err = rows.Scan(&r.Guid, &r.Tier, &r.RootPath, &r.FilePath, &r.FileName,
+			&r.Property, &r.RecName, &r.RecAuthor, &r.RecWebsite); err != nil {
+			return nil, err
+		}
+		list = append(list, r)
+	}
+	return list, rows.Err()
 }

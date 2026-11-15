@@ -156,6 +156,20 @@ func ScanStepsOf(groupID string) []ScanStepDef {
 	return list
 }
 
+// AllScanSteps 内置步骤全集（数组顺序即默认执行顺序——面板扫描配置窗消费）。
+func AllScanSteps() []ScanStepDef {
+	out := make([]ScanStepDef, len(scanSteps))
+	copy(out, scanSteps)
+	return out
+}
+
+// AllScanGroups 内置组全集（数组顺序即配置窗展示顺序）。
+func AllScanGroups() []ScanGroupDef {
+	out := make([]ScanGroupDef, len(scanGroups))
+	copy(out, scanGroups)
+	return out
+}
+
 // DefaultScanPlan 默认计划——内置顺序 + 默认勾选。
 func DefaultScanPlan() *ScanPlan {
 	p := &ScanPlan{Order: make([]string, 0, len(scanSteps)), On: map[string]bool{}}

@@ -124,6 +124,32 @@ func storeOfLib(hub *store.Hub, lib int) (*store.DB, error) {
 	return hub.StoreByLib(lib)
 }
 
+// LibOfRootPath 按库根路径取库序号——走主库的条目返回 0；配置里找不到也按主库处理。
+// 对齐 C# StoreHub.LibOfRootPath：不能裸调 LibOf（那会给走主库的库根分出一个不存在的库文件）。
+func LibOfRootPath(hub *store.Hub, cfg *RootsConfig, rootPath string) (int, error) {
+	if cfg == nil || strings.TrimSpace(rootPath) == "" {
+		return 0, nil
+	}
+	norm := strings.TrimSpace(rootPath)
+	for _, e := range cfg.ModRoots {
+		if strings.EqualFold(strings.TrimSpace(e.Path), norm) {
+			if store.UsesCoreDB(e.Tier, e.Locked, true) {
+				return 0, nil
+			}
+			return hub.LibOf(e.Path)
+		}
+	}
+	for _, e := range cfg.CardRoots {
+		if strings.EqualFold(strings.TrimSpace(e.Path), norm) {
+			if store.UsesCoreDB(e.Tier, e.Locked, false) {
+				return 0, nil
+			}
+			return hub.LibOf(e.Path)
+		}
+	}
+	return 0, nil
+}
+
 // BuildPlan 生成平铺计划——枚举所选库根下全部 mod 文件，算作者文件夹与目标路径，
 // 检出冲突后落主库表（计划头 + 条目）。
 func BuildPlan(hub *store.Hub, cfg *RootsConfig, rootPaths []string, job *SortJobState) error {
@@ -144,7 +170,7 @@ func BuildPlan(hub *store.Hub, cfg *RootsConfig, rootPaths []string, job *SortJo
 		if job.StopRequested {
 			break
 		}
-		lib, err := hub.LibOf(root)
+		lib, err := LibOfRootPath(hub, cfg, root)
 		if err != nil {
 			return err
 		}
@@ -382,7 +408,10 @@ func ExecutePlan(hub *store.Hub, cfg *RootsConfig, planID int64, job *SortJobSta
 		if root == "" || IsReadOnlyRoot(cfg, root) {
 			continue
 		}
-		job.PrunedDirs += PruneEmptyDirs(root)
+		if n := PruneEmptyDirs(root); n > 0 {
+			fmt.Println("[整理] 清掉空目录 " + itoaSmall(int(n)) + " 个：" + root)
+			job.PrunedDirs += n
+		}
 	}
 	job.Message = "搬运完成"
 	return nil
@@ -438,7 +467,7 @@ func moveOne(hub *store.Hub, cfg *RootsConfig, row *store.SortPlanItemRow) strin
 
 // RenameModFilePath 把一条 mod 副本在同一库根内改路径（级别与库根不变），并重算 mod 主表。
 func RenameModFilePath(hub *store.Hub, cfg *RootsConfig, guid, srcPath, srcRootPath, destPath string) error {
-	lib, err := hub.LibOf(srcRootPath)
+	lib, err := LibOfRootPath(hub, cfg, srcRootPath)
 	if err != nil {
 		return err
 	}
@@ -665,7 +694,7 @@ func ResolveConflict(hub *store.Hub, cfg *RootsConfig, planID, seq int64) (strin
 				continue
 			}
 			folder := FolderOfAuthor(authors[r.Guid])
-			mvLib, libErr := hub.LibOf(mv.RootPath)
+			mvLib, libErr := LibOfRootPath(hub, cfg, mv.RootPath)
 			if libErr != nil {
 				return "", "诊断 " + libErr.Error()
 			}
@@ -701,5 +730,6 @@ func ResolveConflict(hub *store.Hub, cfg *RootsConfig, planID, seq int64) (strin
 	if len(moves) == 0 {
 		detail = "已指定保留 " + filepath.Base(keep.SrcPath) + "——同 guid 没有其它待判旧副本（这一处冲突应已消失）"
 	}
+	fmt.Println("[整理] 冲突处理——保留 " + keep.SrcPath + " · " + detail + " · 冲突现状 " + itoaSmall(int(conflicts)))
 	return detail, ""
 }

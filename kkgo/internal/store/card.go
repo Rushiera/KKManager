@@ -113,6 +113,15 @@ func (d *DB) UpdateCardHead(filePath, cardType, dataVersion string, imageEnd int
 	return err
 }
 
+// SetCardImportFields 索引导入专用——卡类型 / 数据版本 / 角色名按索引原值写入（空串就是空串，不转 NULL）。
+// 与 UpdateCardHead / UpdateCardName 的分工：那两个按扫描语义把「空」当「未读」写 NULL；
+// 索引导入的取值来自索引文件，空值本身就是事实（对齐 C# UpsertCard 直接写 ""）。
+func (d *DB) SetCardImportFields(filePath, cardType, dataVersion, charaName string) error {
+	_, err := d.execer().Exec("UPDATE card SET card_type=?, data_version=?, chara_name=? WHERE file_path=?",
+		cardType, dataVersion, charaName, filePath)
+	return err
+}
+
 // UpdateCardRefsMeta 扫描「声明区」步——刷新引用计数与 UAR 块数。
 func (d *DB) UpdateCardRefsMeta(filePath string, modCount, uarBlocks int) error {
 	_, err := d.execer().Exec("UPDATE card SET mod_count=?, uar_blocks=? WHERE file_path=?",

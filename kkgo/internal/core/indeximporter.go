@@ -357,13 +357,8 @@ func importIndexRow(hub *store.Hub, modRoot, cardRoot *RootEntry, relBase string
 		if err != nil {
 			return err
 		}
-		if err = cs.UpdateCardHead(full, cardType, "", 0); err != nil {
+		if err = cs.SetCardImportFields(full, cardType, "", chara); err != nil {
 			return err
-		}
-		if chara != "" {
-			if err = cs.UpdateCardName(full, chara); err != nil {
-				return err
-			}
 		}
 		if err = cs.UpsertIndexMeta(meta); err != nil {
 			return err

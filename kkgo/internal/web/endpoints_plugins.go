@@ -12,10 +12,8 @@ import (
 	"kkgo/internal/store"
 )
 
-// handlePlugins 插件清单（与面板「插件清单」同源）。
+// handlePlugins 插件清单（插件库解析结果——插件行 + 非插件 dll + 顶层计数）。
 func (a *App) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	filter := r.URL.Query().Get("filter")
-	keyword := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -32,36 +30,88 @@ func (a *App) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	cfgByGuid := map[string][]store.PluginConfigRow{}
-	for _, c := range cfgs {
-		if c.Guid == "" {
-			continue
+	logSummary := core.ReadPluginLog(core.LogPathOf(cfg))
+	// cfg 按 GUID / 插件名建索引（首个命中优先）——插件行据此挂上「配置文件 / 配置项数」
+	cfgByGuid := map[string]*store.PluginConfigRow{}
+	cfgByName := map[string]*store.PluginConfigRow{}
+	for i := range cfgs {
+		c := &cfgs[i]
+		if c.Guid != "" {
+			if _, ok := cfgByGuid[strings.ToLower(c.Guid)]; !ok {
+				cfgByGuid[strings.ToLower(c.Guid)] = c
+			}
 		}
-		cfgByGuid[c.Guid] = append(cfgByGuid[c.Guid], c)
+		if c.PluginName != "" {
+			if _, ok := cfgByName[strings.ToLower(c.PluginName)]; !ok {
+				cfgByName[strings.ToLower(c.PluginName)] = c
+			}
+		}
 	}
-	_ = cfg
-	out := make([]map[string]interface{}, 0, len(rows))
+	items := make([]map[string]interface{}, 0, len(rows))
+	nonPlugins := make([]map[string]interface{}, 0, 4)
+	guidCount := map[string]int{}
+	withGuid := 0
+	noted := 0
 	for _, p := range rows {
 		note := core.LookupPluginNote(p.Guid, p.Name)
-		if note == "" {
-			note = core.LookupPluginNoteFile(p.FileName)
+		fileNote := core.LookupPluginNoteFile(p.FileName)
+		if note != "" || fileNote != "" {
+			noted++
 		}
-		list := cfgByGuid[p.Guid]
-		sectionCount, optionCount := int64(0), int64(0)
-		for _, c := range list {
-			sectionCount += c.SectionCount
-			optionCount += c.OptionCount
-		}
-		item := pluginRowJSON(p, note, sectionCount, optionCount, len(list) > 0)
-		if !pluginPassFilter(item, filter) {
+		if p.Guid == "" {
+			// 非插件 dll——一并列出（名称取程序集标题 + 中文说明 / 未解析原因），让「装了但不是插件」可见
+			nonPlugins = append(nonPlugins, map[string]interface{}{
+				"fileName": p.FileName, "filePath": p.FilePath,
+				"title": p.Title, "description": p.Description,
+				"company": p.Company, "fileVersion": p.FileVersion,
+				"size": p.Size, "mtime": p.Mtime,
+				"note": fileNote, "reason": p.Note,
+			})
 			continue
 		}
-		if keyword != "" && !strings.Contains(strings.ToLower(toString(item["name"])+toString(item["fileName"])+toString(item["guid"])+note), keyword) {
-			continue
+		withGuid++
+		guidCount[strings.ToLower(p.Guid)]++
+		var c *store.PluginConfigRow
+		if hit, ok := cfgByGuid[strings.ToLower(p.Guid)]; ok {
+			c = hit
+		} else if p.Name != "" {
+			if hit, ok := cfgByName[strings.ToLower(p.Name)]; ok {
+				c = hit
+			}
 		}
-		out = append(out, item)
+		item := map[string]interface{}{
+			"guid": p.Guid, "name": p.Name, "version": p.Version,
+			"fileName": p.FileName, "filePath": p.FilePath,
+			"processes": p.Processes, "dependencies": p.Dependencies, "isIpa": p.IsIpa,
+			"size": p.Size, "mtime": p.Mtime,
+			"title": p.Title, "description": p.Description, "company": p.Company,
+			"copyright": p.Copyright, "product": p.Product,
+			"fileVersion": p.FileVersion, "targetFramework": p.TargetFramework,
+			"note":    note,
+			"cfgFile": "", "cfgSections": int64(0), "cfgOptions": int64(0),
+			"logState": core.PluginLogStateOf(logSummary, p.Name),
+		}
+		if c != nil {
+			item["cfgFile"] = c.FileName
+			item["cfgSections"] = c.SectionCount
+			item["cfgOptions"] = c.OptionCount
+		}
+		items = append(items, item)
 	}
-	writeJSON(w, out)
+	dupGuids := 0
+	for _, n := range guidCount {
+		if n > 1 {
+			dupGuids++
+		}
+	}
+	writeJSON(w, map[string]interface{}{
+		"dllTotal": len(rows), "plugins": withGuid, "nonPlugin": len(rows) - withGuid,
+		"dupGuids": dupGuids, "noted": noted,
+		"noteTotal": core.PluginNotesCount(), "noteError": "",
+		"configs":        len(cfgs),
+		"items":          items,
+		"nonPluginItems": nonPlugins,
+	})
 }
 
 // pluginRowJSON 插件行 → 面板 JSON。
@@ -130,9 +180,9 @@ func (a *App) handlePluginsMatch(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-		out = append(out, map[string]interface{}{"key": key, "matches": hits, "found": len(hits) > 0})
+		out = append(out, map[string]interface{}{"key": key, "installed": len(hits) > 0, "hits": hits})
 	}
-	writeJSON(w, out)
+	writeJSON(w, map[string]interface{}{"items": out})
 }
 
 // handlePluginsLog 解析 BepInEx 日志（加载 / 进程过滤跳过 / 错误）。
@@ -143,15 +193,20 @@ func (a *App) handlePluginsLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer hub.Close()
-	path := core.LogPathOf(cfg)
-	summary := core.ReadPluginLog(path)
+	summary := core.ReadPluginLog(core.LogPathOf(cfg))
+	errs := append([]string{}, summary.Errors...)
+	skips := append([]string{}, summary.Skipped...)
 	writeJSON(w, map[string]interface{}{
-		"path":    path,
-		"exists":  summary.FileSize > 0,
-		"loaded":  len(summary.LoadedNames),
-		"skipped": len(summary.SkippedNames),
-		"errors":  summary.Errors,
-		"error":   summary.Error,
+		"filePath":   summary.FilePath,
+		"fileTime":   summary.FileTime,
+		"fileSize":   summary.FileSize,
+		"toLoad":     summary.ToLoad,
+		"loaded":     len(summary.Loaded),
+		"skipped":    len(summary.Skipped),
+		"errorLines": len(summary.Errors),
+		"error":      summary.Error,
+		"errors":     errs,
+		"skips":      skips,
 	})
 }
 

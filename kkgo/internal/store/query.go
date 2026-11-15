@@ -180,9 +180,12 @@ type ModFileRec struct {
 }
 
 // RefRow mod 文件副本行（对齐 C# Store.RefRow）。
+// RefRow 引用明细行（对齐 C# Store.RefRow）。
 type RefRow struct {
 	// Guid mod guid。
 	Guid string
+	// Property 部件属性（如 ChaFileClothes.ClothesTop）。
+	Property string
 	// Tier 级别。
 	Tier int
 	// RootPath 库根。
@@ -191,6 +194,12 @@ type RefRow struct {
 	FilePath string
 	// FileName 文件名。
 	FileName string
+	// RecName 卡内记录的名称。
+	RecName string
+	// RecAuthor 卡内记录的作者。
+	RecAuthor string
+	// RecWebsite 卡内记录的来源网址。
+	RecWebsite string
 }
 
 // CardRefRow 引用卡片轻量行（对齐 C# Store.CardRefRow——不含四色聚合）。

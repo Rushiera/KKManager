@@ -192,7 +192,7 @@ func (d *DB) QueryIdxRows(kind, work, author, keyword, series, vn, charaID strin
 		  AND (?='' OR series=?) AND (?='' OR vn_id=? OR vn_name=?) AND (?='' OR vndb_chara_id=?)
 		  AND (?='' OR chara LIKE ? OR file_path LIKE ? OR work LIKE ? OR author LIKE ? OR guid LIKE ?)
 		ORDER BY work, chara, file_path LIMIT ?`,
-		kind, kind, work, work, author, author, series, series, vn, vn, charaID, charaID,
+		kind, kind, work, work, author, author, series, series, vn, vn, vn, charaID, charaID,
 		keyword, like, like, like, like, like, limit)
 	if err != nil {
 		return nil, err

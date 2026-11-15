@@ -29,7 +29,7 @@ func sortNowStamp() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05.000")
 }
 
-// handleSortRoots 可整理的库根清单（只读根与离线根不进）。
+// handleSortRoots 可整理的库根清单（含只读 / 离线根——是否可整理由 canSort 表达）。
 func (a *App) handleSortRoots(w http.ResponseWriter, r *http.Request) {
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
@@ -37,17 +37,23 @@ func (a *App) handleSortRoots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer hub.Close()
-	_ = hub
-	out := make([]map[string]interface{}, 0, 8)
+	list := make([]core.RootEntry, 0, len(cfg.ModRoots))
 	for _, e := range cfg.ModRoots {
-		if e.ReadOnly || e.Offline {
+		if strings.TrimSpace(e.Path) == "" {
 			continue
 		}
+		list = append(list, e)
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].Tier < list[j].Tier })
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, e := range list {
 		out = append(out, map[string]interface{}{
-			"path": e.Path, "tier": e.Tier, "recurse": e.Recurse,
+			"path": e.Path, "tier": e.Tier, "tierName": core.TierName(e.Tier),
+			"readOnly": e.ReadOnly, "offline": e.Offline, "locked": e.Locked,
+			"canSort": !e.ReadOnly && !e.Offline,
 		})
 	}
-	writeJSON(w, out)
+	writeJSON(w, map[string]interface{}{"ok": true, "roots": out})
 }
 
 // sortJobJSON 任务状态 → JSON。
@@ -55,7 +61,8 @@ func sortJobJSON(job *core.SortJobState) map[string]interface{} {
 	errs := make([]string, 0, len(job.Errors))
 	errs = append(errs, job.Errors...)
 	return map[string]interface{}{
-		"running": job.Running, "phase": job.Phase, "message": job.Message,
+		"running": job.Running, "stopRequested": job.StopRequested,
+		"phase": job.Phase, "message": job.Message,
 		"total": job.Total, "done": job.Done, "moved": job.Moved,
 		"skipped": job.Skipped, "failed": job.Failed, "conflicts": job.Conflicts,
 		"current": job.Current, "startedAt": job.StartedAt, "finishedAt": job.FinishedAt,
@@ -87,38 +94,79 @@ func (a *App) handleSortPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer hub.Close()
+	view := map[string]interface{}{
+		"ok": false, "error": nil, "rechecked": false, "planId": int64(0),
+		"scope": nil, "createdAt": nil, "state": nil, "note": nil,
+		"itemCount": int64(0), "conflictCount": int64(0), "movedCount": int64(0),
+		"pendingCount": int64(0), "failedCount": int64(0), "skippedCount": int64(0),
+		"confirmed": false, "items": []map[string]interface{}{},
+	}
 	plan, err := hub.Core().LatestSortPlan()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	if plan == nil {
-		writeJSON(w, map[string]interface{}{"exists": false})
+		view["error"] = "还没有生成计划"
+		writeJSON(w, view)
 		return
 	}
-	conflicts, reErr := core.RecheckPlan(hub, plan.ID)
-	if reErr == nil {
-		plan.ConflictCount = conflicts
+	rechecked := false
+	if plan.State == "ready" {
+		conflicts, reErr := core.RecheckPlan(hub, plan.ID)
+		if reErr == nil {
+			_ = hub.Core().FinishSortPlan(plan.ID, plan.State, plan.ItemCount, conflicts, plan.Note)
+			if reread, rErr := hub.Core().SortPlanByID(plan.ID); rErr == nil && reread != nil {
+				plan = reread
+			}
+			rechecked = true
+		}
 	}
 	items, err := hub.Core().QuerySortPlanItems(plan.ID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	confirmed, _, _ := hub.Core().GetSetting("sort_confirm_plan")
 	rows := make([]map[string]interface{}, 0, len(items))
+	var moved, conflict, failed, skipped, pending int64
 	for _, it := range items {
 		rows = append(rows, map[string]interface{}{
 			"seq": it.Seq, "lib": it.Lib, "tier": it.Tier, "rootPath": it.RootPath,
 			"guid": it.Guid, "author": it.Author, "folder": it.Folder,
-			"srcPath": it.SrcPath, "destPath": it.DestPath, "size": it.Size,
-			"mtime": it.Mtime, "state": it.State, "note": it.Note,
+			"fileName": filepath.Base(it.SrcPath),
+			"srcPath":  it.SrcPath, "destPath": it.DestPath, "size": it.Size,
+			"state": it.State, "note": nilIfEmpty(it.Note),
 		})
+		switch it.State {
+		case core.SortStateMoved:
+			moved++
+		case core.SortStateConflict:
+			conflict++
+		case core.SortStateFailed:
+			failed++
+		case core.SortStateSkipped:
+			skipped++
+		default:
+			pending++
+		}
 	}
-	writeJSON(w, map[string]interface{}{
-		"exists": true, "id": plan.ID, "scope": plan.Scope, "createdAt": plan.CreatedAt,
-		"itemCount": plan.ItemCount, "conflictCount": plan.ConflictCount,
-		"state": plan.State, "note": plan.Note, "items": rows,
-	})
+	view["ok"] = true
+	view["rechecked"] = rechecked
+	view["planId"] = plan.ID
+	view["scope"] = nilIfEmpty(plan.Scope)
+	view["createdAt"] = nilIfEmpty(plan.CreatedAt)
+	view["state"] = nilIfEmpty(plan.State)
+	view["note"] = nilIfEmpty(plan.Note)
+	view["itemCount"] = plan.ItemCount
+	view["confirmed"] = confirmed == strconv.FormatInt(plan.ID, 10)
+	view["items"] = rows
+	view["movedCount"] = moved
+	view["conflictCount"] = conflict
+	view["failedCount"] = failed
+	view["skippedCount"] = skipped
+	view["pendingCount"] = pending
+	writeJSON(w, view)
 }
 
 // handleSortPlanStart 异步生成计划（body: {"roots":["..."]}；空 = 全部可整理库根）。

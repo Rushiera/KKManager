@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -289,6 +290,7 @@ func (h *Hub) EnsureDatabases(mods, cards []LibRoot) (int, error) {
 	if len(missing) == 0 {
 		return 0, nil
 	}
+	started := time.Now()
 	if !ReleaseTemplate(missing[0]) {
 		return 0, nil
 	}
@@ -303,7 +305,7 @@ func (h *Hub) EnsureDatabases(mods, cards []LibRoot) (int, error) {
 		}
 		built++
 	}
-	fmt.Println("[库数据] 预建库文件 " + itoaInt(built) + " 个")
+	fmt.Println("[库数据] 预建库文件 " + itoaInt(built) + " 个 · " + itoaInt(int(time.Since(started).Milliseconds())) + " ms")
 	return built, nil
 }
 

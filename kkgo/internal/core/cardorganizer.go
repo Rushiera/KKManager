@@ -639,7 +639,11 @@ func BuildCardPlan(srcDirs []string, destRoot string, rules []CardRule, log func
 			}
 			continue
 		}
-		sort.Slice(files, func(i, j int) bool { return strings.ToLower(files[i]) < strings.ToLower(files[j]) })
+		sort.Slice(files, func(i, j int) bool {
+			// 对齐 C# StringComparer.OrdinalIgnoreCase：先做大写折叠再按码元序比。
+			// 不能用 ToLower——'['（0x5B）会落到 'k'（0x6B）之前，与 C# 的 'K'（0x4B）顺序不一致。
+			return strings.ToUpper(files[i]) < strings.ToUpper(files[j])
+		})
 		for _, p := range files {
 			item := DescribeCardFile(p, src, rootName, rules)
 			if item == nil {

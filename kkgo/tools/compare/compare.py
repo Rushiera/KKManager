@@ -33,8 +33,17 @@ import subprocess
 import sys
 import zipfile
 
+# 输出统一 UTF-8：Windows 中文控制台默认 cp936，回执端按 UTF-8 解码会成乱码（只影响本进程 stdout，
+# 不影响两侧子进程的真实编码解码——那两个在 projection 里各自显式处理）。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
 GO = r"D:\Mau\WorkSpace\KKManager\kkgo\kkgo.exe"
-CS = r"D:\Mau\WorkSpace\KKManager\dist\KMR_A.exe"
+# 对拍基准 = 当前源码版本的调试产物（0.21.9 发布到 KMR_B 槽；A 槽留 0.21.6 回退）。
+# 0.21.6 的 exe 缺 refs-read / card-sort / index-import / idx / sort / u3d-db 等命令——新命令对拍必须用 B 槽。
+CS = r"D:\Mau\WorkSpace\KKManager\dist\KMR_B.exe"
 SAMPLE_CARD = r"D:\SteamLibrary\Koikatu\UserData\chara\female\100065348_p6.png"
 SAMPLE_SCENE = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene\2021_0403_1423_03_837.png"
 SAMPLE_MOD = r"D:\SteamLibrary\Koikatu\Mods\Cissoia.zipmod"
@@ -126,7 +135,25 @@ def cmd_all():
         bad += 1
     if cmd_scanplugins() != 0:
         bad += 1
-    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 12, bad))
+    if cmd_query() != 0:
+        bad += 1
+    if cmd_dup_new() != 0:
+        bad += 1
+    if cmd_refs() != 0:
+        bad += 1
+    if cmd_index() != 0:
+        bad += 1
+    if cmd_sort() != 0:
+        bad += 1
+    if cmd_cardsort() != 0:
+        bad += 1
+    if cmd_cardsort2() != 0:
+        bad += 1
+    if cmd_cardedit() != 0:
+        bad += 1
+    if cmd_u3d() != 0:
+        bad += 1
+    print("合计 %d 项 · 不一致 %d 项" % (len(CASES) + 22, bad))
     return 0 if bad == 0 else 1
 
 
@@ -758,6 +785,889 @@ def cmd_cardanalysis(sample):
     return 0 if ok else 1
 
 
+def _project_text(text):
+    """把已解码文本按 ASCII 投影（非 ASCII 折 ?）——与 projection 同一口径，供文本级归一后使用。"""
+    return ["".join(ch if ord(ch) < 128 else "?" for ch in ln) for ln in text.splitlines()]
+
+
+def _norm_db_line(raw, enc):
+    """两侧输出归一：库路径行折成 <DB>，非 ASCII 折成 ?（编码伪差异剔除）。"""
+    out = []
+    for ln in raw.decode(enc, "replace").splitlines():
+        if ln.startswith("库:"):
+            ln = "库: <DB>"
+        out.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+    return out
+
+
+def _both(cmd, args, cwd=None):
+    """两侧跑同命令同参数，返回 (go 行, go 退出码, cs 行, cs 退出码)。"""
+    env = dict(os.environ)
+    p_go = subprocess.run([GO, cmd] + args, capture_output=True, cwd=cwd, env=env)
+    p_cs = subprocess.run([CS, cmd] + args, capture_output=True, cwd=cwd, env=env)
+    return (projection(p_go.stdout, "utf-8"), p_go.returncode,
+            projection(p_cs.stdout, "gbk"), p_cs.returncode)
+
+
+def _report(label, a, rgo, b, rcs):
+    """比两组投影行 + 退出码；打印结论并返回是否一致（不一致列出前 6 处）。"""
+    diff = [i for i in range(max(len(a), len(b)))
+            if (a[i] if i < len(a) else "<缺失>") != (b[i] if i < len(b) else "<缺失>")]
+    ok = not diff and len(a) == len(b) and rgo == rcs
+    print("  %-40s exit %d/%d 行 %d/%d 差异 %d → %s"
+          % (label, rgo, rcs, len(a), len(b), len(diff), "一致" if ok else "不一致"))
+    for i in diff[:6]:
+        print("      [%d] Go %r" % (i, a[i] if i < len(a) else "<缺失>"))
+        print("          C# %r" % (b[i] if i < len(b) else "<缺失>"))
+    return ok
+
+
+# 读面四族的参数面（真库只读）：排序键全走一遍 + 关键词过滤 + 含已搬走清单。
+QUERY_CASES = [
+    ("authors", []),
+    ("cards", ["--limit", "5"]),
+    ("cards", ["--order", "chara", "--limit", "8"]),
+    ("cards", ["--order", "miss", "--limit", "8"]),
+    ("cards", ["--order", "size", "--desc", "--limit", "8"]),
+    ("cards", ["--order", "file", "--limit", "8"]),
+    ("cards", ["--order", "mtime", "--q", "1", "--limit", "8"]),
+    ("todos", []),
+    ("noncards", []),
+    ("noncards", ["--moved"]),
+]
+
+
+def _norm_noncards_order(lines):
+    """非卡清单的并列行归一：`  #<id> ...` 行按 id 升序重排。
+
+    理由：C# 侧 SQL 是 `ORDER BY size DESC`（无兜底键），同体积行的相对次序由 SQLite
+    引擎排序实现决定——两套 provider（C# SQLitePCLRaw / Go modernc）对同值行不保证同序。
+    语义判据是「按体积降序」，并列次序无定义，故归一后再逐字比（行内容本身仍逐字比）。"""
+    head = [ln for ln in lines if not ln.startswith("  #")]
+    body = [ln for ln in lines if ln.startswith("  #")]
+    body.sort(key=lambda s: int(re.match(r"  #(\d+)", s).group(1)))
+    return head + body
+
+
+def cmd_query():
+    """读面四族对拍（真库只读）：authors / cards（全排序键 + 关键词）/ todos / noncards。
+    判据：输出逐行 ASCII 投影一致 + 退出码相等（非卡清单的并列行按 id 归一，见 _norm_noncards_order）。"""
+    print("—— 读面四族对拍（真库只读：authors / cards / todos / noncards）")
+    ok = True
+    for cmd, args in QUERY_CASES:
+        a, rgo, b, rcs = _both(cmd, args + ["--db", REAL_DB])
+        if cmd == "noncards":
+            a, b = _norm_noncards_order(a), _norm_noncards_order(b)
+        if not _report(cmd + " " + " ".join(args), a, rgo, b, rcs):
+            ok = False
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _read_table_rows(dbdir, sql):
+    """读主库 + 全部库文件的某张表（跨文件合并排序；忽略 id 与时间戳由调用方归一）。"""
+    rows = []
+    targets = [os.path.join(dbdir, "kkmanager.db")] + sorted(glob.glob(os.path.join(dbdir, "lib_*.db")))
+    for p in targets:
+        try:
+            c = ro_connect(p)
+            rows.extend(c.execute(sql).fetchall())
+            c.close()
+        except sqlite3.Error:
+            continue
+    return rows
+
+
+def cmd_dup_new():
+    """dup 对拍：临时库 + scan 三根样本（main + cache 同 guid 跨根副本）。
+    两轮：首跑（算 MD5 落档案）/ 二跑（命中档案，新增 0）。
+    判据：输出逐行（库路径归一）+ mod_hash 表行（路径折相对、MD5 逐字）+ 退出码。"""
+    print("—— dup 专项（临时库 + 同 guid 跨根副本；首跑算 MD5 / 二跑命中档案）")
+    tmp = os.path.join(OUT_DIR, "_dup_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_scan_sample(tmp)
+    if not sample:
+        return 3
+    dirs = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        _trim_roots_for_scan(db, sample)
+        dirs[tag] = db
+    ok = True
+    for label in ("首跑", "二跑"):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            if label == "首跑":
+                subprocess.run([exe, "scan-mods", "--db", dirs[tag]], capture_output=True)
+            p = subprocess.run([exe, "dup", "--db", dirs[tag]], capture_output=True)
+            outs[tag] = (p.returncode, _norm_db_line(p.stdout, enc))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+        rows = {}
+        for tag in ("cs", "go"):
+            got = _read_table_rows(os.path.join(tmp, tag),
+                                   "select file_path, md5 from mod_hash order by file_path")
+            rows[tag] = [(r[0].replace(os.path.join(tmp, tag) + os.sep, ""), r[1]) for r in got]
+        same = rows["cs"] == rows["go"]
+        print("  %-40s mod_hash 行 %d/%d → %s"
+              % (label + " 档案", len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(rows["cs"]), len(rows["go"]))):
+                va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+                vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def cmd_refs():
+    """refs-read 对拍：临时库 + 卡片样本（扫描时关掉 refs 步 → 引用缺失）→ 两侧各补读。
+    三轮：① 全量补读 ② 再跑全量（幂等）③ --only-pending（无待补）。
+    判据：输出逐行（库路径归一）+ card_mod 表行（card_id / mod_guid）+ 退出码。"""
+    print("—— refs-read 专项（临时库 + 卡片样本；补读 / 幂等 / --only-pending）")
+    tmp = os.path.join(OUT_DIR, "_refs_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sample = _prepare_card_sample(tmp)
+    if not sample:
+        return 3
+    dirs = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        _trim_roots_for_cards(db, sample["cards"], 4)
+        subprocess.run([exe, "scan-plan", "set", "row,head,name,timeline", "", "--db", db],
+                       capture_output=True)
+        p = subprocess.run([exe, "scan-cards", "--db", db], capture_output=True)
+        if p.returncode != 0:
+            print("  %s 扫描准备失败：exit %d" % (tag, p.returncode))
+            return 3
+        dirs[tag] = db
+    ok = True
+    rounds = ("补读", "幂等复跑", "--only-pending")
+    for label in rounds:
+        args = ["--root", sample["cards"], "--db"]
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            extra = ["--only-pending"] if label == "--only-pending" else []
+            p = subprocess.run([exe, "refs-read"] + args + [dirs[tag]] + extra, capture_output=True)
+            outs[tag] = (p.returncode, _norm_db_line(p.stdout, enc))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+        rows = {}
+        for tag in ("cs", "go"):
+            rows[tag] = _read_table_rows(os.path.join(tmp, tag),
+                                         "select card_id, mod_guid from card_mod order by card_id, mod_guid")
+        same = rows["cs"] == rows["go"]
+        print("  %-40s card_mod 行 %d/%d → %s"
+              % (label + " 表", len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(rows["cs"]), len(rows["go"]))):
+                va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+                vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _table_rows_equal(dir_cs, dir_go, sql, label, ok):
+    """比两侧主库 + 全部库文件的某条查询结果（跨文件合并）——返回 (ok, 两侧行数)。"""
+    rows = {}
+    for tag, d in (("cs", dir_cs), ("go", dir_go)):
+        rows[tag] = _read_table_rows(d, sql)
+    same = rows["cs"] == rows["go"]
+    print("  %-40s 行 %d/%d → %s" % (label, len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(rows["cs"]), len(rows["go"]))):
+            va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+            vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+    return ok
+
+
+IDX_CASES = [
+    ["--limit", "10"],
+    ["--kind", "卡", "--limit", "10"],
+    ["--q", "1", "--limit", "10"],
+    ["--wide", "--limit", "5"],
+    ["--limit", "10", "--root", "KKCROOT"],
+]
+
+
+def cmd_index():
+    """index-import / idx 对拍：两侧临时库（模板建库 + roots-add kkc 库根）→ 各跑一次导入。
+    判据：导入输出逐行（目录折 <IDX>）+ card / card_mod / index_source 三表行 + idx 五组查询逐行。"""
+    print("—— index-import / idx 专项（两侧临时库 + 真 kkc 索引只读导入）")
+    kkc_root = os.path.join(os.path.dirname(REAL_DB), "kkc")
+    index_dir = os.path.join(kkc_root, "整理", "index")
+    if not os.path.isdir(index_dir):
+        print("  kkc 索引目录不存在：%s" % index_dir)
+        return 3
+    tmp = os.path.join(OUT_DIR, "_idx_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    dirs = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        p = subprocess.run([exe, "roots-add", "cards", "2", kkc_root, "含子目录", "--db", db],
+                           capture_output=True)
+        if p.returncode != 0:
+            print("  %s roots-add 失败：exit %d" % (tag, p.returncode))
+            return 3
+        dirs[tag] = db
+    ok = True
+    # 导入前的库根状态（roots-add 之后）——两侧必须同源：库号分配顺序 / 卡片分片数都从这里派生
+    p_go = subprocess.run([GO, "roots-list", "--db", dirs["go"]], capture_output=True)
+    p_cs = subprocess.run([CS, "roots-list", "--db", dirs["cs"]], capture_output=True)
+    a = [ln.replace(dirs["go"], "<DB>") for ln in projection(p_go.stdout, "utf-8")]
+    b = [ln.replace(dirs["cs"], "<DB>") for ln in projection(p_cs.stdout, "gbk")]
+    if not _report("roots-list（导入前）", a, p_go.returncode, b, p_cs.returncode):
+        ok = False
+    outs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        p = subprocess.run([exe, "index-import", "--root", kkc_root, "--index", index_dir,
+                            "--db", dirs[tag]], capture_output=True)
+        raw = p.stdout.decode(enc, "replace")
+        # 预建库文件的耗时是真实时钟差（每次不同）——归一后再投影（中文归一必须在投影前做）
+        raw = re.sub(r"(预建库文件 \d+ 个) · \d+ ms", r"\1 · <MS>", raw)
+        raw = raw.replace(index_dir, "<IDX>")
+        lines = _project_text(raw)
+        outs[tag] = (p.returncode, lines)
+        if p.returncode != 0:
+            print("  %s stderr：%s" % (tag, p.stderr.decode(enc, "replace")[:300]))
+    if not _report("index-import", outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+        ok = False
+    ok = _table_rows_equal(os.path.join(tmp, "cs"), os.path.join(tmp, "go"),
+                           "select file_path, card_type, chara_name from card order by file_path",
+                           "card 表", ok)
+    ok = _table_rows_equal(os.path.join(tmp, "cs"), os.path.join(tmp, "go"),
+                           "select card_id, mod_guid from card_mod order by card_id, mod_guid",
+                           "card_mod 表", ok)
+    ok = _table_rows_equal(os.path.join(tmp, "cs"), os.path.join(tmp, "go"),
+                           "select root_path, index_dir, format, rows, cards, mods, others, digest from index_source",
+                           "index_source 表", ok)
+    for args in IDX_CASES:
+        args = [kkc_root if a == "KKCROOT" else a for a in args]
+        p_go = subprocess.run([GO, "idx"] + args + ["--db", dirs["go"]], capture_output=True)
+        p_cs = subprocess.run([CS, "idx"] + args + ["--db", dirs["cs"]], capture_output=True)
+        a = [ln.replace(dirs["go"], "<DB>") for ln in projection(p_go.stdout, "utf-8")]
+        b = [ln.replace(dirs["cs"], "<DB>") for ln in projection(p_cs.stdout, "gbk")]
+        if not _report("idx " + " ".join(args), a, p_go.returncode, b, p_cs.returncode):
+            ok = False
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _make_sort_sample(tmp):
+    """造一份「按作者整理」样本：main 根（a + b + sub/a，sub/a 与 a 同 guid 同文件名 → 目标撞车）+ cache 根（a 的跨根副本）。"""
+    dirs = {"main": os.path.join(tmp, "mods_main"), "cache": os.path.join(tmp, "mods_cache")}
+    for d in dirs.values():
+        os.makedirs(d)
+    cands = []
+    for name in os.listdir(MOD_LIB_SRC):
+        p = os.path.join(MOD_LIB_SRC, name)
+        if os.path.isfile(p) and os.path.getsize(p) < 4 * 1024 * 1024:
+            cands.append((os.path.getsize(p), name))
+    cands.sort()
+    if len(cands) < 2:
+        return None
+    a, b = cands[0][1], cands[1][1]
+    sub = os.path.join(dirs["main"], "sub")
+    os.makedirs(sub)
+    shutil.copy2(os.path.join(MOD_LIB_SRC, a), os.path.join(dirs["main"], a))
+    shutil.copy2(os.path.join(MOD_LIB_SRC, b), os.path.join(dirs["main"], b))
+    shutil.copy2(os.path.join(MOD_LIB_SRC, a), os.path.join(sub, a))
+    shutil.copy2(os.path.join(MOD_LIB_SRC, a), os.path.join(dirs["cache"], a))
+    return {"main": dirs["main"], "cache": dirs["cache"], "dupName": a}
+
+
+def _trim_roots_sort(db, main, cache):
+    """sort 样本的库根裁剪：main 锁定 tier1 + cache tier2（不预建卡片分片、不放别的根）。"""
+    cfg = {
+        "gameRoot": "",
+        "modRoots": [
+            {"tier": 1, "path": main, "recurse": True, "readOnly": False, "locked": True,
+             "offline": False, "note": "", "replacedFrom": ""},
+            {"tier": 2, "path": cache, "recurse": True, "readOnly": False, "locked": False,
+             "offline": False, "note": "", "replacedFrom": ""},
+        ],
+        "cardRoots": [],
+        "pluginRoots": [],
+        "seeded": True,
+    }
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO setting(key,value) VALUES('roots',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(cfg, ensure_ascii=False),))
+    con.commit()
+    con.close()
+
+
+RE_TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}")
+
+
+def _norm_sort_lines(raw, enc, sample):
+    """sort 输出归一：样本根折 <MAIN>/<CACHE>、时间戳折 <TS>、非 ASCII 折 ?。"""
+    lines = []
+    for ln in raw.decode(enc, "replace").splitlines():
+        ln = ln.replace(sample["main"], "<MAIN>").replace(sample["cache"], "<CACHE>")
+        ln = RE_TS.sub("<TS>", ln)
+        lines.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+    return lines
+
+
+def _tree_snapshot(base):
+    """目录树快照（相对路径 + 字节数，排序）——搬运类命令的终态判据。
+    库文件（*.db / 边车）不比字节：SQLite 页面分配属实现细节，数据面另由表行比较覆盖。"""
+    out = []
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            if name.endswith(".db") or name.endswith(".db-wal") or name.endswith(".db-shm"):
+                continue
+            p = os.path.join(root, name)
+            out.append((os.path.relpath(p, base).replace("\\", "/"), os.path.getsize(p)))
+    out.sort()
+    return out
+
+
+def cmd_sort():
+    """sort 专项（按作者整理全链）：两侧各造同一形状样本 → plan / show / conflict / keep / show / exec。
+    判据：每步输出逐行（样本根与时间戳归一）+ mod_sort_plan_item / mod_old / mod_file 表行 + 终态文件树。"""
+    print("—— sort 专项（按作者整理全链：plan / show / conflict / keep / exec）")
+    tmp = os.path.join(OUT_DIR, "_sort_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sides = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        sample = _make_sort_sample(d)
+        if sample is None:
+            print("  真实 mod 库可用样本不足（<2 个小 zipmod）")
+            return 3
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        _trim_roots_sort(db, sample["main"], sample["cache"])
+        p = subprocess.run([exe, "scan-mods", "--db", db], capture_output=True)
+        if p.returncode != 0:
+            print("  %s scan-mods 失败：exit %d" % (tag, p.returncode))
+            return 3
+        sample["db"] = db
+        sides[tag] = sample
+    ok = True
+
+    def step(label, args, normalize=True):
+        nonlocal ok
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            p = subprocess.run([exe, "sort"] + args + ["--db", sides[tag]["db"]], capture_output=True)
+            lines = (_norm_sort_lines(p.stdout, enc, sides[tag]) if normalize
+                     else projection(p.stdout, enc))
+            outs[tag] = (p.returncode, lines)
+            if p.returncode != 0 and p.stderr.strip():
+                print("      %s stderr：%s" % (tag, _safe(p.stderr.decode(enc, "replace"))[:300]))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+        return outs["go"][1]
+
+    step("plan", ["plan"])
+    show_lines = step("show（冲突未解）", ["show"])
+    seqs = [int(m.group(1)) for ln in show_lines for m in [re.search(r"seq (\d+)", ln)] if m]
+    if not seqs:
+        print("  样本没有造出冲突——后续 conflict / keep 步跳过（对照面变窄）")
+        ok = False
+    else:
+        seq = seqs[0]
+        step("conflict seq %d" % seq, ["conflict", str(seq)])
+        step("keep seq %d" % seq, ["keep", str(seq)])
+        step("show（冲突已解）", ["show"])
+    step("exec --yes", ["exec", "--yes"])
+    for table, sql in (
+        ("mod_sort_plan_item", "select seq, src_path, dest_path, author, folder, state, note from mod_sort_plan_item order by seq"),
+        ("mod_old", "select old_path, old_name, new_name from mod_old order by old_path"),
+        ("mod_file", "select file_path, guid, tier, file_name from mod_file order by file_path"),
+    ):
+        rows = {}
+        for tag in ("cs", "go"):
+            got = _read_table_rows(os.path.join(tmp, tag), sql)
+            rows[tag] = [tuple((str(v).replace(sides[tag]["main"], "<MAIN>").replace(sides[tag]["cache"], "<CACHE>")
+                                if v is not None else None) for v in r) for r in got]
+        same = rows["cs"] == rows["go"]
+        print("  %-40s 行 %d/%d → %s" % (table, len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(rows["cs"]), len(rows["go"]))):
+                va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+                vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+    tree = {tag: _tree_snapshot(os.path.join(tmp, tag)) for tag in ("cs", "go")}
+    same = tree["cs"] == tree["go"]
+    print("  %-40s 文件 %d/%d → %s" % ("终态文件树", len(tree["cs"]), len(tree["go"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(tree["cs"]), len(tree["go"]))):
+            va = tree["cs"][i] if i < len(tree["cs"]) else "<缺失>"
+            vb = tree["go"][i] if i < len(tree["go"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _make_cardsort_sample(tmp):
+    """card-sort 样本：源目录（人物卡 / 服装卡 / 场景卡各 1 + 1 个 zipmod + 1 个文本）+ 整理根。"""
+    src = os.path.join(tmp, "src")
+    dest = os.path.join(tmp, "dest")
+    os.makedirs(src)
+    os.makedirs(dest)
+    picked = []
+    for sub, n in ((FEMALE_DIR, 1), (COORD_DIR, 1), (SCENE_DIR, 1)):
+        for name in _pick_small_cards(sub, n):
+            shutil.copy2(os.path.join(sub, name), os.path.join(src, name))
+            picked.append(name)
+    if not picked:
+        return None
+    cands = []
+    for name in os.listdir(MOD_LIB_SRC):
+        p = os.path.join(MOD_LIB_SRC, name)
+        if os.path.isfile(p) and os.path.getsize(p) < 4 * 1024 * 1024:
+            cands.append((os.path.getsize(p), name))
+    cands.sort()
+    if not cands:
+        return None
+    shutil.copy2(os.path.join(MOD_LIB_SRC, cands[0][1]), os.path.join(src, cands[0][1]))
+    with open(os.path.join(src, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("not a card or mod\n")
+    return {"src": src, "dest": dest, "cards": picked, "mod": cands[0][1]}
+
+
+def _norm_cs_lines(raw, enc, sample):
+    """card-sort 输出归一：源 / 整理根 / 计划文件路径折 <SRC>/<DEST>/<PLAN>，时间戳折 <TS>。"""
+    lines = []
+    for ln in raw.decode(enc, "replace").splitlines():
+        ln = ln.replace(sample["src"], "<SRC>").replace(sample["dest"], "<DEST>")
+        ln = ln.replace(sample["plan"], "<PLAN>").replace(sample["rules"], "<RULES>")
+        ln = ln.replace(sample["db"], "<DB>").replace(sample["refs"], "<REFS>")
+        ln = ln.replace(os.path.dirname(sample["db"]), "<DBDIR>")
+        ln = re.sub(r"(预建库文件 \d+ 个) · \d+ ms", r"\1 · <MS>", ln)
+        ln = RE_TS.sub("<TS>", ln)
+        lines.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+    return lines
+
+
+def cmd_cardsort():
+    """card-sort 专项（整理链核心）：两侧各造同一形状样本 → rules 列表 / 导出 / plan / show / exec /
+    moves / rollback / refs / delete / delete-list。
+    判据：每步输出逐行（路径与时间戳归一）+ card / card_rule / card_move / card_delete 表行 + 文件树。"""
+    print("—— card-sort 专项（整理链核心：rules / plan / show / exec / moves / rollback / refs / delete）")
+    tmp = os.path.join(OUT_DIR, "_cardsort_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sides = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        sample = _make_cardsort_sample(d)
+        if sample is None:
+            print("  卡片 / mod 样本不足")
+            return 3
+        sample["plan"] = os.path.join(d, "plan.tsv")
+        sample["rules"] = os.path.join(d, "rules.tsv")
+        sample["refs"] = os.path.join(d, "refs.tsv")
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        sample["db"] = db
+        sides[tag] = sample
+    ok = True
+
+    def run(tag, args):
+        """按侧替换路径占位后跑一条 card-sort 子命令，返回 (退出码, 归一后行, stderr)。"""
+        s = sides[tag]
+        exe, enc = (CS, "gbk") if tag == "cs" else (GO, "utf-8")
+        real = [a.replace("<SRC>", s["src"]).replace("<DEST>", s["dest"])
+                 .replace("<PLAN>", s["plan"]).replace("<RULES>", s["rules"])
+                 .replace("<REFS>", s["refs"]) for a in args]
+        p = subprocess.run([exe, "card-sort"] + real + ["--db", s["db"]], capture_output=True)
+        return p.returncode, _norm_cs_lines(p.stdout, enc, s), p.stderr.decode(enc, "replace")
+
+    def step(label, args):
+        nonlocal ok
+        outs = {}
+        for tag in ("cs", "go"):
+            rc, lines, err = run(tag, args)
+            outs[tag] = (rc, lines)
+            if rc != 0 and err.strip():
+                print("      %s stderr：%s" % (tag, _safe(err)[:300]))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+        return outs["go"][1]
+
+    def file_equal(label, key):
+        """比两侧各自导出的同名产物（规则 / 引用表 / 计划 TSV）——按文本行比。"""
+        nonlocal ok
+        texts = {}
+        for tag in ("cs", "go"):
+            try:
+                with open(sides[tag][key], "r", encoding="utf-8-sig") as f:
+                    texts[tag] = [ln.replace(sides[tag]["src"], "<SRC>").replace(sides[tag]["dest"], "<DEST>")
+                                  for ln in f.read().splitlines()]
+            except OSError as exc:
+                texts[tag] = ["<读不到> %s" % exc]
+        same = texts["cs"] == texts["go"]
+        print("  %-40s 行 %d/%d → %s" % (label, len(texts["cs"]), len(texts["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(texts["cs"]), len(texts["go"]))):
+                va = texts["cs"][i] if i < len(texts["cs"]) else "<缺失>"
+                vb = texts["go"][i] if i < len(texts["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+
+    # 规则库先播种（两侧同一份规则文件）：导入 → 列表 → 导出 → 比导出物
+    rule_text = "kw\t测试作品\t测试作品\tmanual\t0\t0\n"
+    for tag in ("cs", "go"):
+        with open(sides[tag]["rules"], "w", encoding="utf-8") as f:
+            f.write(rule_text)
+    step("rules --import", ["rules", "--import", "<RULES>"])
+    step("rules（导入后列表）", ["rules"])
+    step("rules --write（导出）", ["rules", "--write", "<RULES>"])
+    file_equal("规则 TSV", "rules")
+    step("plan", ["plan", "<SRC>", "--dest", "<DEST>", "--out", "<PLAN>"])
+    file_equal("计划 TSV", "plan")
+    step("show", ["show", "--out", "<PLAN>"])
+    step("exec --yes", ["exec", "--out", "<PLAN>", "--yes", "--root", "<DEST>"])
+    step("moves", ["moves", "--all"])
+    step("refs", ["refs", "--root", "<DEST>", "--out", "<REFS>"])
+    file_equal("引用表 TSV", "refs")
+    step("rollback --yes", ["rollback", "--out", "<PLAN>", "--yes", "--root", "<DEST>"])
+    step("moves（回滚后）", ["moves", "--all"])
+    step("delete", ["delete", os.path.join("<DEST>", "05-其它", "notes.txt"), "--root", "<DEST>", "--note", "对拍样本"])
+    step("delete-list", ["delete-list"])
+    for table, sql in (
+        ("card", "select file_path, card_type, chara_name from card order by file_path"),
+        ("card_rule", "select kind, match, value, origin, enabled from card_rule order by kind, match"),
+        ("card_move", "select from_path, to_path, work, card_type, state, consumed from card_move order by from_path"),
+        ("card_delete", "select from_path, to_path, size, state, note from card_delete order by from_path"),
+    ):
+        rows = {}
+        for tag in ("cs", "go"):
+            got = _read_table_rows(os.path.join(tmp, tag), sql)
+            rows[tag] = [tuple((str(v).replace(sides[tag]["src"], "<SRC>").replace(sides[tag]["dest"], "<DEST>")
+                                if v is not None else None) for v in r) for r in got]
+        same = rows["cs"] == rows["go"]
+        print("  %-40s 行 %d/%d → %s" % (table, len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(rows["cs"]), len(rows["go"]))):
+                va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+                vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+    tree = {}
+    for tag in ("cs", "go"):
+        tree[tag] = _tree_snapshot(sides[tag]["src"]) + [("dest/" + rel, size) for rel, size in _tree_snapshot(sides[tag]["dest"])]
+    same = tree["cs"] == tree["go"]
+    print("  %-40s 条目 %d/%d → %s" % ("终态文件树（src+dest）", len(tree["cs"]), len(tree["go"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(tree["cs"]), len(tree["go"]))):
+            va = tree["cs"][i] if i < len(tree["cs"]) else "<缺失>"
+            vb = tree["go"][i] if i < len(tree["go"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _first_diff(a, b):
+    """两份文件的首个差异偏移（-1 = 相同或长度不同先按长度判）。"""
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        off = 0
+        while True:
+            ba = fa.read(1 << 16)
+            bb = fb.read(1 << 16)
+            if ba != bb:
+                for i in range(min(len(ba), len(bb))):
+                    if ba[i] != bb[i]:
+                        return off + i
+                return off + min(len(ba), len(bb))
+            if not ba:
+                return -1
+            off += len(ba)
+
+
+def cmd_cardedit():
+    """card-edit 对拍（最小改动写面）：两侧各一份卡片副本 → 同样字段编辑两轮 → 比输出 + 编辑后文件哈希 + 留档。
+    判据：输出逐行（路径 / 时间戳归一）+ 编辑后文件 SHA256 相同（同输入同算法应逐字节相同）+ 归档件数一致。"""
+    print("—— card-edit 专项（最小改动写面：字段编辑两轮 / 文件字节 / 留档）")
+    tmp = os.path.join(OUT_DIR, "_cardedit_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sides = {}
+    for tag in ("cs", "go"):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        card = os.path.join(d, "card.png")
+        shutil.copy2(SAMPLE_CARD, card)
+        arch = os.path.join(d, "archive")
+        os.makedirs(arch)
+        sides[tag] = {"dir": d, "card": card, "arch": arch}
+    ok = True
+
+    def norm(raw, enc, s):
+        lines = []
+        for ln in raw.decode(enc, "replace").splitlines():
+            ln = ln.replace(s["card"], "<CARD>").replace(s["arch"], "<ARCH>")
+            ln = RE_TS.sub("<TS>", ln)
+            ln = re.sub(r"\d{8}_\d{6}_\d{3}", "<STAMP>", ln)
+            lines.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+        return lines
+
+    rounds = [
+        ["--last", "测试姓", "--first", "测试名", "--nick", "对拍一", "--personality", "5",
+         "--weak-point", "1", "--denial", "kiss=no", "--denial", "aibu=yes"],
+        ["--last", "二次", "--first", "改名", "--nick", "对拍二", "--personality", "31",
+         "--weak-point", "3", "--denial", "kiss=yes", "--denial", "anal=no"],
+    ]
+    for idx, args in enumerate(rounds, 1):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            s = sides[tag]
+            p = subprocess.run([exe, "card-edit", s["card"]] + args + ["--archive", s["arch"]],
+                               capture_output=True)
+            outs[tag] = (p.returncode, norm(p.stdout, enc, s), p.stderr.decode(enc, "replace"))
+            if p.returncode != 0 and p.stderr.strip():
+                print("      %s stderr：%s" % (tag, _safe(p.stderr.decode(enc, "replace"))[:300]))
+        if not _report("第 %d 轮编辑" % idx, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+        ha, hb = _sha256(sides["cs"]["card"]), _sha256(sides["go"]["card"])
+        same = ha == hb
+        print("  %-40s %s / %s → %s" % ("第 %d 轮编辑后文件 SHA256" % idx, ha[:16], hb[:16],
+                                        "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            print("      首个差异偏移 %d（C# vs Go）" % _first_diff(sides["cs"]["card"], sides["go"]["card"]))
+    for tag in ("cs", "go"):
+        s = sides[tag]
+        files = sorted(os.listdir(s["arch"]))
+        s["archFiles"] = [(re.sub(r"^\d{8}_\d{6}_\d{3}_", "<STAMP>_", name), _sha256(os.path.join(s["arch"], name)))
+                          for name in files]
+    same = sides["cs"]["archFiles"] == sides["go"]["archFiles"]
+    print("  %-40s 件 %d/%d → %s" % ("留档件（名归一 + 内容哈希）", len(sides["cs"]["archFiles"]),
+                                    len(sides["go"]["archFiles"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(sides["cs"]["archFiles"]), len(sides["go"]["archFiles"]))):
+            va = sides["cs"]["archFiles"][i] if i < len(sides["cs"]["archFiles"]) else "<缺失>"
+            vb = sides["go"]["archFiles"][i] if i < len(sides["go"]["archFiles"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+U3D_SAMPLE = r"D:\SteamLibrary\Koikatu\Mods\ForCharactersLoading\Augh\[Augh] Very Slight Anime Shadows v1.0.0.zipmod"
+U3D_ENTRY = "abdata/chara/Augh/very_slight_anime.unity3d"
+
+
+def cmd_u3d():
+    """u3d / u3d-db 对拍：文件级列表（含 --tex 导出）+ 库级落档（首建 / 命中已有档案）。
+    判据：输出逐行（路径 / 时间戳归一）+ 导出 PNG 的尺寸与张数 + mod_u3d 表行（贴图清单逐字）。"""
+    print("—— u3d 专项（文件级列表 + 库级落档：首建 / 命中）")
+    if not os.path.exists(U3D_SAMPLE):
+        print("  样本不存在：%s" % U3D_SAMPLE)
+        return 3
+    tmp = os.path.join(OUT_DIR, "_u3d_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    ok = True
+
+    def norm(raw, enc, extra=()):
+        lines = []
+        for ln in raw.decode(enc, "replace").splitlines():
+            for a, b in extra:
+                ln = ln.replace(a, b)
+            ln = RE_TS.sub("<TS>", ln)
+            lines.append("".join(ch if ord(ch) < 128 else "?" for ch in ln))
+        return lines
+
+    # ① 文件级：列表（无导出）
+    outs = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        p = subprocess.run([exe, "u3d", U3D_SAMPLE], capture_output=True)
+        outs[tag] = (p.returncode, norm(p.stdout, enc))
+        if p.returncode != 0 and p.stderr.strip():
+            print("      %s stderr：%s" % (tag, _safe(p.stderr.decode(enc, "replace"))[:300]))
+    if not _report("u3d 列表", outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+        ok = False
+    # ② 文件级：--tex 导出（编码器不同——只比导出件数与尺寸）
+    tex = {}
+    for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+        d = os.path.join(tmp, "tex-" + tag)
+        p = subprocess.run([exe, "u3d", U3D_SAMPLE, "--tex", d], capture_output=True)
+        files = []
+        if os.path.isdir(d):
+            for name in sorted(os.listdir(d)):
+                png = os.path.join(d, name)
+                size = os.path.getsize(png)
+                dims = _png_dims(png)
+                files.append((re.sub(r"u3d_\d+\.png", "u3d_<ID>.png", name), size > 0, dims))
+        tex[tag] = (p.returncode, norm(p.stdout, enc, [(d, "<TEX>")]), files)
+    if not _report("u3d --tex 输出", tex["go"][1], tex["go"][0], tex["cs"][1], tex["cs"][0]):
+        ok = False
+    same = tex["cs"][2] == tex["go"][2]
+    print("  %-40s %d/%d → %s" % ("导出 PNG（名归一 / 尺寸）", len(tex["cs"][2]), len(tex["go"][2]),
+                                  "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        print("      C# %r" % (tex["cs"][2],))
+        print("      Go %r" % (tex["go"][2],))
+
+    # ③ 库级：临时库 + mod 库根 → scan-mods → u3d-db 首建 / 命中
+    sides = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        lib = os.path.join(d, "mods_main")
+        os.makedirs(lib)
+        cache = os.path.join(d, "mods_cache")
+        os.makedirs(cache)
+        shutil.copy2(U3D_SAMPLE, os.path.join(lib, os.path.basename(U3D_SAMPLE)))
+        # 缓存库放一份副本：C# 的 scan-mods 遇到「空库根」会走离线标记 → 触发 Store.AddTodo 的
+        # ON CONFLICT 崩溃（0.21.9 既有缺陷，已登记在 tools/compare/README.md 已知差异）——样本规避它。
+        shutil.copy2(U3D_SAMPLE, os.path.join(cache, os.path.basename(U3D_SAMPLE)))
+        db = os.path.join(d, "kkmanager.db")
+        p = subprocess.run([exe, "roots-list", "--db", db], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(db):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        _trim_roots_sort(db, lib, cache)
+        p = subprocess.run([exe, "scan-mods", "--db", db], capture_output=True)
+        if p.returncode != 0:
+            print("  %s scan-mods 失败：exit %d" % (tag, p.returncode))
+            return 3
+        con = sqlite3.connect("file:" + db.replace("\\", "/") + "?mode=ro", uri=True)
+        row = con.execute("select guid from mod order by guid limit 1").fetchone()
+        con.close()
+        if not row:
+            print("  %s 库里没有 mod 行" % tag)
+            return 3
+        sides[tag] = {"db": db, "lib": lib, "guid": row[0]}
+    for label in ("u3d-db 首建", "u3d-db 命中档案"):
+        outs = {}
+        for tag, exe, enc in (("cs", CS, "gbk"), ("go", GO, "utf-8")):
+            s = sides[tag]
+            p = subprocess.run([exe, "u3d-db", s["guid"], U3D_ENTRY, "--db", s["db"]], capture_output=True)
+            outs[tag] = (p.returncode, norm(p.stdout, enc, [(s["lib"], "<LIB>")]))
+            if p.returncode != 0 and p.stderr.strip():
+                print("      %s stderr：%s" % (tag, _safe(p.stderr.decode(enc, "replace"))[:300]))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+    rows = {}
+    for tag in ("cs", "go"):
+        got = _read_table_rows(os.path.join(tmp, tag),
+                               "select guid, entry_path, size, texture_count, textures from mod_u3d order by entry_path")
+        rows[tag] = [tuple((str(v).replace(sides[tag]["lib"], "<LIB>") if v is not None else None) for v in r)
+                     for r in got]
+    same = rows["cs"] == rows["go"]
+    print("  %-40s 行 %d/%d → %s" % ("mod_u3d 表", len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(rows["cs"]), len(rows["go"]))):
+            va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+            vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
+
+
+def _png_dims(path):
+    """读 PNG 头拿宽高（不解码整图）——导出件尺寸判据。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        return (int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big"))
+    except OSError:
+        return None
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -793,6 +1703,24 @@ def main(argv):
         return cmd_scanallplugins()
     if mode == "scanplugins":
         return cmd_scanplugins()
+    if mode == "query":
+        return cmd_query()
+    if mode == "dup":
+        return cmd_dup_new()
+    if mode == "refs":
+        return cmd_refs()
+    if mode == "index":
+        return cmd_index()
+    if mode == "sort":
+        return cmd_sort()
+    if mode == "cardsort":
+        return cmd_cardsort()
+    if mode == "cardsort2":
+        return cmd_cardsort2()
+    if mode == "cardedit":
+        return cmd_cardedit()
+    if mode == "u3d":
+        return cmd_u3d()
     return cmd_single(mode, argv[1:])
 
 
@@ -1654,6 +2582,211 @@ def _read_scanall_state(dbdir):
     for name in out:
         out[name].sort()
     return out
+
+
+# （入口块在文件末尾——本文件后段还有函数定义，main 调用须在全部定义之后）
+
+
+# ---------- card-sort 专项②：learn / layout ----------
+
+def _make_cardsort2_sample(tmp):
+    """learn/layout 样本：整理根结构（01-卡片/人物卡|服装卡/<作品>/<文件> · 02-mod/散件 · 05-其它）
+    + 索引 TSV（表头按列名定位——learn 读「角色名/作品」，layout 读「现路径/类型/卡类型/作品/作者/大小」）。
+    四个 by 值各用一份独立整理根（dest_<by>），互不干扰。"""
+    picked = []
+    for src_dir, n in ((FEMALE_DIR, 2), (COORD_DIR, 1)):
+        picked += [os.path.join(src_dir, name) for name in _pick_small_cards(src_dir, n)]
+    if len(picked) < 3:
+        return None
+    mods = sorted((os.path.getsize(os.path.join(MOD_LIB_SRC, nm)), nm)
+                  for nm in os.listdir(MOD_LIB_SRC)
+                  if os.path.isfile(os.path.join(MOD_LIB_SRC, nm))
+                  and os.path.getsize(os.path.join(MOD_LIB_SRC, nm)) < 4 * 1024 * 1024)
+    if not mods:
+        return None
+    a_name, b_name, c_name = os.path.basename(picked[0]), os.path.basename(picked[1]), os.path.basename(picked[2])
+    rel_a = "01-卡片/人物卡/作品A/" + a_name
+    rel_b = "01-卡片/人物卡/作品B/" + b_name
+    rel_c = "01-卡片/服装卡/作品A/" + c_name
+    rel_mod = "02-mod/散件/" + mods[0][1]
+    dests = {}
+    for by in ("work", "author", "chara", "flat"):
+        d = os.path.join(tmp, "dest_" + by)
+        dests[by] = d
+        for rel, src in ((rel_a, picked[0]), (rel_b, picked[1]), (rel_c, picked[2]),
+                         (rel_mod, os.path.join(MOD_LIB_SRC, mods[0][1]))):
+            dst = os.path.join(d, rel.replace("/", os.sep))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+        note = os.path.join(d, "05-其它", "notes.txt")
+        os.makedirs(os.path.dirname(note), exist_ok=True)
+        with open(note, "w", encoding="utf-8") as f:
+            f.write("not a card\n")
+    head = ["序号", "类型", "卡类型", "角色名", "作品", "作者", "来源", "包内路径", "大小", "现路径"]
+    rows = [
+        head,
+        ["1", "卡", "人物卡", "角色甲", "作品A", "作者甲", "", "", "1", rel_a],
+        ["2", "卡", "人物卡", "角色乙", "作品B", "作者乙", "", "", "2", rel_b],
+        ["3", "卡", "服装卡", "", "作品A", "作者甲", "", "", "3", rel_c],
+        ["4", "mod", "mod", "", "", "作者甲", "", "", "4", rel_mod],
+        # 学习面（现路径以「（」开头——layout 跳过，learn 只读角色名 / 作品两列）
+        ["5", "卡", "人物卡", "角色甲", "作品A", "作者甲", "", "", "1", "（学习样本）"],
+        ["6", "卡", "人物卡", "角色甲", "作品B", "作者甲", "", "", "1", "（学习样本）"],
+        ["7", "卡", "人物卡", "角色丙", "（待归包）", "作者丙", "", "", "1", "（学习样本）"],
+        ["8", "卡", "人物卡", "", "作品D", "作者丁", "", "", "1", "（学习样本）"],
+        # 源已不存在的卡（layout 应判 skipped：源已不在）
+        ["9", "卡", "人物卡", "角色丁", "作品E", "作者丁", "", "", "1", "01-卡片/人物卡/作品E/not-exist.png"],
+    ]
+    idx = os.path.join(tmp, "index.tsv")
+    with open(idx, "w", encoding="utf-8-sig", newline="\n") as f:
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+    return {
+        "dest_work": dests["work"], "dest_author": dests["author"],
+        "dest_chara": dests["chara"], "dest_flat": dests["flat"],
+        "idx": idx,
+        "plan_work": os.path.join(tmp, "plan-work.tsv"),
+        "plan_author": os.path.join(tmp, "plan-author.tsv"),
+        "plan_chara": os.path.join(tmp, "plan-chara.tsv"),
+        "plan_flat": os.path.join(tmp, "plan-flat.tsv"),
+        "rules": os.path.join(tmp, "rules-learn.tsv"),
+        "db": os.path.join(tmp, "kkmanager.db"),
+    }
+
+
+def _norm_layout_lines(raw, enc, s, by):
+    """layout/learn 输出归一：各自整理根 / 索引 / 计划 / 库路径折占位（保留中文原文——两侧各自解码）。"""
+    dest = s["dest_" + by] if by else s["dest_work"]
+    lines = []
+    for ln in raw.decode(enc, "replace").splitlines():
+        ln = ln.replace(s["plan_" + by] if by else s["plan_work"], "<PLAN>")
+        ln = ln.replace(dest, "<DEST>").replace(s["idx"], "<IDX>")
+        ln = ln.replace(s["rules"], "<RULES>").replace(s["db"], "<DB>")
+        ln = ln.replace(os.path.dirname(s["db"]), "<DBDIR>")
+        ln = RE_TS.sub("<TS>", ln)
+        lines.append(ln)
+    return lines
+
+
+def cmd_cardsort2():
+    """card-sort 专项②：learn（索引 → 角色名规则投票）+ layout（--by work|author|chara|flat 重排全链）。
+    判据：每步输出逐行（路径 / 时间戳归一，保留中文）+ 计划 TSV + card_rule 表行 + 终态文件树。"""
+    print("—— card-sort 专项②（learn / layout：四维重排 + 索引学习）")
+    tmp = os.path.join(OUT_DIR, "_cardsort2_tmp")
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    sides = {}
+    for tag, exe in (("cs", CS), ("go", GO)):
+        d = os.path.join(tmp, tag)
+        os.makedirs(d)
+        s = _make_cardsort2_sample(d)
+        if s is None:
+            print("  卡片 / mod 样本不足")
+            return 3
+        p = subprocess.run([exe, "roots-list", "--db", s["db"]], capture_output=True)
+        if p.returncode != 0 or not os.path.exists(s["db"]):
+            print("  %s 建库失败：exit %d" % (tag, p.returncode))
+            return 3
+        sides[tag] = s
+    ok = True
+
+    def run(tag, args, by=None):
+        s = sides[tag]
+        exe, enc = (CS, "gbk") if tag == "cs" else (GO, "utf-8")
+        real = []
+        for a in args:
+            a = a.replace("<DEST>", s["dest_" + by] if by else s["dest_work"])
+            a = a.replace("<IDX>", s["idx"]).replace("<RULES>", s["rules"])
+            a = a.replace("<PLAN>", s["plan_" + by] if by else s["plan_work"])
+            real.append(a)
+        p = subprocess.run([exe, "card-sort"] + real + ["--db", s["db"]], capture_output=True)
+        return p.returncode, _norm_layout_lines(p.stdout, enc, s, by), p.stderr.decode(enc, "replace")
+
+    def step(label, args, by=None):
+        nonlocal ok
+        outs = {}
+        for tag in ("cs", "go"):
+            rc, lines, err = run(tag, args, by)
+            outs[tag] = (rc, lines)
+            if rc != 0 and err.strip():
+                print("      %s stderr：%s" % (tag, _safe(err)[:300]))
+        if not _report(label, outs["go"][1], outs["go"][0], outs["cs"][1], outs["cs"][0]):
+            ok = False
+
+    def file_equal(label, path_of, by=None):
+        nonlocal ok
+        texts = {}
+        for tag in ("cs", "go"):
+            path = path_of(sides[tag], by)
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    dest = sides[tag]["dest_" + by] if by else sides[tag]["dest_work"]
+                    texts[tag] = [ln.replace(dest, "<DEST>").replace(sides[tag]["idx"], "<IDX>")
+                                  for ln in f.read().splitlines()]
+            except OSError as exc:
+                texts[tag] = ["<读不到> %s" % exc]
+        same = texts["cs"] == texts["go"]
+        print("  %-44s 行 %d/%d → %s" % (label, len(texts["cs"]), len(texts["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(texts["cs"]), len(texts["go"]))):
+                va = texts["cs"][i] if i < len(texts["cs"]) else "<缺失>"
+                vb = texts["go"][i] if i < len(texts["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+
+    # ① learn：索引学习（投票 / 待归包跳过 / 空角色跳过）+ 导出规则
+    step("learn --from（学规则）", ["learn", "--from", "<IDX>", "--write", "<RULES>"])
+    file_equal("learn 导出规则 TSV", lambda s, by: s["rules"])
+    rows = {}
+    for tag in ("cs", "go"):
+        got = _read_table_rows(os.path.dirname(sides[tag]["db"]),
+                               "select kind, match, value, origin, votes, works, enabled from card_rule order by kind, match")
+        rows[tag] = got
+    same = rows["cs"] == rows["go"]
+    print("  %-44s 行 %d/%d → %s" % ("card_rule（learn 后）", len(rows["cs"]), len(rows["go"]), "一致" if same else "不一致"))
+    if not same:
+        ok = False
+        for i in range(max(len(rows["cs"]), len(rows["go"]))):
+            va = rows["cs"][i] if i < len(rows["cs"]) else "<缺失>"
+            vb = rows["go"][i] if i < len(rows["go"]) else "<缺失>"
+            if va != vb:
+                print("      C# %r" % (va,))
+                print("      Go %r" % (vb,))
+                break
+
+    # ② layout：四个 by 各一轮（计划写出 → 输出 → 执行 → 空目录清理 → 状态回写）
+    for by in ("work", "author", "chara", "flat"):
+        step("layout --by %s（计划）" % by, ["layout", "--root", "<DEST>", "--index", "<IDX>", "--by", by, "--out", "<PLAN>"], by)
+        file_equal("layout --by %s 计划 TSV" % by, lambda s, b: s["plan_" + b], by)
+        step("layout --by %s --yes（执行）" % by, ["layout", "--root", "<DEST>", "--index", "<IDX>", "--by", by, "--out", "<PLAN>", "--yes"], by)
+        file_equal("layout --by %s 回写 TSV" % by, lambda s, b: s["plan_" + b], by)
+        tree = {}
+        for tag in ("cs", "go"):
+            tree[tag] = _tree_snapshot(sides[tag]["dest_" + by])
+        same = tree["cs"] == tree["go"]
+        print("  %-44s 条目 %d/%d → %s" % ("终态文件树（dest_%s）" % by, len(tree["cs"]), len(tree["go"]), "一致" if same else "不一致"))
+        if not same:
+            ok = False
+            for i in range(max(len(tree["cs"]), len(tree["go"]))):
+                va = tree["cs"][i] if i < len(tree["cs"]) else "<缺失>"
+                vb = tree["go"][i] if i < len(tree["go"]) else "<缺失>"
+                if va != vb:
+                    print("      C# %r" % (va,))
+                    print("      Go %r" % (vb,))
+                    break
+
+    # ③ 参数闸门：--by 非法 / 缺 --index（两侧同 exit 2 + 同措辞）
+    step("layout --by 非法值", ["layout", "--root", "<DEST>", "--index", "<IDX>", "--by", "bogus"])
+    step("layout 缺 --index", ["layout", "--root", "<DEST>", "--by", "work"])
+    step("learn 缺 --from", ["learn"])
+
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("判定：%s" % ("一致" if ok else "不一致"))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

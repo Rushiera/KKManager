@@ -30,68 +30,64 @@ func (a *App) handleCardSrc(w http.ResponseWriter, r *http.Request) {
 	defer hub.Close()
 	path, _ := core.CardPathOf(hub, cfg, lib, id)
 	if path == "" {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	st := core.ParseCardStructure(path)
 	if st.ImageEnd <= 0 || st.ImageEnd > capBytes {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	f, openErr := os.Open(path)
 	if openErr != nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	defer f.Close()
 	buf := make([]byte, st.ImageEnd)
 	if _, readErr := f.ReadAt(buf, 0); readErr != nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
 	_, _ = w.Write(buf)
 }
 
-// handleCardRefs GET /api/card/{id}/refs?lib= 卡片声明的 mod 清单 + 本地副本状态。
+// handleCardRefs GET /api/card/{id}/refs?tier=&lib= 卡片声明的 mod 引用明细。
+// 对齐 C# QueryCardRefs：裸数组（按 tier、guid 排序；同 guid 多部件聚合一行；无行 = 空数组）。
 func (a *App) handleCardRefs(w http.ResponseWriter, r *http.Request) {
 	id := parseID(r.PathValue("id"))
 	lib := atoiDefault(r.URL.Query().Get("lib"), 1)
-	hub, cfg, err := openApp(a.DBPath)
+	tier := atoiDefault(r.URL.Query().Get("tier"), 0)
+	hub, _, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	defer hub.Close()
-	path, why := core.CardPathOf(hub, cfg, lib, id)
-	if path == "" {
-		writeErr(w, 404, why)
+	s, libErr := hub.StoreByLib(lib)
+	if libErr != nil || s == nil {
+		writeErr(w, 404, "找不到库 "+strconv.Itoa(lib))
 		return
 	}
-	info, parseErr := core.ParseCard(path)
-	if parseErr != nil {
-		writeErr(w, 500, parseErr.Error())
+	rows, qErr := s.QueryCardRefs(id, tier)
+	if qErr != nil {
+		writeErr(w, 500, qErr.Error())
 		return
 	}
-	guids := info.DistinctModIds()
-	out := make([]map[string]interface{}, 0, len(guids))
-	for _, g := range guids {
-		recs, recErr := core.QueryModFilesHub(hub, cfg, g)
-		row := map[string]interface{}{"guid": g, "copies": 0, "tier": 0, "fileName": ""}
-		if recErr == nil && len(recs) > 0 {
-			row["copies"] = len(recs)
-			row["tier"] = recs[0].Tier
-			row["fileName"] = recs[0].FileName
-		}
-		out = append(out, row)
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, one := range rows {
+		out = append(out, map[string]interface{}{
+			"guid": one.Guid, "property": one.Property, "tier": one.Tier,
+			"rootPath": one.RootPath, "filePath": one.FilePath, "fileName": one.FileName,
+			"recName": one.RecName, "recAuthor": one.RecAuthor, "recWebsite": one.RecWebsite,
+		})
 	}
-	writeJSON(w, map[string]interface{}{
-		"cardType": info.CardType, "uarBlocks": info.UarBlocks,
-		"refs": out, "count": len(out),
-	})
+	writeJSON(w, out)
 }
 
-// handleCardStructure GET /api/card/{id}/structure?lib= PNG 块表 + 数据区头段。
+// handleCardStructure GET /api/card/{id}/structure?lib= 卡片文件结构（PNG 块表 + 数据区头部 + 分项分析）。
+// 形状对齐 C# WebApp.cs：{ok, error, structure, detail, timeline, timelineText, coords, scene}。
 func (a *App) handleCardStructure(w http.ResponseWriter, r *http.Request) {
 	id := parseID(r.PathValue("id"))
 	lib := atoiDefault(r.URL.Query().Get("lib"), 1)
@@ -103,19 +99,61 @@ func (a *App) handleCardStructure(w http.ResponseWriter, r *http.Request) {
 	defer hub.Close()
 	path, why := core.CardPathOf(hub, cfg, lib, id)
 	if path == "" {
-		writeErr(w, 404, why)
+		writeJSON(w, map[string]interface{}{"ok": false, "error": why})
 		return
 	}
 	st := core.ParseCardStructure(path)
+	var detailOut, coordsOut, sceneOut, timelineOut, timelineText interface{}
+	if st.Error == "" && st.ImageEnd > 0 {
+		detail := core.ParseCardDetail(path, st.ImageEnd)
+		detailOut = core.CardDetailJSON(detail)
+		if st.CardType == core.SceneCardType {
+			tl := core.ReadTimeline(path, st.ImageEnd)
+			timelineOut = core.TimelineInfoJSON(tl)
+			if tl != nil {
+				if text := core.DescribeTimeline(tl); text != "" {
+					timelineText = text
+				}
+			}
+			// 场景卡（sd）深度分析——逐份内嵌角色卡面图（与数据区图片清单同源）
+			scene := core.ReadSceneInfo(path, st.ImageEnd)
+			if scene != nil && detail != nil {
+				scene.AttachCharaFaces(detail.Images)
+			}
+			sceneOut = core.CardSceneJSON(scene)
+		} else {
+			// 服装 / 饰品（Coordinate 块七套槽位）——人物卡才有；非人物卡由解析器给 Error
+			coordsOut = core.CardCoordinateJSON(core.ReadCardCoordinate(path))
+		}
+	}
 	writeJSON(w, map[string]interface{}{
-		"imageEnd":    st.ImageEnd,
-		"dataSize":    st.DataSize,
-		"cardType":    st.CardType,
-		"dataVersion": st.DataVersion,
-		"chunks":      st.Chunks,
-		"dataHeadHex": st.DataHeadHex,
-		"warnings":    st.Warnings,
+		"ok": st.Error == "", "error": nilIfEmpty(st.Error),
+		"structure":    cardStructureJSON(st),
+		"detail":       detailOut,
+		"timeline":     timelineOut,
+		"timelineText": timelineText,
+		"coords":       coordsOut,
+		"scene":        sceneOut,
 	})
+}
+
+// cardStructureJSON C# CardStructure 的序列化形状（PNG 块表 + 数据区头部字段）。
+func cardStructureJSON(st *core.CardStructure) map[string]interface{} {
+	chunks := make([]map[string]interface{}, 0, len(st.Chunks))
+	for _, c := range st.Chunks {
+		chunks = append(chunks, map[string]interface{}{
+			"type": c.Type, "offset": c.Offset, "dataOffset": c.DataOffset,
+			"length": c.Length, "end": c.End, "crcOk": c.CrcOk, "crcChecked": c.CrcChecked,
+		})
+	}
+	warnings := append([]string{}, st.Warnings...)
+	return map[string]interface{}{
+		"filePath": st.FilePath, "fileName": st.FileName, "size": st.Size, "mtime": st.Mtime,
+		"chunks": chunks, "imageEnd": st.ImageEnd, "dataSize": st.DataSize,
+		"cardType": nilIfEmpty(st.CardType), "dataVersion": nilIfEmpty(st.DataVersion),
+		"dataHeadHex": nilIfEmpty(st.DataHeadHex), "error": nilIfEmpty(st.Error),
+		"warnings": warnings,
+	}
 }
 
 // handleCardTimeline GET /api/card/{id}/timeline?lib= 场景卡 timeline 摘要。
@@ -134,6 +172,14 @@ func (a *App) handleCardTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := core.ParseCardStructure(path)
+	if st.Error != "" {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": st.Error})
+		return
+	}
+	if st.CardType != core.SceneCardType {
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "不是场景卡——只有 Studio 场景卡带 timeline 数据"})
+		return
+	}
 	tl := core.ReadTimeline(path, st.ImageEnd)
 	if tl == nil || !tl.HasEntry {
 		writeJSON(w, map[string]interface{}{"hasTimeline": false})
@@ -150,7 +196,7 @@ func (a *App) handleCardTimeline(w http.ResponseWriter, r *http.Request) {
 
 // handleNonCardThumb GET /api/noncard/thumb?lib=&id= 非卡登记项的缩略图（无图 → 404）。
 func (a *App) handleNonCardThumb(w http.ResponseWriter, r *http.Request) {
-	http.NotFound(w, r)
+	notFound(w)
 }
 
 // handleTodosClose POST /api/todos/close {id} 关闭一条待办。
@@ -239,9 +285,12 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true})
 }
 
-// handleMissing GET /api/missing?limit= 缺失清单（跨库合并，按被引用卡数倒序）。
+// handleMissing GET /api/missing?per= 缺失清单（跨库合并，按被引用卡数倒序；每条附前 per 张引用卡片）。
 func (a *App) handleMissing(w http.ResponseWriter, r *http.Request) {
-	limit := atoiDefault(r.URL.Query().Get("limit"), 200)
+	per := atoiDefault(r.URL.Query().Get("per"), 12)
+	if per <= 0 {
+		per = 12
+	}
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -273,13 +322,21 @@ func (a *App) handleMissing(w http.ResponseWriter, r *http.Request) {
 		return list[i].guid < list[j].guid
 	})
 	out := make([]map[string]interface{}, 0, len(list))
-	for i, one := range list {
-		if limit > 0 && i >= limit {
-			break
+	for _, one := range list {
+		samples, sErr := core.QueryCardsByModHub(hub, cfg, one.guid, 1, per)
+		if sErr != nil {
+			writeErr(w, 500, sErr.Error())
+			return
 		}
-		out = append(out, map[string]interface{}{"guid": one.guid, "cards": one.cards})
+		sampleJSON := make([]map[string]interface{}, 0, len(samples))
+		for i := range samples {
+			sampleJSON = append(sampleJSON, cardRowJSON(&samples[i]))
+		}
+		out = append(out, map[string]interface{}{
+			"guid": one.guid, "cards": one.cards, "samples": sampleJSON,
+		})
 	}
-	writeJSON(w, map[string]interface{}{"total": len(list), "rows": out})
+	writeJSON(w, map[string]interface{}{"total": len(list), "per": per, "items": out})
 }
 
 // handlePluginsScan POST /api/plugins/scan 触发插件库扫描（后台，走同一扫描状态机）。

@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -104,12 +105,29 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/card/{id}/refs", a.handleCardRefs)
 	mux.HandleFunc("GET /api/card/{id}/structure", a.handleCardStructure)
 	mux.HandleFunc("GET /api/card/{id}/timeline", a.handleCardTimeline)
-	mux.HandleFunc("GET /api/noncard/thumb", a.handleNonCardThumb)
+	mux.HandleFunc("GET /api/noncard/thumb/{id}", a.handleNonCardThumbByID)
 	mux.HandleFunc("POST /api/todos/close", a.handleTodosClose)
 	mux.HandleFunc("POST /api/todos/add", a.handleTodosAdd)
 	mux.HandleFunc("POST /api/settings", a.handleSettingsSave)
 	mux.HandleFunc("GET /api/missing", a.handleMissing)
 	mux.HandleFunc("POST /api/plugins/scan", a.handlePluginsScan)
+
+	// G7 缺口端点（交接件 §三-2）：库根推荐 / 离线 / 彻底删除 · 非卡搬移与缩略图 ·
+	// composition 强制重读 · u3dmap / u3dtex · 卡片内嵌图片
+	mux.HandleFunc("GET /api/roots/recommend", a.handleRootsRecommend)
+	mux.HandleFunc("POST /api/roots/offline", a.handleRootsOffline)
+	mux.HandleFunc("POST /api/roots/purge", a.handleRootsPurge)
+	mux.HandleFunc("POST /api/noncard/move", a.handleNonCardMove)
+	mux.HandleFunc("POST /api/mod/composition", a.handleModCompositionSave)
+	mux.HandleFunc("GET /api/mod/{guid}/u3dmap", a.handleModU3dMap)
+	mux.HandleFunc("GET /api/mod/{guid}/u3dtex", a.handleModU3dTex)
+	mux.HandleFunc("GET /api/card/{id}/image", a.handleCardImage)
+
+	// 搬移端点（交接件 §三-2）：重复副本「正名搬入主库」/ 未引用 mod 一键移到缓存库
+	mux.HandleFunc("POST /api/move", a.handleMove)
+	mux.HandleFunc("POST /api/move-unused/start", a.handleMoveUnusedStart)
+	mux.HandleFunc("POST /api/move-unused/stop", a.handleMoveUnusedStop)
+	mux.HandleFunc("GET /api/move-unused/status", a.handleMoveUnusedStatus)
 	return mux
 }
 
@@ -158,6 +176,11 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
+}
+
+// notFound 404 空 body——对齐 C# Results.NotFound()（C# 面板的 404 不带文本）。
+func notFound(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNotFound)
 }
 
 // handleIndex 首页（单页应用）。
@@ -347,6 +370,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 		"yellow":        merged.Yellow,
 		"red":           merged.Red,
 		"black":         merged.Black,
+		"pending":       merged.Yellow + merged.Red + merged.Black,
 		"unusedMods":    merged.UnusedMods,
 		"dupMods":       merged.DupMods,
 		"dupGroups":     dupGroups,
@@ -361,10 +385,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleCards(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	order := q.Get("order")
-	if order != "" && order != "mtime" && order != "miss" && order != "size" && order != "file" && order != "chara" && order != "timeline" {
-		writeErr(w, 400, "未知的卡片排序键："+order+"（可用：mtime / miss / size / file / chara / timeline）")
-		return
-	}
+	// C# 侧不校验排序键（未知键按默认），Go 不做白名单拒绝——保持端点契约一致
 	page := atoiDefault(q.Get("page"), 1)
 	size := atoiDefault(q.Get("size"), 0)
 	if size <= 0 {
@@ -466,7 +487,7 @@ func (a *App) handleMods(w http.ResponseWriter, r *http.Request) {
 			"tier": m.Tier, "rootPath": m.RootPath, "fileName": m.FileName, "filePath": m.FilePath,
 			"size": m.Size, "dupCount": m.DupCount, "used": m.Used,
 			"usedChara": m.UsedChara, "usedClothes": m.UsedClothes, "usedSd": m.UsedSd,
-			"hasOld": m.HasOld, "oldName": m.OldName,
+			"hasOld": m.HasOld, "oldName": oldNameOrNil(m.OldName),
 		})
 	}
 	writeJSON(w, out)
@@ -535,7 +556,16 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 			"cardPath": t.RefPath, "createdAt": t.CreatedAt,
 		})
 	}
-	writeJSON(w, out)
+	// C# /api/todos 是 {count, items} 两键包（不是裸数组）
+	writeJSON(w, map[string]interface{}{"count": len(out), "items": out})
+}
+
+// oldNameOrNil 旧版名——空串按 null 输出（对齐 C# 可空字段的序列化）。
+func oldNameOrNil(name string) interface{} {
+	if name == "" {
+		return nil
+	}
+	return name
 }
 
 // handleNonCards 非卡 / 非 mod 清单。
@@ -554,16 +584,22 @@ func (a *App) handleNonCards(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]interface{}, 0, len(rows))
 	for _, n := range rows {
+		// 项键对齐 C# NonCardRow 序列化：path / root（不是 filePath / rootPath）
 		out = append(out, map[string]interface{}{
-			"id": n.Id, "filePath": n.FilePath, "rootPath": n.RootPath, "side": n.Side,
+			"id": n.Id, "lib": n.Lib, "path": n.FilePath, "root": n.RootPath, "side": n.Side,
 			"reason": n.Reason, "size": n.Size, "mtime": n.Mtime,
-			"hasThumb": n.HasThumb, "movedTo": n.MovedTo, "lib": n.Lib,
+			"hasThumb": n.HasThumb, "movedTo": n.MovedTo,
 		})
 	}
-	writeJSON(w, out)
+	pending, _ := core.CountNonCardsHub(hub, cfg, false)
+	all, _ := core.CountNonCardsHub(hub, cfg, true)
+	// C# /api/noncards 外层是 {items, total, pending, movedCount}
+	writeJSON(w, map[string]interface{}{
+		"items": out, "total": len(out), "pending": pending, "movedCount": all - pending,
+	})
 }
 
-// handleDup 重复副本整表。
+// handleDup 重复副本整表（组 + 副本 + 引用卡片 + 旧版登记 + MD5 档案补齐）。
 func (a *App) handleDup(w http.ResponseWriter, r *http.Request) {
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
@@ -577,18 +613,25 @@ func (a *App) handleDup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	guids := make([]string, 0, len(groups))
+	allFiles := make([]store.ModFileRec, 0, len(groups)*2)
 	for _, g := range groups {
 		guids = append(guids, g.Guid)
+		allFiles = append(allFiles, g.Files...)
 	}
 	refs, _ := core.QueryDupCardRefsHub(hub, cfg, guids, 3)
-	out := make([]map[string]interface{}, 0, len(groups))
+	// MD5 只算冲突文件（重复副本组内），且只在打开本面板时补齐一次——算过就忽略（档案落主库 mod_hash）
+	hashes, _, hashErrors, hashErr := core.FillHashesHub(hub, allFiles)
+	if hashErr != nil {
+		hashErrors = append(hashErrors, hashErr.Error())
+	}
+	if hashErrors == nil {
+		hashErrors = []string{}
+	}
+	items := make([]map[string]interface{}, 0, len(groups))
 	for _, g := range groups {
-		copies := make([]map[string]interface{}, 0, len(g.Files))
-		for _, c := range g.Files {
-			copies = append(copies, map[string]interface{}{
-				"filePath": c.FilePath, "tier": c.Tier, "rootPath": c.RootPath,
-				"fileName": c.FileName, "size": c.Size, "mtime": c.Mtime,
-			})
+		files := make([]map[string]interface{}, 0, len(g.Files))
+		for _, f := range g.Files {
+			files = append(files, modCopyJSON(f, hashes))
 		}
 		cards := make([]map[string]interface{}, 0)
 		var cardTotal int64
@@ -600,13 +643,45 @@ func (a *App) handleDup(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-		out = append(out, map[string]interface{}{
-			"guid": g.Guid, "mainCount": g.MainCount,
-			"copies": copies, "cards": cards, "cardTotal": cardTotal,
-			"pending": len(g.Files) >= 2,
+		items = append(items, map[string]interface{}{
+			"guid": g.Guid, "mainCount": g.MainCount, "files": files,
+			"cards": cards, "cardTotal": cardTotal,
 		})
 	}
-	writeJSON(w, out)
+	olds := make([]map[string]interface{}, 0)
+	for _, o := range core.ListModOldSorted(hub) {
+		olds = append(olds, map[string]interface{}{
+			"oldPath": o.OldPath, "guid": o.Guid, "oldName": o.OldName,
+			"oldVersion": o.OldVersion, "newName": o.NewName, "newVersion": o.NewVersion,
+			"markedAt": o.MarkedAt,
+		})
+	}
+	writeJSON(w, map[string]interface{}{
+		"total": len(items), "items": items, "olds": olds, "hashErrors": hashErrors,
+	})
+}
+
+// modCopyJSON 一份 mod 副本的展示行（重复副本窗口与整理冲突小窗共用同一形状）。
+func modCopyJSON(f store.ModFileRec, hashes map[string]string) map[string]interface{} {
+	info := core.ReadModCopy(f.FilePath)
+	out := map[string]interface{}{
+		"tier": f.Tier, "tierName": core.TierName(f.Tier), "rootPath": f.RootPath,
+		"filePath": f.FilePath, "fileName": f.FileName, "size": f.Size, "mtime": f.Mtime,
+		"ctime":   info.Ctime,
+		"version": nilIfEmpty(info.Version), "author": nilIfEmpty(info.Author),
+		"name": nilIfEmpty(info.Name), "isOld": core.IsOldFileName(f.FileName),
+		"error": nilIfEmpty(info.Error),
+	}
+	if hashes != nil {
+		if md5, ok := hashes[f.FilePath]; ok {
+			out["md5"] = md5
+		} else {
+			out["md5"] = nil
+		}
+	} else {
+		out["md5"] = nil
+	}
+	return out
 }
 
 // ScanState 扫描任务状态（同一时刻只允许一个；页面关掉也继续跑）。
@@ -688,10 +763,53 @@ var (
 // handleScanStatus 扫描进度。
 func (a *App) handleScanStatus(w http.ResponseWriter, r *http.Request) {
 	scanMu.Lock()
-	snapshot := *scanState
-	snapshot.Errors = append([]string{}, scanState.Errors...)
+	s := *scanState
+	errs := append([]string{}, scanState.Errors...)
 	scanMu.Unlock()
-	writeJSON(w, snapshot)
+	// C# ScanState 是类（string 字段默认 null）——空串按 null 输出；缩略图按 MB（一位小数）输出
+	writeJSON(w, map[string]interface{}{
+		"running":       s.Running,
+		"target":        nilIfEmpty(s.Target),
+		"message":       nilIfEmpty(s.Message),
+		"currentRoot":   nilIfEmpty(s.CurrentRoot),
+		"currentTier":   s.CurrentTier,
+		"rootIndex":     s.RootIndex,
+		"rootCount":     s.RootCount,
+		"seen":          s.Seen,
+		"added":         s.Added,
+		"skipped":       s.Skipped,
+		"nonCard":       s.NonCard,
+		"nonMod":        s.NonMod,
+		"failed":        s.Failed,
+		"refs":          s.Refs,
+		"thumbMB":       math.Round(float64(s.ThumbBytes)/1024.0/1024.0*10) / 10,
+		"namesRead":     s.NamesRead,
+		"namesFilled":   s.NamesFilled,
+		"typesFixed":    s.TypesFixed,
+		"timelineRead":  s.TimelineRead,
+		"pluginDlls":    s.PluginDlls,
+		"plugins":       s.Plugins,
+		"pluginConfigs": s.PluginConfigs,
+		"pluginDone":    s.PluginDone,
+		"pluginTotal":   s.PluginTotal,
+		"removed":       s.Removed,
+		"stepIndex":     s.StepIndex,
+		"stepCount":     s.StepCount,
+		"stepName":      nilIfEmpty(s.StepName),
+		"stepDone":      s.StepDone,
+		"stepTotal":     s.StepTotal,
+		"startedAt":     nilIfEmpty(s.StartedAt),
+		"finishedAt":    nilIfEmpty(s.FinishedAt),
+		"errors":        errs,
+	})
+}
+
+// nilIfEmpty 空串按 null 输出（对齐 C# 可空 string 的序列化）。
+func nilIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // atoiDefault 整数解析（空 / 非法用默认值）。

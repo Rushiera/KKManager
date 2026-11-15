@@ -814,12 +814,12 @@ func lz4BlockDecompress(src []byte, srcAt, srcLen int, dst []byte, dstAt, dstLen
 	return op - dstAt, ""
 }
 
-// readInt32Big 读大端 32 位整数（带边界钳制）。
+// readInt32Big 读大端 32 位整数（带边界钳制；按 C# BitConverter.ToInt32 保留符号）。
 func readInt32Big(buf []byte, at int) int {
 	if at < 0 || at+4 > len(buf) {
 		return 0
 	}
-	return int(buf[at])<<24 | int(buf[at+1])<<16 | int(buf[at+2])<<8 | int(buf[at+3])
+	return int(int32(uint32(buf[at])<<24 | uint32(buf[at+1])<<16 | uint32(buf[at+2])<<8 | uint32(buf[at+3])))
 }
 
 // readInt64Big 读大端 64 位整数（带边界钳制）。
@@ -834,12 +834,13 @@ func readInt64Big(buf []byte, at int) int64 {
 	return v
 }
 
-// readInt32Little 读小端 32 位整数（带边界钳制）。
+// readInt32Little 读小端 32 位整数（带边界钳制；按 C# BitConverter.ToInt32 保留符号——
+// 类型树节点的 ByteSize 用 -1 表示变长字段，无符号扩展会让该分支永不命中）。
 func readInt32Little(buf []byte, at int) int {
 	if at < 0 || at+4 > len(buf) {
 		return 0
 	}
-	return int(buf[at]) | int(buf[at+1])<<8 | int(buf[at+2])<<16 | int(buf[at+3])<<24
+	return int(int32(uint32(buf[at]) | uint32(buf[at+1])<<8 | uint32(buf[at+2])<<16 | uint32(buf[at+3])<<24))
 }
 
 // readInt64Little 读小端 64 位整数（带边界钳制）。

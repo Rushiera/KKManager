@@ -33,10 +33,10 @@ func (a *App) handleCard(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := s.GetCardListRow(id)
 	if err != nil {
-		writeErr(w, 404, "卡片不存在")
+		notFound(w)
 		return
 	}
-	row.Lib = lib
+	// C# GetCard 不回填 Lib（CardRow.Lib 默认 0）——单条读面不输出本次查询的库号
 	writeJSON(w, cardRowJSON(row))
 }
 
@@ -84,10 +84,10 @@ func cardRowJSON(r *store.CardListRow) map[string]interface{} {
 	return out
 }
 
-// handlePersonalities GET /api/personalities 性格字母表。
+// handlePersonalities GET /api/personalities 性格字母表（补丁 39 项 + 额外 ID，按 ID 升序）。
 func (a *App) handlePersonalities(w http.ResponseWriter, r *http.Request) {
 	list := make([]map[string]interface{}, 0, 48)
-	for id := 0; id <= 40; id++ {
+	for id := 0; id <= 255; id++ {
 		name, ok := core.PersonalityNameOf(id)
 		if !ok {
 			continue
@@ -249,11 +249,12 @@ func (a *App) handleCardArchives(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]interface{}, 0, len(list))
 	for _, one := range list {
 		out = append(out, map[string]interface{}{
-			"id": one.Id, "archivedFile": one.ArchivedFile, "archivedSize": one.ArchivedSize,
+			"id": one.Id, "cardPath": one.CardPath, "cardName": one.CardName, "lib": one.Lib,
+			"archivedFile": one.ArchivedFile, "archivedSize": one.ArchivedSize,
 			"archivedMtime": one.ArchivedMtime, "changes": one.Changes, "editedAt": one.EditedAt,
 		})
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "list": out})
+	writeJSON(w, map[string]interface{}{"ok": true, "cardPath": path, "archiveDir": archiveDir(a.DBPath), "list": out})
 }
 
 // handleCardThumb GET /api/thumb/{id}?lib=&big= 卡片缩略图（JPEG）。
@@ -272,13 +273,13 @@ func (a *App) handleCardThumb(w http.ResponseWriter, r *http.Request) {
 	defer hub.Close()
 	path, _ := core.CardPathOf(hub, cfg, lib, id)
 	if path == "" {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	st := core.ParseCardStructure(path)
 	jpg := core.ThumbnailFromCard(path, st.ImageEnd, width, 82)
 	if jpg == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")

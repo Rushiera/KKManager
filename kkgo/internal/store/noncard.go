@@ -32,3 +32,16 @@ func (d *DB) MarkNonCardMoved(id int64, dest, now string) error {
 	_, err := d.execer().Exec("UPDATE non_card SET file_path=?, moved_to=?, moved_at=? WHERE id=?", dest, dest, now, id)
 	return err
 }
+
+// LoadNonCardThumb 取一条非卡登记的缩略图字节（无图返回 nil）——对齐 C# Store.LoadNonCardThumb。
+func (d *DB) LoadNonCardThumb(id int64) ([]byte, error) {
+	var data []byte
+	err := d.execer().QueryRow("SELECT thumb FROM non_card WHERE id=?", id).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}

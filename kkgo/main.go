@@ -1752,7 +1752,9 @@ func takeFlag(rest *[]string, name string) string {
 	return ""
 }
 
-// openRoots 打开主库并读库根配置（已规范化）。
+// openRoots 打开主库并裸读库根配置——**不**做规范化。
+// 对齐 C#：各命令自己决定 Normalize 的位置（roots-add 必须在「先 Add 后 Normalize」，
+// 否则预置推荐值会插在使用者条目之前，库号分配顺序随之漂移）。
 func openRoots(dbPath string) (*store.DB, *core.RootsConfig, error) {
 	db, err := store.Open(dbPath)
 	if err != nil {
@@ -1763,9 +1765,7 @@ func openRoots(dbPath string) (*store.DB, *core.RootsConfig, error) {
 		db.Close()
 		return nil, nil, err
 	}
-	cfg := core.ParseRootsConfig(text)
-	core.Normalize(cfg)
-	return db, cfg, nil
+	return db, core.ParseRootsConfig(text), nil
 }
 
 // rootTags 库根行的标记串（顺序对齐 C#：含子目录 / 只读 / 预置锁定 / 缓存库 / 离线）。
@@ -1809,6 +1809,7 @@ func cmdRootsList(rest []string) int {
 		return 1
 	}
 	defer db.Close()
+	core.Normalize(cfg)
 	fmt.Println("库: " + db.Path())
 	fmt.Println("游戏根: " + cfg.GameRoot)
 	fmt.Println()
@@ -1900,6 +1901,7 @@ func cmdRootsClear(rest []string) int {
 		return 1
 	}
 	defer db.Close()
+	core.Normalize(cfg)
 	kind := rest[0]
 	kept := 0
 	if kind == "mods" || kind == "all" {
@@ -1941,6 +1943,7 @@ func cmdSetGameRoot(rest []string) int {
 		return 1
 	}
 	defer db.Close()
+	core.Normalize(cfg)
 	previousRoot := cfg.GameRoot
 	cfg.GameRoot = core.NormalizeGameRoot(rest[0])
 	warnings, _ := core.ApplyGameRootChange(cfg, previousRoot)
@@ -2733,7 +2736,6 @@ func cmdDup(rest []string) int {
 		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
 		return 1
 	}
-	_ = hashes
 	oldCount, err := hub.Core().CountModOld()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
@@ -2782,6 +2784,14 @@ func cmdDup(rest []string) int {
 				"  版本 " + fieldOrNone(info.Version, info.Found["version"]) +
 				"  作者 " + fieldOrNone(info.Author, info.Found["author"]) +
 				"  " + strconv.FormatInt(f.Size/1024/1024, 10) + " MB" + tail)
+			// 面板同一装配的两行展示（路径 / 创建·修改·md5）——CLI 文本面与面板逐字对齐
+			md5 := hashes[f.FilePath]
+			if md5 == "" {
+				md5 = "<算不出>"
+			}
+			ctime := core.CreatedStampOf(f.FilePath)
+			fmt.Println("        路径 " + f.FilePath)
+			fmt.Println("        建 " + ctime + " · 改 " + f.Mtime + " · md5 " + md5)
 		}
 	}
 	return 0
@@ -2836,6 +2846,11 @@ func cmdSort(rest []string) int {
 		return 1
 	}
 	defer hub.Close()
+	// 与 C# SortCommand 同序：先预建库文件（含卡片分片数定档），再读写计划表
+	if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
 
 	if sub == "plan" {
 		roots := make([]string, 0, len(rest))
@@ -2924,8 +2939,12 @@ func cmdSort(rest []string) int {
 				author = "<无>"
 			}
 			fmt.Println("  [seq " + strconv.FormatInt(c.Seq, 10) + " · " + strconv.Itoa(c.Tier) + " 级] " + c.FilePath)
+			ctime := core.CreatedStampOf(c.FilePath)
+			if ctime == "" {
+				ctime = "<读不到>"
+			}
 			fmt.Println("      版本 " + version + " · 作者 " + author + " · " + strconv.FormatInt(c.Size, 10) +
-				" 字节 · 建 " + "<读不到>" + " · 改 " + c.Mtime)
+				" 字节 · 建 " + ctime + " · 改 " + c.Mtime)
 			if md5, ok := hashes[c.FilePath]; ok && md5 != "" {
 				fmt.Println("      MD5 " + md5)
 			} else {
@@ -3116,6 +3135,11 @@ func cmdIndexImport(rest []string) int {
 		return 1
 	}
 	defer hub.Close()
+	// 与 C# IndexImportCommand 同序：先预建库文件（含首次迁移 + 卡片分片数定档），再处理库根路径迁移与导入。
+	if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+		fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+		return 1
+	}
 	if oldRoot != "" {
 		fmt.Fprintln(os.Stderr, "index-import：--old-root 未移植（库根路径迁移与旧记录清理归 card-sort 段一并补）")
 		return 3

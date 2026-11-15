@@ -4,6 +4,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,8 @@ func AnalyzeU3d(hub *store.Hub, cfg *RootsConfig, guid, entryPath string, force 
 	if err := hub.Core().SaveU3dRow(rec); err != nil {
 		return nil, "落库失败：" + err.Error()
 	}
+	// 与 C# StoreHub.AnalyzeU3d 同一声明：建档成功即出声（命中已有档案时不打）
+	fmt.Println("[unity3d] 建档：" + guid + " · " + entryPath + " · 贴图 " + itoaSmall(len(texs)) + " 张")
 	return rec, ""
 }
 

@@ -451,6 +451,11 @@ func cmdCardSort(dbPath string, rest []string) int {
 			return 1
 		}
 		defer hub.Close()
+		// 与 C# 同序：回滚前先预建库文件（含首次迁移），再做 done 记录定位
+		if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
 		moves, err := hub.Core().LoadCardMoves("done")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
@@ -588,6 +593,11 @@ func cmdCardSort(dbPath string, rest []string) int {
 			return 1
 		}
 		defer hub.Close()
+		// 与 C# 同序：先预建库文件（含首次迁移），再定位计划所属库根
+		if err = hub.EnsureMigrated(core.ModLibRoots(cfg), core.CardLibRoots(cfg)); err != nil {
+			fmt.Fprintln(os.Stderr, "诊断 "+err.Error())
+			return 1
+		}
 		rootPath := execRoot
 		if rootPath == "" {
 			for _, e := range cfg.CardRoots {
@@ -766,20 +776,37 @@ func printCardPlan(plan *core.CardPlan) {
 	fmt.Println("条目 " + strconv.Itoa(len(plan.Items)) + " · 待搬字节 " + fmt.Sprintf("%.1f", float64(bytes)/1024.0/1024.0) + " MB")
 	fmt.Println("类型：" + joinCounts(kinds))
 	fmt.Println("状态：" + joinCounts(states))
-	fmt.Println("作品数：" + strconv.Itoa(len(works)))
+	type workCount struct {
+		key string
+		n   int
+	}
+	list := make([]workCount, 0, len(works))
+	for k, v := range works {
+		list = append(list, workCount{k, v})
+	}
+	// 计数降序；同数按 key 升序（C# 是 SortedDictionary 建表后按计数排序，同数保持 key 序）
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].key < list[j].key
+	})
+	parts := make([]string, 0, 24)
+	for i := 0; i < len(list) && i < 24; i++ {
+		parts = append(parts, list[i].key+" "+strconv.Itoa(list[i].n))
+	}
+	fmt.Println("作品（前 " + strconv.Itoa(len(parts)) + " / 共 " + strconv.Itoa(len(list)) + "）：" + strings.Join(parts, " · "))
 	shown := 0
 	for _, it := range plan.Items {
-		if !it.Move || it.State != core.CardStatePending {
+		if !it.Move || it.State != core.CardStatePending || shown >= 12 {
 			continue
 		}
-		if shown >= 5 {
-			break
+		work := it.Work
+		if work == "" {
+			work = "?"
 		}
-		fmt.Println("  例：" + it.SrcPath + " → " + it.DestPath)
+		fmt.Println("  [待搬] " + it.Kind + " | " + work + " | " + it.SrcRel)
 		shown++
-	}
-	if len(plan.Items) > 5 {
-		fmt.Println("  …")
 	}
 }
 

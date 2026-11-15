@@ -92,6 +92,7 @@ func (a *App) finishScan(result *core.ScanResult, err error) {
 	scanState.NonMod = result.NonMod
 	scanState.Failed = result.Failed
 	scanState.Refs = result.RefEntries
+	scanState.ThumbBytes = result.ThumbBytes
 	scanState.NamesRead = result.NamesRead
 	scanState.NamesFilled = result.NamesFilled
 	scanState.TypesFixed = result.TypesFixed
@@ -132,7 +133,7 @@ func loadScanPlan(hub *store.Hub, steps string) *core.ScanPlan {
 	return plan
 }
 
-// handleScanPlan 读扫描步骤配置（面板只读展示顺序）。
+// handleScanPlan 读扫描步骤配置（面板扫描配置窗：全集顺序 / 启用集合 / 步骤定义 / 组定义）。
 func (a *App) handleScanPlan(w http.ResponseWriter, r *http.Request) {
 	hub, _, err := openApp(a.DBPath)
 	if err != nil {
@@ -141,7 +142,39 @@ func (a *App) handleScanPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	defer hub.Close()
 	plan := loadScanPlan(hub, "")
-	writeJSON(w, plan)
+	steps := make([]map[string]interface{}, 0, 12)
+	for _, d := range core.AllScanSteps() {
+		steps = append(steps, map[string]interface{}{
+			"id": d.Id, "name": d.Name, "mods": d.Mods, "required": d.Required,
+			"defaultOn": d.DefaultOn, "grayed": d.Grayed, "note": d.Note,
+			"group": nilIfEmpty(d.Group), "on": plan.IsOn(d.Id),
+		})
+	}
+	groups := make([]map[string]interface{}, 0, 4)
+	for _, g := range core.AllScanGroups() {
+		ids := make([]string, 0, 4)
+		for _, d := range core.ScanStepsOf(g.Id) {
+			ids = append(ids, d.Id)
+		}
+		groups = append(groups, map[string]interface{}{
+			"id": g.Id, "name": g.Name, "note": g.Note,
+			"required": g.Required, "defaultOn": g.DefaultOn, "steps": ids,
+		})
+	}
+	order := make([]string, 0, len(plan.Order))
+	order = append(order, plan.Order...)
+	// on = 启用集合全集（必选项恒在 + 用户显式勾选的可选项；灰置项不在）——对齐 C# plan.On
+	enable := make([]string, 0, len(plan.Order))
+	for _, id := range plan.Order {
+		def := core.FindScanStep(id)
+		if def == nil || def.Grayed {
+			continue
+		}
+		if plan.IsOn(id) {
+			enable = append(enable, id)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"order": order, "on": enable, "steps": steps, "groups": groups})
 }
 
 // handleWarmup 静默预热分片库（逐片打开并写一次，把 -wal 建出来）。

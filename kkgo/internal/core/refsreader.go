@@ -101,8 +101,14 @@ func RefsReadRootHub(hub *store.Hub, cfg *RootsConfig, rootPath string, onlyPend
 			}
 			continue
 		}
+		// 引用行按部件粒度写（同 guid 多部件 = 多行）——对齐 C# RefsReader.ReadRoot 的 ReplaceCardRefs(t.CardId, info.ModRefs)：
+		// 去重只喂 UpdateCardRefsMeta 的 mod_count，不决定写入行数。
 		ids := info.DistinctModIds()
-		if err = current.ReplaceCardRefs(t.CardId, ids); err != nil {
+		guids := make([]string, 0, len(info.ModRefs))
+		for _, one := range info.ModRefs {
+			guids = append(guids, one.ModId)
+		}
+		if err = current.ReplaceCardRefs(t.CardId, guids); err != nil {
 			return fail(err)
 		}
 		if err = current.UpdateCardRefsMeta(t.FilePath, len(ids), info.UarBlocks); err != nil {

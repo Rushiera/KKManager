@@ -152,11 +152,11 @@ func HasLiveCopyBesides(hub *store.Hub, cfg *RootsConfig, guid, filePath string)
 // MoveModFileHub 把一条 mod 副本从源库搬到目标库根（或复制到目标库根），并重算 mod 主表。
 // newFileName 非空时改写文件名（旧版标记 / 正名用）。found 为假 = 源副本行不存在。
 func MoveModFileHub(hub *store.Hub, cfg *RootsConfig, guid, srcPath, srcRootPath, destPath string, toTier int, targetRootPath, newFileName string) (bool, error) {
-	srcLib, err := hub.LibOf(srcRootPath)
+	srcLib, err := LibOfRootPath(hub, cfg, srcRootPath)
 	if err != nil {
 		return false, err
 	}
-	dstLib, err := hub.LibOf(targetRootPath)
+	dstLib, err := LibOfRootPath(hub, cfg, targetRootPath)
 	if err != nil {
 		return false, err
 	}
@@ -197,7 +197,7 @@ func AddModFileCopyHub(hub *store.Hub, cfg *RootsConfig, guid, srcRootPath, srcP
 	if newFileName != "" {
 		copied.FileName = newFileName
 	}
-	dstLib, err := hub.LibOf(targetRootPath)
+	dstLib, err := LibOfRootPath(hub, cfg, targetRootPath)
 	if err != nil {
 		return false, err
 	}
@@ -575,11 +575,11 @@ func SwapVersionHub(hub *store.Hub, cfg *RootsConfig, guid, oldFilePath string) 
 		}
 	}
 
-	oldLib, err := hub.LibOf(oldRec.RootPath)
+	oldLib, err := LibOfRootPath(hub, cfg, oldRec.RootPath)
 	if err != nil {
 		return "", err
 	}
-	mainLib, err := hub.LibOf(mainRec.RootPath)
+	mainLib, err := LibOfRootPath(hub, cfg, mainRec.RootPath)
 	if err != nil {
 		return "", err
 	}
