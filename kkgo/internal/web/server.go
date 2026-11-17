@@ -66,6 +66,8 @@ func (a *App) Handler() http.Handler {
 
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /api/settings", a.handleSettings)
+	mux.HandleFunc("GET /api/kkc", a.handleKkcState)
+	mux.HandleFunc("POST /api/kkc", a.handleKkcToggle)
 	mux.HandleFunc("POST /api/edit-auth", a.handleEditAuth)
 	mux.HandleFunc("GET /api/stats", a.handleStats)
 	mux.HandleFunc("GET /api/cards", a.handleCards)

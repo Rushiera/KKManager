@@ -3,6 +3,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -374,4 +375,94 @@ func (a *App) handleCardImage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	_, _ = w.Write(jpg)
+}
+
+// kkcRootsOf kkc 整理库的两条接入路径——卡片侧 = <库目录>/kkc/整理，mod 侧 = 该目录下的 02-mod。
+// kkc 与 mod / 卡片库根不是同一形态（它由 card-sort 链自己管），所以只在面板上用一个开关表达；
+// 数据仍落同一个数据库（不分家）。
+func kkcRootsOf(dbPath string) (cardRoot string, modRoot string) {
+	cardRoot = filepath.Join(filepath.Dir(dbPath), "kkc", "整理")
+	return cardRoot, filepath.Join(cardRoot, "02-mod")
+}
+
+// dropRootPath 去掉路径等于 path 的库根条目（大小写与尾部分隔符不敏感）。
+func dropRootPath(list []core.RootEntry, path string) []core.RootEntry {
+	want := strings.TrimRight(strings.TrimSpace(path), `\/`)
+	out := make([]core.RootEntry, 0, len(list))
+	for _, e := range list {
+		if strings.EqualFold(strings.TrimRight(strings.TrimSpace(e.Path), `\/`), want) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// hasRootPath 配置里是否存在路径等于 path 的库根条目。
+func hasRootPath(list []core.RootEntry, path string) bool {
+	want := strings.TrimRight(strings.TrimSpace(path), `\/`)
+	for _, e := range list {
+		if strings.EqualFold(strings.TrimRight(strings.TrimSpace(e.Path), `\/`), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleKkcState GET /api/kkc —— kkc 接入开关状态（开 = 配置里有 kkc 的两条根）。
+func (a *App) handleKkcState(w http.ResponseWriter, r *http.Request) {
+	hub, cfg, err := openApp(a.DBPath)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer hub.Close()
+	cardRoot, modRoot := kkcRootsOf(a.DBPath)
+	writeJSON(w, map[string]interface{}{
+		"ok":       true,
+		"enabled":  hasRootPath(cfg.CardRoots, cardRoot),
+		"root":     filepath.Dir(cardRoot),
+		"cardRoot": cardRoot,
+		"modRoot":  modRoot,
+		"modOn":    hasRootPath(cfg.ModRoots, modRoot),
+	})
+}
+
+// handleKkcToggle POST /api/kkc {enabled} —— 开：把 kkc 整理库接成「卡片附加库 + mod 冷冻库」；
+// 关：只摘这两条根，其余库根一字不动。开关状态同时落 setting.kkc_enabled（只为读面自证，判定以配置为准）。
+func (a *App) handleKkcToggle(w http.ResponseWriter, r *http.Request) {
+	var dto struct {
+		Enabled bool `json:"enabled"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&dto)
+	}
+	hub, cfg, err := openApp(a.DBPath)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer hub.Close()
+	cardRoot, modRoot := kkcRootsOf(a.DBPath)
+	cfg.CardRoots = dropRootPath(cfg.CardRoots, cardRoot)
+	cfg.ModRoots = dropRootPath(cfg.ModRoots, modRoot)
+	if dto.Enabled {
+		cfg.CardRoots = append(cfg.CardRoots, core.RootEntry{Tier: 2, Path: cardRoot, Recurse: true, ReadOnly: true})
+		cfg.ModRoots = append(cfg.ModRoots, core.RootEntry{Tier: 3, Path: modRoot, Recurse: true, ReadOnly: true})
+	}
+	core.Normalize(cfg)
+	if saveErr := saveRootsConfig(hub, cfg); saveErr != nil {
+		writeErr(w, 500, saveErr.Error())
+		return
+	}
+	flag := "0"
+	if dto.Enabled {
+		flag = "1"
+	}
+	_ = hub.Core().SetSetting("kkc_enabled", flag)
+	fmt.Printf("[kkc] 接入开关 → %s（卡片根 %s · mod 根 %s）\n", map[bool]string{true: "开", false: "关"}[dto.Enabled], cardRoot, modRoot)
+	writeJSON(w, map[string]interface{}{
+		"ok": true, "enabled": dto.Enabled, "roots": cfg,
+		"root": filepath.Dir(cardRoot), "cardRoot": cardRoot, "modRoot": modRoot,
+	})
 }

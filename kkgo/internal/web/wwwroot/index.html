@@ -252,6 +252,12 @@
       <span class="dim">选定游戏根后自动填入 4 条级别 1：游戏根\mods · UserData 下 female / coordinate / Studio</span>
     </div>
 
+    <h2>kkc 接入（独立形态 · 与下面的 mod / 卡片库根不是一套：kkc 由 card-sort 链自己管，这里只有一个开关）</h2>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px">
+      <button id="btnKkcToggle" title="开 = 把 kkc 整理库接成「卡片附加库 + mod 冷冻库」；关 = kkm 不扫 kkc（重复副本与缺失统计都不含它）。数据始终共用同一个数据库">kkc 接入：关</button>
+      <span class="dim" id="kkcHint">关着：只扫游戏目录。开：才扫 kkc\整理（卡片）与 整理\02-mod（mod 冷冻库）——开关独立于下面的库根表，保存库根不会动它</span>
+    </div>
+
     <h2>库根设置 — 插件库（预置条目锁定不可改 · BepInEx 目录 · 含子目录）</h2>
     <table class="list"><thead><tr><th style="width:82px">更新</th><th style="width:88px">离线</th><th style="width:96px">级别</th><th>路径 / 备注</th><th style="width:72px">含子目录</th><th style="width:52px">只读</th><th style="width:170px"></th></tr></thead>
       <tbody id="pluginRootsBody"></tbody></table>
@@ -1618,10 +1624,41 @@ function renderRoots(){
   $('pluginRootsBody').innerHTML = '';
   (roots.pluginRoots||[]).forEach(e => $('pluginRootsBody').appendChild(rootRow('plugins', e)));
   $('modRootsBody').innerHTML = '';
-  (roots.modRoots||[]).forEach(e => $('modRootsBody').appendChild(rootRow('mods', e)));
+  (roots.modRoots||[]).filter(e => !isUnderKkc(e.path)).forEach(e => $('modRootsBody').appendChild(rootRow('mods', e)));
   $('cardRootsBody').innerHTML = '';
-  (roots.cardRoots||[]).forEach(e => $('cardRootsBody').appendChild(rootRow('cards', e)));
+  (roots.cardRoots||[]).filter(e => !isUnderKkc(e.path)).forEach(e => $('cardRootsBody').appendChild(rootRow('cards', e)));
   wireDrag('cardRootsBody');
+}
+/* kkc 接入的条目不在库根表里显示（形态解耦）——判据 = 路径落在 kkc 整理库前缀下 */
+function isUnderKkc(path){
+  const root = (state.kkc && state.kkc.cardRoot) ? String(state.kkc.cardRoot).toLowerCase() : '';
+  if(!root) return false;
+  const p = String(path||'').toLowerCase();
+  return p === root || p.indexOf(root + '\\') === 0 || p.indexOf(root + '/') === 0;
+}
+function renderKkcButton(){
+  const btn = $('btnKkcToggle');
+  if(!btn) return;
+  const on = !!(state.kkc && state.kkc.enabled);
+  btn.textContent = 'kkc 接入：' + (on ? '开' : '关');
+  btn.classList.toggle('primary', on);
+  btn.title = on
+    ? '点一下关闭——kkm 不再扫 kkc（已扫的库记录保留，要清走 /api/roots/purge）'
+    : '点一下打开——把 kkc 整理库接成卡片附加库 + mod 冷冻库（数据仍共用同一个库）';
+}
+async function toggleKkc(){
+  const btn = $('btnKkcToggle');
+  const next = !(state.kkc && state.kkc.enabled);
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = next ? '接入中…' : '关闭中…';
+  try{
+    const r = await api('/api/kkc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: next})});
+    if(!r || !r.ok){ alert('kkc 接入切换失败：' + ((r && r.error) || '未知错误')); return; }
+    await loadSettings();
+    await loadStats();
+  }catch(e){ alert('kkc 接入切换失败：' + e.message); }
+  finally{ btn.disabled = false; if(!state.kkc) btn.textContent = old; }
 }
 /* 卡片附加库支持上下拖动排序——预置主库（锁定行）不参与，也不能被拖到前面 */
 function wireDrag(tbodyId){
@@ -1679,7 +1716,9 @@ function collectRoots(bodyId){
 async function loadSettings(){
   const s = await api('/api/settings');
   state.roots = s.roots || {gameRoot:'', modRoots:[], cardRoots:[]};
+  try{ state.kkc = await api('/api/kkc'); }catch(e){ /* 端点缺失时按「关」处理 */ }
   renderRoots();
+  renderKkcButton();
   updateSettingsHint();
   $('verInfo').textContent = 'v' + (s.version || '?');
   applyAuth(s.editAuthorized === true);
@@ -1689,6 +1728,10 @@ async function saveSettings(collapse, quiet){
   try{
     await syncMainRoots($('gameRoot').value);   /* 保存前对齐：4 条级别 1 = 游戏根派生值 */
     const body = { gameRoot: $('gameRoot').value.trim(), modRoots: collectRoots('modRootsBody'), cardRoots: collectRoots('cardRootsBody') };
+    /* kkc 条目不在库根表里显示——保存时按原样带回，避免「保存配置」顺手把 kkc 接入关掉 */
+    const roots0 = state.roots || {};
+    (roots0.modRoots||[]).filter(e => isUnderKkc(e.path)).forEach(e => body.modRoots.push(e));
+    (roots0.cardRoots||[]).filter(e => isUnderKkc(e.path)).forEach(e => body.cardRoots.push(e));
     const r = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     state.roots = r.roots || state.roots;
     renderRoots();
@@ -3344,6 +3387,7 @@ $('btnEditReload').onclick = () => loadParams();
 $('btnOldClose').onclick = () => $('ovOld').classList.add('hidden');
 $('btnOldReload').onclick = () => openOld(editCtx.cardId, editCtx.lib);
 $('btnSave').onclick = () => saveSettings(true);
+$('btnKkcToggle').onclick = toggleKkc;
 $('btnAddModRoot').onclick = () => $('modRootsBody').appendChild(rootRow('mods'));
 $('btnAddCardRoot').onclick = () => $('cardRootsBody').appendChild(rootRow('cards'));
 $('btnSortMtime').onclick = () => setCardSort('mtime');
