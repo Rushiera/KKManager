@@ -469,6 +469,17 @@ namespace KKManager.Data
             }
             return distinct.Count;
         }
+        /// <summary>清理全部库的索引跳过行（idx_meta.file_path = "[跳过]" + 索引 ID）——导入前清理专用：跳过行不带库根前缀，PurgeRoot 清不到；重导索引会重写。</summary>
+        /// <returns>删除行数合计。</returns>
+        public int PurgeSkipRows(RootsConfig cfg)
+        {
+            int total = 0;
+            foreach (Store s in AllStores(cfg))
+            {
+                total += s.PurgeSkipRows();
+            }
+            return total;
+        }
 
         /// <summary>把一张卡片行从源分片搬到目标分片（按源路径定位，保 id / 保 card_mod 引用 / 搬 idx_meta）——文件移动后的导入消费用。返回 true = 已搬。</summary>
         public bool MoveCardRow(Store from, Store to, string fromPath, string newPath, string newFolder)
@@ -588,7 +599,25 @@ namespace KKManager.Data
                     }
                 }
             }
-            // 先删源行（同分片移动时释放 id；card_mod / card_analysis 一并删）
+            // card_analysis 分项分析行（删源行之前读；搬卡不重跑分析——C76 解耦）
+            var analyses = new List<object[]>();
+            using (SqliteCommand cmd = from.NewCommand("SELECT kind, size, mtime, data, read_at FROM card_analysis WHERE card_id=$id"))
+            {
+                cmd.Parameters.AddWithValue("$id", cardId);
+                using (SqliteDataReader r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                    {
+                        object[] arow = new object[5];
+                        for (int i = 0; i < 5; i = i + 1)
+                        {
+                            arow[i] = r.IsDBNull(i) ? null : r.GetValue(i);
+                        }
+                        analyses.Add(arow);
+                    }
+                }
+            }
+            // 先删源行（同分片移动时释放 id；card_mod / card_analysis 一并删——分析行已先读出，删除后随卡写回）
             from.DeleteCardByPath(oldPath ?? "");
             if (hasMeta)
             {
@@ -657,6 +686,24 @@ namespace KKManager.Data
             {
                 to.UpsertIndexMeta(newPath, idxId, iKind, iCardType, iChara, iWork, iAuthor, iSource, iSrcRel, iNote, iGuid,
                     iSeries, iVnId, iVnName, iVndbCharaId, iCharaIdConf, iCategory, iSubCategory);
+            }
+            // 分项分析行随卡搬（新 id + 新路径）——不重跑分析，移动几张卡不再触发全库分析重挂
+            foreach (object[] arow in analyses)
+            {
+                using (SqliteCommand ins2 = to.NewCommand(@"INSERT INTO card_analysis(card_id, kind, file_path, size, mtime, data, read_at)
+                                 VALUES($id,$kind,$path,$size,$mtime,$data,$read)
+                                 ON CONFLICT(card_id, kind) DO UPDATE SET
+                                   file_path=excluded.file_path, size=excluded.size, mtime=excluded.mtime,
+                                   data=excluded.data, read_at=excluded.read_at"))
+                {
+                    ins2.Parameters.AddWithValue("$id", insertId);
+                    ins2.Parameters.AddWithValue("$kind", (object)arow[0] ?? DBNull.Value);
+                    ins2.Parameters.AddWithValue("$path", newPath);
+                    ins2.Parameters.AddWithValue("$size", (object)arow[1] ?? DBNull.Value);
+                    ins2.Parameters.AddWithValue("$mtime", (object)arow[2] ?? DBNull.Value);
+                    ins2.Parameters.AddWithValue("$data", (object)arow[3] ?? DBNull.Value);
+                    ins2.Parameters.AddWithValue("$read", (object)arow[4] ?? DBNull.Value);
+                }
             }
             return true;
         }
@@ -749,15 +796,15 @@ namespace KKManager.Data
             return done;
         }
 
-        /// <summary>跨库查索引元数据——rootPath 非空时按路径前缀过滤（某库根的记录）；结果按 limit 截断。</summary>
-        public List<Store.IdxRow> QueryIndexMeta(RootsConfig cfg, string rootPath, string kind, string work, string author, string keyword, int limit)
+        /// <summary>跨库查索引元数据——rootPath 非空时按路径前缀过滤（某库根的记录）；系列 / VN / VNDB 角色 ID 精确筛选；结果按 limit 截断。</summary>
+        public List<Store.IdxRow> QueryIndexMeta(RootsConfig cfg, string rootPath, string kind, string work, string author, string keyword, string series, string vn, string charaId, int limit)
         {
             List<Store.IdxRow> list = new List<Store.IdxRow>();
             string prefix = (rootPath ?? "").TrimEnd('\\', '/').ToLowerInvariant();
             int want = limit <= 0 ? 100 : limit;
             foreach (Store s in AllStores(cfg))
             {
-                foreach (Store.IdxRow row in s.QueryIndexMeta(kind, work, author, keyword, want))
+                foreach (Store.IdxRow row in s.QueryIndexMeta(kind, work, author, keyword, series, vn, charaId, want))
                 {
                     if (prefix.Length == 0 || (row.FilePath ?? "").ToLowerInvariant().StartsWith(prefix))
                     {

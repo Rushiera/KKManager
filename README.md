@@ -113,7 +113,7 @@ Koikatsu 卡片 ↔ zipmod 关联管理器——把「这张卡用了哪些 mod 
 - Windows x64 单文件 exe（**Go 静态编译 · 免运行时**；2026-11-15 起为现行实现）
 - 双击即起本地面板（浏览器），端口 8539
 - 运行数据 = exe 同目录 `data\kkmanager.db`（首次运行自动创建）
-- C# 版（`KMR.exe` / .NET 8）自 0.21.9 起**冻结为只读参照**，不再更新
+- C# 版（`KMR.exe` / .NET 8）自 0.21.9 起**冻结为只读参照**，不再更新；源码 2026-11-17 归档到 `raw/KKManager-CSharp/`
 
 ## 使用
 
@@ -131,13 +131,13 @@ go build -o kkgo.exe .
 
 发布编译走 `revealer/RELEASE.md` §四-4.1 的固定通道（`go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1"`）。
 
-C# 参照（冻结，只在对拍基准需重编时）：
+C# 参照（归档在 raw/，只在对拍基准需重编时）：
 
 ```
-dotnet build KKManager/KKManager.csproj
+dotnet build raw/KKManager-CSharp/KKManager.csproj
 ```
 
-调试期：Go 直接跑 `kkgo.exe serve --port 8539 --open`；`dist\` 双槽（`KMR_A.exe` / `KMR_B.exe` 交替发布 + `启动.bat`）为 **C# 参照的调试通道**，不再承载新功能。
+调试期：Go 直接跑 `kkgo.exe serve --port 8539 --open`；`dist\` 双槽（`KMR_A.exe` / `KMR_B.exe` 交替发布 + `启动.bat`）为 **C# 参照的调试通道**（归档态，不再承载新功能）。
 
 ## 发布
 
@@ -164,9 +164,10 @@ dotnet build KKManager/KKManager.csproj
 
 ```
 kkgo/               现行实现（Go：解析核 / 存储 / 扫描链 / 面板 / CLI）
-KKManager/          C# 参照（0.21.9 冻结，只读；Core 解析 / Data 存储 / Web 面板）
-KKManagerProbe/     C# 取证探针（不随发布）
 revealer/           发布区（规范 + 发布版目录）
-raw/                原始资料与改造记录（Go 全量重写改造方式总览 · 2026-11-15 建档）
-dist/               C# 参照调试产物区（不入仓）
+raw/                归档区（2026-11-17 旧结构清扫）——
+                    KKManager-CSharp/ = C# 参照源码（0.21.9 冻结只读）
+                    KKManagerProbe/ = C# 取证探针 · perf/ + perf-runbook.md = C# 跑测件
+                    改造方式-总览.md = Go 全量重写改造方式
+dist/               运行数据区（不入仓；data/ = 现行数据库 + card_archive/ 卡片留档）
 ```

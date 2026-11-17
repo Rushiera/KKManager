@@ -964,7 +964,7 @@ namespace KKManager.Core
                     }
                 }
             }
-            else if (lower == ".zipmod")
+            else if (lower == ".zipmod" || (lower == ".zip" && IsUnderModArea(path)))
             {
                 item.Kind = KindMod;
             }
@@ -977,6 +977,16 @@ namespace KKManager.Core
             item.Author = ResolveAuthor(item, rules);
             item.SrcRoot = SourceOf(item, rootName);
             return item;
+        }
+        /// <summary>
+        /// 是否落在整理根 mod 区（`02-mod\`）下——`.zip` 只有在这个区里才算 mod（C67）。
+        /// 单独按扩展名判会把 05-其它 里的普通 zip（含人物卡）误判成 mod。
+        /// </summary>
+        /// <param name="path">文件路径（绝对或相对，斜杠不限）</param>
+        /// <returns>在 02-mod 区下返回 true</returns>
+        private static bool IsUnderModArea(string path)
+        {
+            return ("\\" + path.Replace('/', '\\')).IndexOf(@"\02-mod\", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         /// <summary>来源键——源根名 + 相对路径首段（如 recode/genshin_impact），根下直放文件只有源根名。</summary>

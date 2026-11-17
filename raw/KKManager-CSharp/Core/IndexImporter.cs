@@ -396,13 +396,10 @@ namespace KKManager.Core
                     {
                         modStore.FillModMeta(mi);
                     }
-                    result.Mods = result.Mods + 1;
                 }
-                else
-                {
-                    // 仍无 guid（manifest 读不到）——只进元数据，不伪造 guid
-                    result.Others = result.Others + 1;
-                }
+                // 计数按索引行 kind 归口（C67）——无 guid 的 mod 仍算 mod，只是不写 mod_file；
+                // 旧口径按「是否写成 mod_file」计数，会让 mod 少 47 / 其它多 47（对账面长期不平）
+                result.Mods = result.Mods + 1;
                 modStore.UpsertIndexMeta(full, idxId, kind, cardType, chara, work, author, source, srcRel, note, guid,
                 series, vnId, vnName, vndbCharaId, charaIdConf, category, subCategory);
                 return;

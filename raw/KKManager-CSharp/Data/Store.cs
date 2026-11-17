@@ -2788,21 +2788,25 @@ namespace KKManager.Data
             public string SubCategory { get; set; }
         }
 
-        /// <summary>查索引元数据——按类型 / 作品 / 作者精确筛选 + 关键词模糊（角色名 / 路径 / 作品）；空条件不筛。</summary>
-        public List<IdxRow> QueryIndexMeta(string kind, string work, string author, string keyword, int limit)
+        /// <summary>查索引元数据——按类型 / 作品 / 作者 / 系列 / VN / VNDB 角色 ID 精确筛选 + 关键词模糊（角色名 / 路径 / 作品）；空条件不筛。</summary>
+        public List<IdxRow> QueryIndexMeta(string kind, string work, string author, string keyword, string series, string vn, string charaId, int limit)
         {
             List<IdxRow> list = new List<IdxRow>();
             string sql = @"SELECT file_path, idx_id, kind, card_type, chara, work, author, source, src_rel, note, guid,
-                                          series, vn_id, vn_name, vndb_chara_id, chara_id_conf, category, sub_category
-                                   FROM idx_meta WHERE ($k='' OR kind=$k) AND ($w='' OR work=$w) AND ($a='' OR author=$a)
-                                     AND ($q='' OR chara LIKE $qq OR file_path LIKE $qq OR work LIKE $qq OR author LIKE $qq OR guid LIKE $qq)
-                                   ORDER BY work, chara, file_path LIMIT $n";
+                                                  series, vn_id, vn_name, vndb_chara_id, chara_id_conf, category, sub_category
+                                           FROM idx_meta WHERE ($k='' OR kind=$k) AND ($w='' OR work=$w) AND ($a='' OR author=$a)
+                                             AND ($s='' OR series=$s) AND ($vn='' OR vn_id=$vn OR vn_name=$vn) AND ($c='' OR vndb_chara_id=$c)
+                                             AND ($q='' OR chara LIKE $qq OR file_path LIKE $qq OR work LIKE $qq OR author LIKE $qq OR guid LIKE $qq)
+                                           ORDER BY work, chara, file_path LIMIT $n";
             using (SqliteCommand cmd = NewCommand(sql))
             {
                 string q = keyword ?? "";
                 cmd.Parameters.AddWithValue("$k", kind ?? "");
                 cmd.Parameters.AddWithValue("$w", work ?? "");
                 cmd.Parameters.AddWithValue("$a", author ?? "");
+                cmd.Parameters.AddWithValue("$s", series ?? "");
+                cmd.Parameters.AddWithValue("$vn", vn ?? "");
+                cmd.Parameters.AddWithValue("$c", charaId ?? "");
                 cmd.Parameters.AddWithValue("$q", q);
                 cmd.Parameters.AddWithValue("$qq", "%" + q + "%");
                 cmd.Parameters.AddWithValue("$n", limit <= 0 ? 100 : limit);
@@ -2899,6 +2903,15 @@ namespace KKManager.Data
                 }
             }
             return guids;
+        }
+        /// <summary>清理索引跳过行（idx_meta.file_path = "[跳过]" + 索引 ID）——跳过行不带库根前缀，按根前缀清理（DeleteRecordsUnderRoot）清不到。</summary>
+        /// <returns>删除行数。</returns>
+        public int PurgeSkipRows()
+        {
+            using (SqliteCommand cmd = NewCommand("DELETE FROM idx_meta WHERE file_path LIKE '[跳过]%'"))
+            {
+                return cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>载入 mod 副本的 guid 索引——file_path → guid（扫描组装内存态用）。</summary>

@@ -197,7 +197,7 @@ namespace KKManager
             Console.WriteLine("  card-sort learn --from <索引.tsv> [--write <规则.tsv>]  从索引学「角色名 → 作品」规则写进规则库（origin=learn；已有同名规则保留原值）");
             Console.WriteLine("  card-sort layout --root <整理根> --index <索引.tsv> --by work|author|chara|flat [--yes]  按维度重排卡片目录（work / author / chara 分子目录，flat 恢复扁平；同盘改名，可反复切换）");
             Console.WriteLine("  index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>]  读 kkc 风格索引写库（不扫文件系统）；--old-root 同时迁移库根路径并清旧记录");
-            Console.WriteLine("  idx [--kind 卡|mod] [--work <作品>] [--author <作者>] [--q <关键词>] [--limit N] [--root <库根>]  查索引元数据（作品 / 作者 / 角色 / 来源——索引导入独有字段）");
+            Console.WriteLine("  idx [--kind 卡|mod] [--work <作品>] [--author <作者>] [--series <系列>] [--vn <VN_ID或VN名>] [--chara-id <VNDB角色ID>] [--q <关键词>] [--limit N] [--root <库根>] [--wide]  查索引元数据（作品 / 作者 / 角色 / 来源——索引导入独有字段；参考层三筛选精确匹配，空值不筛）");
             Console.WriteLine("  refs-read --root <库根路径>  引用补读：读该库根下已入库卡片的声明区，写 mod 引用（一次性，不扫目录）");
             Console.WriteLine("  plugins [--unnoted]                    列出插件库里的插件（与面板「插件清单」同源；含中文说明 / 配置节数；--unnoted 只列未收录说明的项）");
             Console.WriteLine("  plugin-config [GUID|插件名]           插件配置文件——无参数列全部 cfg；给键则列出该插件的分节 / 配置项 / 作者注释");
@@ -1253,7 +1253,8 @@ namespace KKManager
                 if (rest.Remove("--purge-first"))
                 {
                     int purgedFirst = hub.PurgeRoot(cfg, root);
-                    Console.WriteLine("导入前清理：root 旧记录（受影响 mod guid " + purgedFirst + " 个）");
+                    int skipRows = hub.PurgeSkipRows(cfg);
+                    Console.WriteLine("导入前清理：root 旧记录（受影响 mod guid " + purgedFirst + " 个）· 跳过行 " + skipRows + " 条");
                 }
                 // [段 2.5] 消费已完成的移动记录——DB 行从旧路径迁到新路径（保 card_id / card_mod 引用），再导入
                 hub.ConsumeCardMoves(cfg, root, m => Console.WriteLine("  " + m));
@@ -1297,12 +1298,15 @@ namespace KKManager
             return 0;
         }
 
-        /// <summary>查索引元数据（作品 / 作者 / 角色 / 来源）——索引导入独有字段，按类型 / 作品 / 作者筛选 + 关键词模糊。</summary>
+        /// <summary>查索引元数据（作品 / 作者 / 角色 / 来源）——索引导入独有字段，按类型 / 作品 / 作者 / 系列 / VN / VNDB 角色 ID 筛选 + 关键词模糊。</summary>
         private static int IdxCommand(string db, List<string> rest)
         {
             string kind = Take(rest, "--kind");
             string work = Take(rest, "--work");
             string author = Take(rest, "--author");
+            string series = Take(rest, "--series");
+            string vn = Take(rest, "--vn");
+            string charaId = Take(rest, "--chara-id");
             string q = Take(rest, "--q");
             string root = Take(rest, "--root");
             int limit = int.Parse(Take(rest, "--limit") ?? "50");
@@ -1312,7 +1316,7 @@ namespace KKManager
                 RootsConfig cfg = hub.Core.LoadRoots();
                 RootsRules.Normalize(cfg);
                 hub.EnsureMigrated(cfg);
-                List<Store.IdxRow> rows = hub.QueryIndexMeta(cfg, root, kind, work, author, q, limit);
+                List<Store.IdxRow> rows = hub.QueryIndexMeta(cfg, root, kind, work, author, q, series, vn, charaId, limit);
                 Console.WriteLine("索引元数据：命中 " + rows.Count + " 条（上限 " + limit + "）" + (wide ? " · 宽表 13 列" : ""));
                 foreach (Store.IdxRow r in rows)
                 {
@@ -1663,6 +1667,64 @@ namespace KKManager
                 Console.Error.WriteLine("未知子命令: " + sub + "（可用：plan / show / exec）");
                 return 2;
             }
+        }
+        /// <summary>冷层 v2 对象清单（&lt;root&gt;/cold/objects.tsv，由 kkc_index.py 折叠落盘）→ 小写化相对路径集合；无文件返回 null（冷层未接入）。</summary>
+        private static HashSet<string> ColdObjectPaths(string rootPath)
+        {
+            string p = Path.Combine(rootPath ?? "", "cold", "objects.tsv");
+            if (!File.Exists(p))
+            {
+                return null;
+            }
+            HashSet<string> set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string line in File.ReadLines(p, Encoding.UTF8))
+            {
+                string s = line.Trim();
+                if (s.Length == 0 || s[0] == '#')
+                {
+                    continue;
+                }
+                int tab = s.IndexOf('\t');
+                string rel = (tab >= 0 ? s.Substring(0, tab) : s).Replace('\\', '/').Trim();
+                if (rel.Length > 0)
+                {
+                    set.Add(rel.ToLowerInvariant());
+                }
+            }
+            return set;
+        }
+        /// <summary>冷层清单命中判定——清单键相对整理根，库根通常是整理根的父目录（rel 首段 = 整理），故命中「整条」或「剥首段」两种形态。</summary>
+        private static bool ColdContains(HashSet<string> set, string rel)
+        {
+            if (rel == null || set == null)
+            {
+                return false;
+            }
+            if (set.Contains(rel))
+            {
+                return true;
+            }
+            int i = rel.IndexOf('/');
+            return i > 0 && set.Contains(rel.Substring(i + 1));
+        }
+        /// <summary>绝对路径相对 rootPath 的小写化相对路径（正斜杠）；不在根下返回 null。</summary>
+        private static string RelUnder(string rootPath, string filePath)
+        {
+            if (string.IsNullOrEmpty(rootPath) || string.IsNullOrEmpty(filePath))
+            {
+                return null;
+            }
+            string rp = rootPath.TrimEnd('\\', '/');
+            if (filePath.Length <= rp.Length + 1 || !filePath.StartsWith(rp, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            char sep = filePath[rp.Length];
+            if (sep != '\\' && sep != '/')
+            {
+                return null;
+            }
+            return filePath.Substring(rp.Length + 1).Replace('\\', '/').ToLowerInvariant();
         }
 
         /// <summary>卡片整理命令行——plan 扫源目录出计划 / show 核对 / exec 执行 / rules 规则库（读 / 导入 / 导出）。</summary>
@@ -2244,34 +2306,69 @@ namespace KKManager
                         Console.Error.WriteLine("闸门[索引新鲜度]：定位不到计划所属库根——用 --root <整理根> 指定");
                         return 3;
                     }
-                    // 闸门 1：索引新鲜度（抽样 200 条，失配率 ≤1%）
+                    // 闸门 1：索引新鲜度（抽样 200 条，失配率 ≤1%）——C89：冷层 v2 对象「盘面缺失」是预期态，
+                    // 抽样分母先排除冷层清单（<root>/cold/objects.tsv，kkc_index.py 折叠落盘），余下才判在盘
                     List<StoreHub.CardTarget> cards = hub.CardsOfRoot(cfg, rootPath, null);
-                    int sample = cards.Count <= 200 ? cards.Count : 200;
-                    if (sample == 0)
+                    HashSet<string> coldPaths = ColdObjectPaths(rootPath);
+                    if (coldPaths == null && Directory.Exists(Path.Combine(rootPath, "cold", "log")))
+                    {
+                        Console.Error.WriteLine("闸门[索引新鲜度]：冷层在册（cold/log）但缺 cold/objects.tsv——先 rebuild 生成对象清单再执行（缺清单会把冷层行全判失配）");
+                        return 3;
+                    }
+                    List<StoreHub.CardTarget> pool = cards;
+                    int coldSkipped = 0;
+                    if (coldPaths != null && coldPaths.Count > 0)
+                    {
+                        pool = new List<StoreHub.CardTarget>(cards.Count);
+                        foreach (StoreHub.CardTarget c in cards)
+                        {
+                            string rel = RelUnder(rootPath, c.FilePath);
+                            if (ColdContains(coldPaths, rel))
+                            {
+                                coldSkipped = coldSkipped + 1;
+                                continue;
+                            }
+                            pool.Add(c);
+                        }
+                    }
+                    int missing = 0;
+                    int taken = 0;
+                    int sample = pool.Count <= 200 ? pool.Count : 200;
+                    if (sample == 0 && coldSkipped == 0)
                     {
                         Console.Error.WriteLine("闸门[索引新鲜度]：库根下无卡片行（索引未导入）——先 index-import 再执行");
                         return 3;
                     }
-                    int missing = 0;
-                    int stride = cards.Count / sample < 1 ? 1 : cards.Count / sample;
-                    int taken = 0;
-                    for (int i = 0; i < cards.Count && taken < sample; i = i + stride)
+                    if (sample == 0)
                     {
-                        taken = taken + 1;
-                        if (!File.Exists(cards[i].FilePath))
+                        Console.WriteLine("闸门[索引新鲜度]：库根 " + cards.Count.ToString(CultureInfo.InvariantCulture) + " 条卡片全为冷层对象（清单命中 "
+                            + coldSkipped.ToString(CultureInfo.InvariantCulture) + "）——无可抽样在盘行，按冷层口径通过");
+                    }
+                    else
+                    {
+                        int stride = pool.Count / sample < 1 ? 1 : pool.Count / sample;
+                        for (int i = 0; i < pool.Count && taken < sample; i = i + stride)
                         {
-                            missing = missing + 1;
+                            taken = taken + 1;
+                            if (!File.Exists(pool[i].FilePath))
+                            {
+                                missing = missing + 1;
+                            }
                         }
                     }
-                    double missRate = taken == 0 ? 100.0 : missing * 100.0 / taken;
+                    double missRate = taken == 0 ? 0.0 : missing * 100.0 / taken;
                     if (missRate > 1.0)
                     {
                         Console.Error.WriteLine("闸门[索引新鲜度]：抽样 " + taken.ToString(CultureInfo.InvariantCulture) + " 条 · 失配 " + missing.ToString(CultureInfo.InvariantCulture)
                             + " 条（" + missRate.ToString("F2", CultureInfo.InvariantCulture) + "% > 1%）——索引过期，先重建索引（kkc_index.py --split --refs）");
                         return 3;
                     }
-                    Console.WriteLine("闸门[索引新鲜度]：抽样 " + taken.ToString(CultureInfo.InvariantCulture) + " · 失配 " + missing.ToString(CultureInfo.InvariantCulture)
-                        + "（" + missRate.ToString("F2", CultureInfo.InvariantCulture) + "%）通过");
+                    if (taken > 0)
+                    {
+                        Console.WriteLine("闸门[索引新鲜度]：抽样 " + taken.ToString(CultureInfo.InvariantCulture) + " · 失配 " + missing.ToString(CultureInfo.InvariantCulture)
+                            + "（" + missRate.ToString("F2", CultureInfo.InvariantCulture) + "%）通过"
+                            + (coldSkipped > 0 ? " · 冷层跳过 " + coldSkipped.ToString(CultureInfo.InvariantCulture) + " 条（盘面缺失为预期态）" : ""));
+                    }
                     // 闸门 3：映射先落盘——每条待搬在 card_move 有一行（pending / claimed）
                     List<Store.CardMoveRow> moves = hub.Core.LoadCardMoves(null);
                     Dictionary<string, Store.CardMoveRow> moveByFrom = new Dictionary<string, Store.CardMoveRow>(StringComparer.OrdinalIgnoreCase);
