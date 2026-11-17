@@ -190,7 +190,7 @@ func run(args []string) int {
 		if releasePack != "" {
 			fmt.Println("发布版（ReleasePack 编译）——双击本 exe 即起面板。")
 		}
-		fmt.Println("kkgo " + version)
+		fmt.Println("KMR " + version)
 		return 0
 	case "help":
 		if releasePack != "" {
@@ -1970,7 +1970,7 @@ func usageLine(name, desc string) {
 
 // usage 打印全命令清单——53 条命令与 run() 的 switch 一一对应（新增命令必须同轮补这里）。
 func usage() {
-	fmt.Println("kkgo —— KK Manager 的 Go 重写（对照 C# 0.21.9）")
+	fmt.Println("KMR —— KK Manager（Go 实现 · 对照 C# 0.21.9，参照源码归档 raw/KKManager-CSharp/）")
 	fmt.Println()
 	fmt.Println("全局参数：--db <库路径> 置于命令与其子命令之后（默认 <exe 同级>/data/kkmanager.db）")
 	fmt.Println()
@@ -3089,6 +3089,8 @@ func cmdIndexImport(rest []string) int {
 		fmt.Fprintln(os.Stderr, "用法：index-import --root <库根路径> [--index <索引目录>] [--old-root <旧库根路径>] [--purge-first]")
 		return 2
 	}
+	// 归并口径：`<x>\整理` → 库根 `<x>`（root_path / 库序号 / 校验都按库根；kkc 接入开关只登记 整理 子目录）
+	root = core.LibraryRootOf(root)
 	dbPath := dbFlag(&rest)
 	hub, cfg, err := openHub(dbPath)
 	if err != nil {
@@ -3135,9 +3137,26 @@ func cmdIndexImport(rest []string) int {
 	}
 	modRoot := findRootEntry(cfg.ModRoots, root)
 	cardRoot := findRootEntry(cfg.CardRoots, root)
+	if modRoot == nil {
+		modRoot = findRootEntryByLibraryRoot(cfg.ModRoots, root)
+	}
+	if cardRoot == nil {
+		cardRoot = findRootEntryByLibraryRoot(cfg.CardRoots, root)
+	}
 	if modRoot == nil && cardRoot == nil {
 		fmt.Fprintln(os.Stderr, "该路径不是已配置的库根："+root+"——先 roots-add，或加 --old-root 迁移")
 		return 2
+	}
+	// 库根口径：把条目路径换成库根（root_path / 库序号都按库根算；配置本身不动）
+	if modRoot != nil {
+		entry := *modRoot
+		entry.Path = root
+		modRoot = &entry
+	}
+	if cardRoot != nil {
+		entry := *cardRoot
+		entry.Path = root
+		cardRoot = &entry
 	}
 	useMod := modRoot
 	if useMod == nil {
@@ -3196,6 +3215,17 @@ func findRootEntry(list []core.RootEntry, path string) *core.RootEntry {
 	for i := range list {
 		one := strings.TrimRight(strings.TrimRight(list[i].Path, `\`), "/")
 		if strings.EqualFold(one, path) {
+			return &list[i]
+		}
+	}
+	return nil
+}
+
+// findRootEntryByLibraryRoot 按「库根口径」找条目——配置里的 `<x>\整理` 视同库根 `<x>`
+// （kkc 接入开关只登记 整理 子目录，而数据面 root_path 用库根）。
+func findRootEntryByLibraryRoot(list []core.RootEntry, libRoot string) *core.RootEntry {
+	for i := range list {
+		if samePath(core.LibraryRootOf(list[i].Path), libRoot) {
 			return &list[i]
 		}
 	}

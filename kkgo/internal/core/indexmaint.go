@@ -91,6 +91,15 @@ func ConsumeCardMovesHub(hub *store.Hub, cfg *RootsConfig, rootPath string, log 
 		}
 	}
 	if cardRoot == nil {
+		// 库根口径：配置里的 `<x>\整理` 视同库根 `<x>`（kkc 接入开关只登记 整理 子目录）
+		for i := range cfg.CardRoots {
+			if strings.EqualFold(LibraryRootOf(cfg.CardRoots[i].Path), prefix) {
+				cardRoot = &cfg.CardRoots[i]
+				break
+			}
+		}
+	}
+	if cardRoot == nil {
 		return 0, nil
 	}
 	moves, err := hub.Core().LoadCardMoves("done")
@@ -100,7 +109,8 @@ func ConsumeCardMovesHub(hub *store.Hub, cfg *RootsConfig, rootPath string, log 
 	if len(moves) == 0 {
 		return 0, nil
 	}
-	base, err := hub.CardBaseOf(cardRoot.Path)
+	// 库序号按导入根（库根）取——`<x>\整理` 可能另有历史映射，直接用它会把行搬错片
+	base, err := hub.CardBaseOf(prefix)
 	if err != nil {
 		return 0, err
 	}

@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -67,6 +68,23 @@ const (
 	// PluginSub 插件库相对子路径。
 	PluginSub = "BepInEx"
 )
+
+// kkcSubdir kkc 整理库的固定子目录名——接入开关登记的卡片根是 `<库根>\整理`，而数据面的
+// root_path / 库序号一律用 `<库根>`；两套路径必须归并，否则同一个库会长出两批行。
+const kkcSubdir = "整理"
+
+// LibraryRootOf 把路径归并到库根口径：`<x>\整理` → `<x>`，其余原样（去尾部空白与路径分隔符）。
+// 判据：库里 card.root_path / index_source.root_path 只用库根；导入 / 扫描收到子目录时先过这里。
+func LibraryRootOf(path string) string {
+	p := strings.TrimRight(strings.TrimSpace(path), `\/`)
+	if p == "" {
+		return ""
+	}
+	if strings.EqualFold(filepath.Base(p), kkcSubdir) {
+		return strings.TrimRight(filepath.Dir(p), `\/`)
+	}
+	return p
+}
 
 // TierName 级别名（对齐 C# Tier.Name）。
 func TierName(tier int) string {

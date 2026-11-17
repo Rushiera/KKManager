@@ -349,7 +349,8 @@ type DemoteMove struct {
 // MarkOldOthersHub 判旧其余副本——除保留份外，同 guid 的非旧版副本加 .old 段
 // （主库那份移入缓存库、缓存库那份就地改名）并落新旧版本登记；
 // promoteKeep 为真时保留份搬入主库并正名（重复副本口径），为假时保留份留在原位（按作者整理口径）。
-func MarkOldOthersHub(hub *store.Hub, cfg *RootsConfig, guid, keepFilePath string, promoteKeep bool, moves *[]DemoteMove) (string, error) {
+// skippedOut 非空时回填逐条跳过原因（文件被占用 / 文件不存在 / 目标同名 / 冷冻库只读）——调用方须拼进回执，不许吞。
+func MarkOldOthersHub(hub *store.Hub, cfg *RootsConfig, guid, keepFilePath string, promoteKeep bool, moves *[]DemoteMove, skippedOut *[]string) (string, error) {
 	if guid == "" || keepFilePath == "" {
 		return "", fmt.Errorf("缺少 guid 或文件路径")
 	}
@@ -500,12 +501,15 @@ func MarkOldOthersHub(hub *store.Hub, cfg *RootsConfig, guid, keepFilePath strin
 	if len(skipped) > 0 {
 		detail += " · 跳过 " + itoaSmall64(int64(len(skipped))) + " 份：" + strings.Join(skipped, "；")
 	}
+	if skippedOut != nil {
+		*skippedOut = skipped
+	}
 	return detail, nil
 }
 
 // KeepVersionHub 指定保留版本——该副本成为主库当前版本（不在主库则搬入并正名），同 guid 其余非旧版副本判为旧版。
 func KeepVersionHub(hub *store.Hub, cfg *RootsConfig, guid, filePath string) (string, error) {
-	return MarkOldOthersHub(hub, cfg, guid, filePath, true, nil)
+	return MarkOldOthersHub(hub, cfg, guid, filePath, true, nil, nil)
 }
 
 // SwapVersionHub 把一份旧版与主库当前版本完全互换（位置 + 名字）——选错版本时的纠正路径。

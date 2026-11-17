@@ -642,6 +642,7 @@ func errNoModFileRow(path string) error {
 // ResolveConflict 解决一条整理冲突——保留这一份：其余同 guid 非旧版副本判旧版入缓存库
 // （复用重复副本同一实现），保留份留在原位、判旧份的计划条目改指缓存库新位置，
 // 随后重核冲突数并写回计划头。成功返回（detail, ""），失败返回（"", 原因）。
+// 判旧跳过原因（文件被占用 / 不存在 / 目标同名 / 冷冻库只读）一律拼进 detail——回执必须能看出「为什么这一份没判旧」。
 func ResolveConflict(hub *store.Hub, cfg *RootsConfig, planID, seq int64) (string, string) {
 	plan, err := hub.Core().SortPlanByID(planID)
 	if err != nil {
@@ -676,7 +677,8 @@ func ResolveConflict(hub *store.Hub, cfg *RootsConfig, planID, seq int64) (strin
 
 	// [段1] 判旧其余副本（与重复副本同一条实现；保留份不进主库，留在原位等整理）
 	moves := []DemoteMove{}
-	demote, demoteErr := MarkOldOthersHub(hub, cfg, keep.Guid, keep.SrcPath, false, &moves)
+	skipped := []string{}
+	demote, demoteErr := MarkOldOthersHub(hub, cfg, keep.Guid, keep.SrcPath, false, &moves, &skipped)
 	if demoteErr != nil {
 		return "", demoteErr.Error()
 	}
@@ -728,7 +730,11 @@ func ResolveConflict(hub *store.Hub, cfg *RootsConfig, planID, seq int64) (strin
 	}
 	detail := demote
 	if len(moves) == 0 {
-		detail = "已指定保留 " + filepath.Base(keep.SrcPath) + "——同 guid 没有其它待判旧副本（这一处冲突应已消失）"
+		if len(skipped) == 0 {
+			detail = "已指定保留 " + filepath.Base(keep.SrcPath) + "——同 guid 没有其它待判旧副本（这一处冲突应已消失）"
+		} else {
+			detail = "已指定保留 " + filepath.Base(keep.SrcPath) + "——其余副本未判旧 · 跳过 " + itoaSmall64(int64(len(skipped))) + " 份：" + strings.Join(skipped, "；")
+		}
 	}
 	fmt.Println("[整理] 冲突处理——保留 " + keep.SrcPath + " · " + detail + " · 冲突现状 " + itoaSmall(int(conflicts)))
 	return detail, ""
