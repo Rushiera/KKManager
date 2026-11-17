@@ -2426,8 +2426,8 @@ function dupFiltered(){
     return ia - ib;
   });
 }
-/* 组内非旧版副本数（≥2 = 待确认——需要人工指定保留版本） */
-function dupLive(g){ return (g.files||[]).filter(f => !f.isOld).length; }
+/* 组内主库非旧版副本数（≥2 = 待确认——需要人工指定保留版本）；附加库副本不计入（附加库允许有重复） */
+function dupLive(g){ return (g.files||[]).filter(f => f.tier === 1 && !f.isOld).length; }
 function dupPending(g){ return dupLive(g) >= 2; }
 /* 每行的主操作（整行点击与按钮共用同一判据——单点实现）：
    非旧版 → keep（已是唯一非旧版的主库版本则无操作）；旧版 → 换用 / 正名；操作列末尾恒带「查看引用关系」 */

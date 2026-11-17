@@ -544,6 +544,27 @@ func (d *DB) ListModFileCountRows() ([]ModFileCount, error) {
 	return list, rows.Err()
 }
 
+// ListModFileCountRowsByTier 本库按 guid 的副本计数（只统计指定级别——重复副本按主库口径算）。
+func (d *DB) ListModFileCountRowsByTier(tier int) ([]ModFileCount, error) {
+	rows, err := d.sql.Query(`SELECT guid, COUNT(*), SUM(CASE WHEN file_name LIKE '%.old.zipmod' OR file_name LIKE '%.old.zip' THEN 0 ELSE 1 END)
+                     FROM mod_file WHERE guid IS NOT NULL AND guid <> '' AND tier = ? GROUP BY guid`, tier)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []ModFileCount
+	for rows.Next() {
+		var r ModFileCount
+		var live sql.NullInt64
+		if err = rows.Scan(&r.Guid, &r.Total, &live); err != nil {
+			return nil, err
+		}
+		r.Live = live.Int64
+		list = append(list, r)
+	}
+	return list, rows.Err()
+}
+
 // RefCountsByType 本库按 guid 的引用计数（对齐 C# Store.RefCountsByTypeByGuid）：
 // 一次查询同时出总数与三类型分列（人物卡 / 服装卡 / 场景卡 sd）。
 func (d *DB) RefCountsByType() (map[string]RefCount, error) {

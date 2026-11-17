@@ -354,7 +354,9 @@ func ListDuplicateGroupsHub(hub *store.Hub, cfg *RootsConfig) ([]store.DupGroup,
 	}
 	list := make([]store.DupGroup, 0, len(groups))
 	for _, g := range groups {
-		if len(g.Files) <= 1 {
+		// 重复副本只按主库口径成组（主库 = 游戏读的那一层；附加库允许有重复）；
+		// 组内仍列该 guid 的全部副本，供人判断哪份该留
+		if g.MainCount <= 1 {
 			continue
 		}
 		sort.SliceStable(g.Files, func(i, j int) bool { return store.CompareRefRows(&g.Files[i], &g.Files[j]) < 0 })
@@ -364,13 +366,13 @@ func ListDuplicateGroupsHub(hub *store.Hub, cfg *RootsConfig) ([]store.DupGroup,
 	return list, nil
 }
 
-// DupCountsHub 重复副本组数与「待确认」组数（跨库合并）——待确认 = 组内非旧版副本 ≥ 2。
-// 对齐 C# StoreHub.DupCounts。
+// DupCountsHub 重复副本组数与「待确认」组数——**按主库（级别 1）口径**：主库内同 guid ≥2 份才算重复副本组，
+// 组内主库非旧版副本 ≥2 = 待确认（附加库同 guid 副本不计入——附加库允许有重复）。
 func DupCountsHub(hub *store.Hub, cfg *RootsConfig) (int64, int64, error) {
 	type pair struct{ total, live int64 }
 	agg := map[string]*pair{}
 	for _, s := range AllStoreRefs(hub, cfg) {
-		rows, err := s.DB.ListModFileCountRows()
+		rows, err := s.DB.ListModFileCountRowsByTier(TierMain)
 		if err != nil {
 			return 0, 0, err
 		}
