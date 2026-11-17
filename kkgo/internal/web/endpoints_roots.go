@@ -135,6 +135,13 @@ func (a *App) handleRootsPurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base, libErr := core.LibOfRootPath(hub, cfg, list[idx].Path)
+	// 🔴 删记录必须在移除配置之前做——移除后 AllStoreRefs 不再含该库根，分片库里的行会漏删
+	purged, purgeErr := core.PurgeRootHub(hub, cfg, list[idx].Path)
+	if purgeErr != nil {
+		hub.Close()
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "清理库记录失败：" + purgeErr.Error()})
+		return
+	}
 	trimmed := append(append([]core.RootEntry{}, list[:idx]...), list[idx+1:]...)
 	if isMods {
 		cfg.ModRoots = trimmed
@@ -150,14 +157,15 @@ func (a *App) handleRootsPurge(w http.ResponseWriter, r *http.Request) {
 	a.warm.releaseLibs(hub, list[idx].Path)
 	_ = hub.Core().CloseTodoByKey("offline", strings.ToLower(strings.TrimSpace(list[idx].Path)))
 	hub.Close()
+	removedFiles := 0
+	fileErrs := []string{}
 	if libErr == nil && base > 0 {
-		if _, errs := purgeLibFiles(filepath.Dir(a.DBPath), base); len(errs) > 0 {
-			for _, one := range errs {
-				println("[库数据] 删除库文件失败：" + one)
-			}
+		removedFiles, fileErrs = purgeLibFiles(filepath.Dir(a.DBPath), base)
+		for _, one := range fileErrs {
+			println("[库数据] 删除库文件失败：" + one)
 		}
 	}
-	writeJSON(w, map[string]interface{}{"ok": true})
+	writeJSON(w, map[string]interface{}{"ok": true, "purged": purged, "removedFiles": removedFiles, "fileErrors": fileErrs})
 }
 
 // purgeLibFiles 删除某库根的全部分片库文件（lib_<base>_*.db 及 -wal / -shm 边车）。
