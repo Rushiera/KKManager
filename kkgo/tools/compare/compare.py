@@ -40,10 +40,10 @@ try:
 except AttributeError:
     pass
 
-GO = r"D:\Mau\WorkSpace\KKManager\kkgo\kkgo.exe"
-# 对拍基准 = 当前源码版本的调试产物（0.21.9 发布到 KMR_B 槽；A 槽留 0.21.6 回退）。
-# 0.21.6 的 exe 缺 refs-read / card-sort / index-import / idx / sort / u3d-db 等命令——新命令对拍必须用 B 槽。
-CS = r"D:\Mau\WorkSpace\KKManager\dist\KMR_B.exe"
+GO = r"D:\Mau\WorkSpace\KKManager\dist\KMR.exe"
+# 对拍基准 = C# 0.21.9 归档产物（2026-11-17 从 dist 双槽移入 raw/dist-slots；A 槽 0.21.6 为更早回退件）。
+# 0.21.6 的 exe 缺 refs-read / card-sort / index-import / idx / sort / u3d-db 等命令——新命令对拍必须用 0.21.9。
+CS = r"D:\Mau\WorkSpace\KKManager\raw\dist-slots\KMR_B.exe"
 SAMPLE_CARD = r"D:\SteamLibrary\Koikatu\UserData\chara\female\100065348_p6.png"
 SAMPLE_SCENE = r"D:\SteamLibrary\Koikatu\UserData\Studio\scene\2021_0403_1423_03_837.png"
 SAMPLE_MOD = r"D:\SteamLibrary\Koikatu\Mods\Cissoia.zipmod"

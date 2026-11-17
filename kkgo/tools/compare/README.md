@@ -1,9 +1,9 @@
 ﻿# kkgo 对拍工具
 
-G 段验收工具：同一样本、同一参数下跑 `kkgo.exe` 与 `KMR_B.exe`（C# 0.21.9 调试产物 = 当前源码）对比输出。
+G 段验收工具：同一样本、同一参数下跑 `dist\KMR.exe`（Go 现行）与 `raw\dist-slots\KMR_B.exe`（C# 0.21.9 归档基准）对比输出。
 
-> 🔴 基准槽位：`dist\KMR_A.exe` 是 0.21.6 旧产物（缺 refs-read / card-sort / index-import / idx / sort / u3d-db 等命令）；
-> 复核轮起基准切到 `dist\KMR_B.exe`（0.21.9，2026-11-15 编译入槽），A 槽保留回退。
+> 🔴 基准槽位：`raw\dist-slots\KMR_A.exe` 是 0.21.6 旧产物（缺 refs-read / card-sort / index-import / idx / sort / u3d-db 等命令）；
+> 基准 = `raw\dist-slots\KMR_B.exe`（0.21.9；2026-11-17 从 `dist\` 双槽移入 raw 归档，dist 现在只放 Go 产物）。
 
 ## 判据
 
@@ -85,8 +85,8 @@ py tools\compare\compare.py u3d                  :: unity3d 列表 / 导出 / �
 
 ## 前置
 
-- `kkgo\kkgo.exe` 已构建（`go build -o kkgo.exe .`，cwd = `kkgo\`）；
-- 对照产物 `dist\KMR_B.exe` 在位（0.21.9 调试产物；A 槽 0.21.6 为回退保留）；
+- `dist\KMR.exe` 已构建（`go build -o ..\dist\KMR.exe .`，cwd = `kkgo\`）；
+- 对照产物 `raw\dist-slots\KMR_B.exe` 在位（0.21.9 归档基准；A 槽 0.21.6 为回退保留）；
 - 样本路径是本机现值，写在 `compare.py` 顶部 `SAMPLE_*` / `U3D_SAMPLE` 常量里，换机时改这里。
 
 ## 为什么留这个脚本

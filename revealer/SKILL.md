@@ -23,7 +23,7 @@
 | 变量 | 取值 |
 |:--|:--|
 | `<发布版号>` | 读 `RELEASE.md` §八 台账**最后一行** → 末位 +1（1.0.0 → 1.0.1）；用户点名跳级时按其指定 |
-| `<编译版号>` | 读 `KKManager.csproj` 的 `<Version>`；本轮有源码改动 → 补丁位 +1；纯重发不动 |
+| `<编译版号>` | Go 现行（≥1.0.12）**不需要**——版本在发布编译时用 `-X main.version` 注入；C# 参照（≤1.0.11）读 `KKManager.csproj` 的 `<Version>` |
 | `<仓库>` | `D:\Mau\WorkSpace\KKManager`（寻址 `workspace:KKManager`）——**有 git 仓库**，远程 `https://github.com/Rushiera/KKManager.git`（`main`） |
 | `<临时输出>` | `D:\Mau\WorkSpace\CatTemp\kmrpub<号去点>`（1.0.1 → `kmrpub101`） |
 | `<上一版目录>` | `revealer/kkmanager<上一发布版号>/`（readme 与 tools 的复制来源） |
@@ -41,39 +41,46 @@
 
 ### 步 2 — 编译版自检（不过不发布）
 
-| 工具 | 期望 |
+Go 现行（cwd = `kkgo/`）：
+
+| 命令 | 期望 |
 |:--|:--|
-| `cs-check`（csproj） | 0 error / 0 warning / 空 catch 0 |
-| `cs-build`（csproj） | 0 error / 0 warning |
-| `cs-format` mode=check | 0 差异 |
+| `gofmt -l .` | 空 |
+| `go vet ./...` | 空 |
+| `go build -o ..\dist\KMR.exe .` | exit 0、0 错 |
+
+C# 参照（≤1.0.11 备查）：`cs-check` / `cs-build` 0 error / 0 warning / 空 catch 0 · `cs-format check` 零差异。
 
 ### 步 3 — 编译版号推进
 
-- 本轮有源码改动 → `text-replace` 改 `KKManager/KKManager.csproj` 的 `<Version>`（补丁位 +1）→ 重跑步 2 自检
-- 纯重发（无源码改动）→ 跳过本步
+- Go 现行：**跳过**——发布版号与编译版号解耦，版本号只在步 4 注入。
+- C# 参照（≤1.0.11）：本轮有源码改动 → 改 `KKManager.csproj` 的 `<Version>` 补丁位 +1 → 重跑步 2；纯重发跳过。
 
 ### 步 4 — 发布编译（固定通道，顺序不可乱）
 
-```powershell
-dotnet restore D:\Mau\WorkSpace\KKManager\KKManager\KKManager.csproj -r win-x64
-```
+Go 现行（完整口径 → `RELEASE.md` §四-4.1）：
 
 ```powershell
-dotnet publish D:\Mau\WorkSpace\KKManager\KKManager\KKManager.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:ReleasePack=true -p:Version=<发布版号> -o D:\Mau\WorkSpace\CatTemp\kmrpub<号去点>
+go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1" -o D:\Mau\WorkSpace\CatTemp\kmrpub<号去点>\KMR.exe .
 ```
 
-- `restore -r win-x64` 不可省——`cs-build` 会刷掉 RID 资产，缺则 `NETSDK1047`
+- cwd = `kkgo/`；`CGO_ENABLED=0`（本机默认）→ 静态单文件，无伴随 dll
 - 输出到 CatTemp 再入位——运行中的 exe 锁文件不可覆盖
+- C# 参照（≤1.0.11）：`dotnet restore -r win-x64` → `dotnet publish … -p:ReleasePack=true -p:Version=<发布版号>`（缺 restore 报 `NETSDK1047`）
 
 ### 步 5 — 五项核验（全绿才继续）
 
+Go 现行：
+
 | # | 核验 | 期望 |
 |:--:|:--|:--|
-| 1 | `file-version <临时输出>\KMR.exe` | = `<发布版号>` |
+| 1 | `<临时输出>\KMR.exe version` | 输出 `KMR <发布版号>`（`-X main.version` 注入实锤） |
 | 2 | `<临时输出>\KMR.exe help` | 首行含「发布版（ReleasePack 编译）」——**缺 = 漏传开关 → 重跑步 4** |
-| 3 | `<临时输出>\KMR.exe roots-list` | 正常列出库根（SQLite 原生库随单文件解出） |
-| 4 | `text-read KKManager/KKManager/bin/Release/net8.0-windows/win-x64/KMR.runtimeconfig.json` | `includedFrameworks` 含 NETCore.App / WindowsDesktop.App / AspNetCore.App 三项 |
-| 5 | `file-tree <临时输出>` | 仅 `KMR.exe` 一个文件 |
+| 3 | `<临时输出>\KMR.exe roots-list`（干净目录） | 正常列出库根（SQLite / embed 模板库 / 前端资源三件自证） |
+| 4 | `file-tree <临时输出>` | 仅 `KMR.exe` 一个文件（无 dll / 原生库） |
+| 5 | 无参实跑 | 起面板 + 开浏览器（`proc-start` + 端口探测，1.0.12 实测 405 ms 就绪） |
+
+C# 参照（≤1.0.11）：`file-version KMR.exe` = 发布版号 · `help` 首行发布标识 · `roots-list` 通 · `KMR.runtimeconfig.json` 的 `includedFrameworks` 三项 · 目录仅 `KMR.exe`。
 
 ### 步 6 — 组装发布版目录
 

@@ -26,9 +26,13 @@ CatTemp/
 # kkc 收件箱与整理产物（卡片 / mod / 整合包数据，21 GB——数据不入仓，2026-11-11）
 revealer/kkc/
 
-# Go 重写（kkgo）构建产物
+# Go 重写（kkgo）构建产物——现行构建输出在 dist\KMR.exe（dist 整目录已忽略）
 kkgo/kkgo.exe
+kkgo/KMR.exe
 kkgo/bin/
+
+# C# 对拍基准（184 MB 级 exe——raw 里只留档，不进仓）
+raw/dist-slots/*.exe
 
 # 对拍脚本的临时产物（每次跑都会重建）
 kkgo/tools/compare/_*_tmp/

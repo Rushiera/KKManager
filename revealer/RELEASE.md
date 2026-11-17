@@ -15,13 +15,13 @@ WorkSpace:KKManager/revealer/
   RELEASE.md              本文件（发布规范）
   SKILL.md                发布技能——一句「发布」的完整动作链
   kkmanager<发布版号>/     发布版目录 —— 打包对象就是这个目录
-      kkgo.exe            ← 主程序（双击即起面板）【1.0.12 起 = Go 重写版】
+      KMR.exe             ← 主程序（双击即起面板）【1.0.12–1.0.13 包内名 kkgo.exe；1.0.14 起 = KMR.exe】
       清空所有数据.bat     ← 回到初始状态
       readme.txt          ← 面客使用说明
       tools/              ← 二级文件夹：其余内容一律进这里（启动脚本 / 附属工具 / 说明文档）
 ```
 
-- **主程序名随实现切换**：1.0.11 及以前 = `KMR.exe`（C# · 0.21.5 及更早编译）；**1.0.12 起 = `kkgo.exe`（Go 全量重写 · 语义基线 C# 0.21.9）**。两代共存期旧发布目录原样保留，不回改。
+- **主程序名随实现切换**：1.0.11 及以前 = `KMR.exe`（C# · 0.21.5 及更早编译）；**1.0.12–1.0.13 = `kkgo.exe`（Go 全量重写 · 语义基线 C# 0.21.9）**；**1.0.14 起 = `KMR.exe`（Go 实现沿用产品名；`kkgo` 只留作源码目录名）**。历史发布目录原样保留，不回改。
 
 - **发布版号独立编号**——与编译版（0.18.x）**无关**，起始 **1.0.0**，每次发布 +1（整数递增：1.0.0 → 1.0.1 → …）
 - 文件夹名 = `kkmanager` + 发布版号（如 `kkmanager1.0.0`）；打包对象 = 该目录整棵
@@ -52,11 +52,11 @@ WorkSpace:KKManager/revealer/
 - 开关落地：`KKManager.csproj` 在 `ReleasePack=true` 时追加 `DefineConstants` → `Program.Main` 的无参分支按 `#if RELEASEPACK` 分流
 - 🔴 **漏传开关 = 静默失败**（产物看起来正常，双击却只打印用法）——发布前核验第 1 条即为此设（§七）
 
-### 3.2 Go 版（≥ 1.0.12 · `kkgo.exe`）
+### 3.2 Go 版（≥ 1.0.12 · 主程序 1.0.14 起为 `KMR.exe`）
 
 | 项 | 调试版 | 发布版 |
 |:--|:--|:--|
-| 启动方式 | `kkgo.exe serve --port 8539 --open` | **双击 `kkgo.exe`**（无参 = `serve --open`） |
+| 启动方式 | `KMR.exe serve --port 8539 --open`（或双击 `dist\启动.bat`） | **双击 `KMR.exe`**（无参 = `serve --open`） |
 | 无参行为 | 打印用法，退出码 2 | 起面板 + 打开浏览器 |
 | 版本号 | `main.version` 默认 `0.1.0-dev` | 编译时注入 `-ldflags "-X main.version=<发布版号>"` |
 | 发布开关 | 无 | `-ldflags "-X main.releasePack=1"`（非空 = 双击即用） |
@@ -71,12 +71,12 @@ WorkSpace:KKManager/revealer/
 ### 4.1 Go 版（≥ 1.0.12 · 现行）
 
 ```powershell
-go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1" -o <CatTemp>\kkgo.exe .
+go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1" -o <CatTemp>\KMR.exe .
 ```
 
 （cwd = `kkgo/`；`CGO_ENABLED=0` 是本机工具链默认值——`go env CGO_ENABLED` 应为 0）
 
-→ 产物 `kkgo.exe` 移入 `revealer/kkmanager<发布版号>/` → 复制 `清空所有数据.bat` → 写 `readme.txt` / `tools\命令行用法.txt` → 按 §七 核验。
+→ 产物 `KMR.exe` 移入 `revealer/kkmanager<发布版号>/` → 复制 `清空所有数据.bat` → 写 `readme.txt` / `tools\命令行用法.txt` → 按 §七 核验。
 
 - 编译前先跑自检：`gofmt -l .` 空 · `go vet ./...` 空 · `go build` 0 错——**自检不过不发布**
 - 单文件自包含由 Go 静态链接保证（无 dll 伴随）；`-trimpath` 去掉构建机绝对路径
@@ -120,9 +120,9 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 
 **自包含判据（三项全绿才算发布）**：
 
-1. 发布目录里 `kkgo.exe` 之外**没有 dll / 原生库**（单文件即全部）
-2. 干净目录实跑 `kkgo.exe roots-list` 通——SQLite / embed 模板库 / 前端资源三件各自自证
-3. `kkgo.exe version` 输出 = 发布版号（`-X main.version` 注入生效实锤）
+1. 发布目录里 `KMR.exe` 之外**没有 dll / 原生库**（单文件即全部）
+2. 干净目录实跑 `KMR.exe roots-list` 通——SQLite / embed 模板库 / 前端资源三件各自自证
+3. `KMR.exe version` 输出 = 发布版号（`-X main.version` 注入生效实锤）
 
 ## 六、运行时数据目录
 
@@ -134,9 +134,9 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 
 | # | 项 | 判据 |
 |:--:|:--|:--|
-| 1 | 无参启动 | 无参实跑主程序 → 起面板 + 打开浏览器（不是打印用法）。C# = `KMR.exe`；Go = `kkgo.exe`（Go 版可由 Agent 用 `proc-start` + 端口探测实跑——1.0.12 实测 405 ms 就绪） |
+| 1 | 无参启动 | 无参实跑主程序 → 起面板 + 打开浏览器（不是打印用法）。C# = `KMR.exe`（0.21.9 归档件在 `raw/dist-slots/`）；Go = 包内主程序 `KMR.exe`（Go 版可由 Agent 用 `proc-start` + 端口探测实跑——1.0.12 实测 405 ms 就绪） |
 | 1b | 发布标识 | `help` 首行含「发布版（ReleasePack 编译）」——C# 漏 `-p:ReleasePack=true` / Go 漏 `-X main.releasePack=1` 时此处不出声（静默失败哨兵） |
-| 2 | 版本自证 | C#：`file-version KMR.exe` = 发布版号；Go：`kkgo.exe version` = 发布版号（Go 产物无 PE 版本资源，`file-version` 不适用）。两者另核面板侧：`GET /api/settings` 的 `version` = 发布版号 |
+| 2 | 版本自证 | C#：`file-version KMR.exe` = 发布版号；Go：`KMR.exe version` 输出 `KMR <发布版号>`（Go 产物无 PE 版本资源，`file-version` 不适用）。两者另核面板侧：`GET /api/settings` 的 `version` = 发布版号 |
 | 3 | 依赖自包含 | §五 三项判据全绿 |
 | 4 | 目录形态 | 根目录仅三样（+ 运行时 `data/`）· `tools/` 承载其余 |
 | 5 | 冻结核对 | 生成后发布目录不再编辑——需要改 = 发布版号 +1 全量重发 |

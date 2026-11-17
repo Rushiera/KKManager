@@ -118,7 +118,7 @@ Koikatsu 卡片 ↔ zipmod 关联管理器——把「这张卡用了哪些 mod 
 ## 使用
 
 1. 下载 Release 里的发布包，解压到任意目录
-2. 双击 `kkgo.exe` → 浏览器自动打开面板
+2. 双击 `KMR.exe` → 浏览器自动打开面板（1.0.13 及以前的包内文件名是 `kkgo.exe`，同一个程序）
 3. 面板顶部「库根设置」先设游戏根（Koikatsu 安装目录），再点「更新本库」扫描
 4. 卡片边框四色 = 引用状态（绿=全部在主库 · 黄=仅缓存库 · 灰=仅冷冻库 · 红=有缺失）
 
@@ -126,8 +126,10 @@ Koikatsu 卡片 ↔ zipmod 关联管理器——把「这张卡用了哪些 mod 
 
 ```
 cd kkgo
-go build -o kkgo.exe .
+go build -o ..\dist\KMR.exe .
 ```
+
+产物落在 `dist\KMR.exe`（`dist` = 可运行目录：exe + `data\` + `启动.bat`）；`kkgo` 只放源码。
 
 发布编译走 `revealer/RELEASE.md` §四-4.1 的固定通道（`go build -trimpath -ldflags "-s -w -X main.version=<发布版号> -X main.releasePack=1"`）。
 
@@ -137,7 +139,7 @@ C# 参照（归档在 raw/，只在对拍基准需重编时）：
 dotnet build raw/KKManager-CSharp/KKManager.csproj
 ```
 
-调试期：Go 直接跑 `kkgo.exe serve --port 8539 --open`；`dist\` 双槽（`KMR_A.exe` / `KMR_B.exe` 交替发布 + `启动.bat`）为 **C# 参照的调试通道**（归档态，不再承载新功能）。
+调试期：`dist\KMR.exe` 或双击 `dist\启动.bat`（杀 8539 旧实例 → 起面板，数据用 `dist\data`，前端直接读 `kkgo\internal\web\wwwroot`，改页面刷新即可）；C# 双槽（`KMR_A.exe` / `KMR_B.exe` + 旧启动脚本）已归档到 `raw\dist-slots\`，只作对拍基准、不再承载新功能。
 
 ## 发布
 
