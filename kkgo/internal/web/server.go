@@ -34,6 +34,8 @@ type App struct {
 	DBPath string
 	// Version 面板版本串（右上角显示）。
 	Version string
+	// WebDir 前端目录（非空 → 每次请求从磁盘读 index.html / plugin-notes.txt，开发态热重载；空 → 用内嵌）。
+	WebDir string
 	// warm 进程级预热器（分片库 -wal 常驻；见 warmup.go）。
 	warm *warmKeeper
 }
@@ -41,6 +43,14 @@ type App struct {
 // New 构造面板应用。
 func New(dbPath, version string) *App {
 	return &App{DBPath: dbPath, Version: version, warm: newWarmKeeper()}
+}
+
+// SetWebDir 设置前端目录——开发态热重载：改 index.html / plugin-notes.txt 后刷新即生效，不用重编。
+// 空串 = 用内嵌资源（发布版行为）。
+func (a *App) SetWebDir(dir string) {
+	if a != nil {
+		a.WebDir = strings.TrimSpace(dir)
+	}
 }
 
 // Close 关闭面板长驻资源（预热器的常驻连接）——进程退出前调用。
@@ -199,12 +209,25 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if a.WebDir != "" {
+		// 开发态热重载：每次请求读磁盘（改前端刷新即见）；读不到回落内嵌。
+		if body, err := os.ReadFile(filepath.Join(a.WebDir, "index.html")); err == nil {
+			_, _ = w.Write(body)
+			return
+		}
+	}
 	_, _ = w.Write(indexHTML)
 }
 
-// handlePluginNotes 插件中文说明表（内嵌资源，离线可用）。
+// handlePluginNotes 插件中文说明表（非空 WebDir 时读磁盘热生效；否则用内嵌资源，离线可用）。
 func (a *App) handlePluginNotes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if a.WebDir != "" {
+		if body, err := os.ReadFile(filepath.Join(a.WebDir, "plugin-notes.txt")); err == nil {
+			_, _ = w.Write(body)
+			return
+		}
+	}
 	_, _ = w.Write([]byte(pluginNotesText))
 }
 

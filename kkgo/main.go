@@ -2043,7 +2043,7 @@ func usage() {
 	usageLine("card-sort [子命令]", "卡片整理：plan/show/exec/rules/refs/learn/layout/rollback/moves/delete/delete-list")
 	fmt.Println()
 	fmt.Println("面板与其他")
-	usageLine("serve [--port N] [--open]", "起本地面板（阻塞到进程退出）")
+	usageLine("serve [--port N] [--open] [--web 目录]", "起本地面板（--web 指前端目录 = 改前端免重编）")
 	usageLine("version", "显示版本")
 	usageLine("help", "显示本清单")
 }
@@ -3536,8 +3536,10 @@ func cmdServe(rest []string) int {
 	port := parseIntOr(takeFlag(&rest, "--port"), 8539)
 	openBrowser := takeSwitch(&rest, "--open")
 	takeSwitch(&rest, "--browse-debug")
+	webDir := takeFlag(&rest, "--web")
 	app := web.New(dbPath, version)
 	defer app.Close()
+	app.SetWebDir(webDir)
 	if err := app.Serve(port, openBrowser); err != nil {
 		fmt.Fprintln(os.Stderr, "面板启动失败: "+err.Error())
 		return 1

@@ -332,3 +332,106 @@ func RootsConfigJSON(cfg *RootsConfig) (string, error) {
 	}
 	return strings.ReplaceAll(string(raw), "\n", "\r\n"), nil
 }
+
+// ClearLockFlags 清掉外部输入带来的锁定标记——主库身份只由规范按路径认定，不信任请求。
+func ClearLockFlags(cfg *RootsConfig) {
+	if cfg == nil {
+		return
+	}
+	clearLockList(cfg.ModRoots)
+	clearLockList(cfg.CardRoots)
+	clearLockList(cfg.PluginRoots)
+}
+
+// clearLockList 清掉一组列表里的锁定标记。
+func clearLockList(list []RootEntry) {
+	for i := range list {
+		list[i].Locked = false
+	}
+}
+
+// restoreMainList 还原一组列表里的锁定条目——以磁盘现状为准（不可删、不可改），被拒的改动出声。
+// 返回处理后的列表（append 可能换底层数组，必须回写调用方）。
+func restoreMainList(previous, current []RootEntry, label string, warnings *[]string) []RootEntry {
+	for _, p := range previous {
+		if !p.Locked {
+			continue
+		}
+		index := -1
+		for i := range current {
+			if strings.EqualFold(strings.TrimSpace(current[i].Path), strings.TrimSpace(p.Path)) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			current = append(current, RootEntry{Tier: p.Tier, Path: p.Path, Recurse: p.Recurse, ReadOnly: p.ReadOnly, Locked: true})
+			*warnings = append(*warnings, label+"「"+p.Path+"」不可删除——已按原样保留")
+			continue
+		}
+		c := current[index]
+		if c.Tier != p.Tier || c.Recurse != p.Recurse || c.ReadOnly != p.ReadOnly {
+			*warnings = append(*warnings, label+"「"+p.Path+"」由规范锁定——本次改动已忽略")
+		}
+		current[index] = RootEntry{Tier: p.Tier, Path: p.Path, Recurse: p.Recurse, ReadOnly: p.ReadOnly, Locked: true, Note: c.Note}
+	}
+	return current
+}
+
+// ensureCacheSlot 缓存库槽位不可删——请求里丢了缓存库时按磁盘现状补回（路径与勾选归使用者，故只保证存在性），并出声。
+func ensureCacheSlot(previous, current []RootEntry, label string, warnings *[]string) []RootEntry {
+	for _, cached := range previous {
+		if cached.Tier != TierCache || strings.TrimSpace(cached.Path) == "" {
+			continue
+		}
+		found := false
+		for _, e := range current {
+			if e.Tier == TierCache && strings.TrimSpace(e.Path) != "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			current = append(current, RootEntry{Tier: cached.Tier, Path: cached.Path, Recurse: cached.Recurse, ReadOnly: cached.ReadOnly, Note: cached.Note})
+			*warnings = append(*warnings, label+"「"+cached.Path+"」是缓存库槽位、不可删除——已按原样保留")
+		}
+		return current
+	}
+	return current
+}
+
+// RestorePresets 还原请求里的预置条目——主库（含卡片主库）：改动忽略、缺失补回；缓存库：只保证槽位存在。
+// 返回出声清单（对齐 C# RootsRules.RestorePresets）。
+func RestorePresets(previous, current *RootsConfig) []string {
+	warnings := make([]string, 0, 4)
+	if previous == nil || current == nil {
+		return warnings
+	}
+	current.ModRoots = restoreMainList(previous.ModRoots, current.ModRoots, "mod 预置库根", &warnings)
+	current.CardRoots = restoreMainList(previous.CardRoots, current.CardRoots, "卡片预置库根", &warnings)
+	current.PluginRoots = restoreMainList(previous.PluginRoots, current.PluginRoots, "插件预置库根", &warnings)
+	current.ModRoots = ensureCacheSlot(previous.ModRoots, current.ModRoots, "mod 缓存库", &warnings)
+	return warnings
+}
+
+// FindRootEntry 按路径在 mod / 卡片库根里找一条（「更新本库」按已保存配置校验用）；找不到返回 nil。
+func FindRootEntry(cfg *RootsConfig, path string) *RootEntry {
+	if cfg == nil {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(path))
+	if key == "" {
+		return nil
+	}
+	for i := range cfg.ModRoots {
+		if strings.ToLower(strings.TrimSpace(cfg.ModRoots[i].Path)) == key {
+			return &cfg.ModRoots[i]
+		}
+	}
+	for i := range cfg.CardRoots {
+		if strings.ToLower(strings.TrimSpace(cfg.CardRoots[i].Path)) == key {
+			return &cfg.CardRoots[i]
+		}
+	}
+	return nil
+}

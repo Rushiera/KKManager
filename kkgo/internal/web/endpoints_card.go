@@ -3,8 +3,12 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"kkgo/internal/core"
 	"kkgo/internal/store"
@@ -211,11 +215,24 @@ func (a *App) handleCardParamsSave(w http.ResponseWriter, r *http.Request) {
 		}
 		edit.Denial = denial
 	}
+	beforeInfo, _ := os.Stat(path)
 	result := core.ApplyCardEdit(path, layout, cur, edit, archiveDir(a.DBPath))
 	if !result.Ok {
 		writeJSON(w, map[string]interface{}{"ok": false, "error": result.Error})
 		return
 	}
+	// 留档记录 + 卡片字节数同步（对齐 C# WebApp.cs §/api/card/{id}/params）
+	beforeMtime := ""
+	if beforeInfo != nil {
+		beforeMtime = beforeInfo.ModTime().Format("2006-01-02 15:04:05")
+	}
+	_ = hub.Core().AddCardEdit(path, filepath.Base(path), dto.Lib, result.ArchivedFile, result.ArchivedSize,
+		beforeMtime, strings.Join(result.Changes, " · "), store.Now())
+	if s, sErr := hub.StoreByLib(dto.Lib); sErr == nil && s != nil {
+		_ = s.UpdateCardSize(id, result.NewSize)
+	}
+	fmt.Println("[卡片编辑] " + filepath.Base(path) + " · " + strings.Join(result.Changes, " · ") +
+		" · 字节增量 " + strconv.Itoa(result.Delta) + " · 留档 " + filepath.Base(result.ArchivedFile))
 	writeJSON(w, map[string]interface{}{
 		"ok":           true,
 		"changes":      result.Changes,

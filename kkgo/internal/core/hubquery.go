@@ -476,3 +476,31 @@ func QueryIndexMetaHub(hub *store.Hub, cfg *RootsConfig, rootPath, kind, work, a
 	}
 	return list, nil
 }
+
+// QueryMissingCardsHub 一批缺失 guid 各自的引用卡片样本（跨库合并，按 CompareCardsByMod 排序后每组截前 per 张）——
+// 对齐 C# BuildMissing 里逐 guid 调 StoreHub.QueryCardsByMod 的结果，但一次批量取，不做 N+1。
+func QueryMissingCardsHub(hub *store.Hub, cfg *RootsConfig, guids []string, per int) (map[string][]store.CardListRow, error) {
+	out := make(map[string][]store.CardListRow)
+	if len(guids) == 0 {
+		return out, nil
+	}
+	for _, s := range AllStoreRefs(hub, cfg) {
+		rows, err := s.DB.RefCardsByModsFullBatch(guids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range rows {
+			r := rows[i].Row
+			r.Lib = s.Lib
+			out[rows[i].Guid] = append(out[rows[i].Guid], r)
+		}
+	}
+	for g, list := range out {
+		sort.SliceStable(list, func(i, j int) bool { return store.CompareCardsByMod(&list[i], &list[j]) < 0 })
+		if per > 0 && len(list) > per {
+			list = list[:per]
+		}
+		out[g] = list
+	}
+	return out, nil
+}

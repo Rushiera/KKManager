@@ -6,10 +6,13 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -308,41 +311,115 @@ func (a *App) handleTodosAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true})
 }
 
-// handleSettingsSave POST /api/settings 保存库设置（字段级合并写）。
+// handleSettingsSave POST /api/settings 保存库根配置（对齐 C# WebApp.cs §/api/settings）：
+// 清外部锁定标记 → 消费「原行改地址」（旧库数据作废）→ 规范化 → 游戏根变更派生预置 → 还原预置条目 → 缓存库目录 → 落盘。
 func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
-	var dto map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		writeErr(w, 400, "请求体无法解析")
+	var cfg core.RootsConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErr(w, 400, "配置解析失败："+err.Error())
 		return
 	}
-	hub, _, err := openApp(a.DBPath)
+	hub, previous, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	defer hub.Close()
-	for k, v := range dto {
-		text := ""
-		switch t := v.(type) {
-		case string:
-			text = t
-		case float64:
-			text = strconv.FormatInt(int64(t), 10)
-		case bool:
-			if t {
-				text = "1"
-			} else {
-				text = "0"
+	if cfg.ModRoots == nil {
+		cfg.ModRoots = []core.RootEntry{}
+	}
+	if cfg.CardRoots == nil {
+		cfg.CardRoots = []core.RootEntry{}
+	}
+	warnings := make([]string, 0, 4)
+	// 锁定标记只由规范按路径认定——请求带来的标记一律清掉，不信任外部输入
+	core.ClearLockFlags(&cfg)
+	// 原行改地址 = 用新地址完全替换原来的——旧库数据作废（删库文件 + 消解待办）；须在 Normalize 之前消费
+	a.applyReplacedRoots(hub, &cfg)
+	core.Normalize(&cfg)
+	// 游戏根换了 = 预置条目按新根重派生（旧根的条目不再复活；缓存库槽位未被改过则跟随新根）
+	firstModCache := core.ModCachePath(previous) == ""
+	cacheMoved := false
+	if !strings.EqualFold(strings.TrimSpace(previous.GameRoot), strings.TrimSpace(cfg.GameRoot)) {
+		more, moved := core.ApplyGameRootChange(&cfg, previous.GameRoot)
+		warnings = append(warnings, more...)
+		cacheMoved = moved
+		// RestorePresets 的基准里旧根的预置条目作废——否则会把它们当「不可删」补回来
+		previous.ModRoots = dropLockedEntries(previous.ModRoots)
+		previous.CardRoots = dropLockedEntries(previous.CardRoots)
+	}
+	// 预置主库不可删、不可改：请求里缺失的补回、改动的一律以磁盘现状为准（被拒的改动出声）
+	warnings = append(warnings, core.RestorePresets(previous, &cfg)...)
+	if firstModCache || cacheMoved {
+		if cachePath := core.ModCachePath(&cfg); cachePath != "" {
+			if mkErr := os.MkdirAll(cachePath, 0o755); mkErr != nil {
+				warnings = append(warnings, "缓存库目录创建失败（"+cachePath+"）："+mkErr.Error())
 			}
-		default:
-			continue
-		}
-		if setErr := hub.Core().SetSetting(k, text); setErr != nil {
-			writeErr(w, 500, setErr.Error())
-			return
 		}
 	}
-	writeJSON(w, map[string]interface{}{"ok": true})
+	if saveErr := saveRootsConfig(hub, &cfg); saveErr != nil {
+		writeErr(w, 500, saveErr.Error())
+		return
+	}
+	fmt.Printf("[配置] 保存完成——游戏根 %s · mod 库根 %d 个 · 卡片库根 %d 个\n", cfg.GameRoot, len(cfg.ModRoots), len(cfg.CardRoots))
+	if len(warnings) > 0 {
+		fmt.Printf("[配置] 附 %d 条提示：\n", len(warnings))
+		for _, one := range warnings {
+			fmt.Println("  ! " + one)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "roots": &cfg, "warnings": warnings})
+}
+
+// dropLockedEntries 去掉锁定条目（游戏根变更时清理上次预置基准用）。
+func dropLockedEntries(list []core.RootEntry) []core.RootEntry {
+	out := make([]core.RootEntry, 0, len(list))
+	for _, e := range list {
+		if !e.Locked {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// applyReplacedRoots 消费「原行改地址」标记——同一行换了地址 = 用新地址完全替换原来的：旧库数据彻底删除（含待办）。
+// 预置条目（路径不可改）与未变行直接清标记跳过（对齐 C# WebApp.cs ApplyReplacedRoots）。
+func (a *App) applyReplacedRoots(hub *store.Hub, cfg *core.RootsConfig) {
+	apply := func(list []core.RootEntry, isMods bool) {
+		for i := range list {
+			from := strings.TrimSpace(list[i].ReplacedFrom)
+			list[i].ReplacedFrom = ""
+			if from == "" {
+				continue
+			}
+			if strings.EqualFold(from, strings.TrimSpace(list[i].Path)) {
+				continue
+			}
+			if store.UsesCoreDB(list[i].Tier, list[i].Locked, isMods) {
+				continue
+			}
+			a.warm.releaseLibs(hub, from)
+			if hub.DropLibByPath(from) {
+				_ = hub.Core().CloseTodoByKey("offline", strings.ToLower(from))
+				fmt.Println("[换库] 原路径数据已作废：" + from + " → " + list[i].Path)
+			}
+		}
+	}
+	apply(cfg.ModRoots, true)
+	apply(cfg.CardRoots, false)
+}
+
+// missingCache 缺失清单缓存（对齐 C# _missingCache：按 per 缓存，扫描结束后失效）。
+var (
+	missingMu    sync.Mutex
+	missingCache map[int][]map[string]interface{}
+)
+
+// invalidateMissingCache 清空缺失清单缓存——扫描改变 mod / 卡片集合后调用（对齐 C# 扫描收尾置 null）。
+func invalidateMissingCache() {
+	missingMu.Lock()
+	missingCache = nil
+	missingMu.Unlock()
 }
 
 // handleMissing GET /api/missing?per= 缺失清单（跨库合并，按被引用卡数倒序；每条附前 per 张引用卡片）。
@@ -350,6 +427,13 @@ func (a *App) handleMissing(w http.ResponseWriter, r *http.Request) {
 	per := atoiDefault(r.URL.Query().Get("per"), 12)
 	if per <= 0 {
 		per = 12
+	}
+	missingMu.Lock()
+	cached := missingCache[per]
+	missingMu.Unlock()
+	if cached != nil {
+		writeJSON(w, map[string]interface{}{"total": len(cached), "per": per, "items": cached})
+		return
 	}
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
@@ -381,41 +465,61 @@ func (a *App) handleMissing(w http.ResponseWriter, r *http.Request) {
 		}
 		return list[i].guid < list[j].guid
 	})
+	guids := make([]string, 0, len(list))
+	for _, one := range list {
+		guids = append(guids, one.guid)
+	}
+	// 引用卡片一次批量取（对齐 C# BuildMissing 的 QueryCardsByMod 语义；逐 guid 查询是 N+1）
+	samplesByGuid, _ := core.QueryMissingCardsHub(hub, cfg, guids, per)
 	out := make([]map[string]interface{}, 0, len(list))
 	for _, one := range list {
-		samples, sErr := core.QueryCardsByModHub(hub, cfg, one.guid, 1, per)
-		if sErr != nil {
-			writeErr(w, 500, sErr.Error())
-			return
-		}
-		sampleJSON := make([]map[string]interface{}, 0, len(samples))
-		for i := range samples {
-			sampleJSON = append(sampleJSON, cardRowJSON(&samples[i]))
+		sampleJSON := make([]map[string]interface{}, 0, per)
+		cardsOfGuid := samplesByGuid[one.guid]
+		for i := range cardsOfGuid {
+			sampleJSON = append(sampleJSON, cardRowJSON(&cardsOfGuid[i]))
 		}
 		out = append(out, map[string]interface{}{
 			"guid": one.guid, "cards": one.cards, "samples": sampleJSON,
 		})
 	}
+	missingMu.Lock()
+	if missingCache == nil {
+		missingCache = map[int][]map[string]interface{}{}
+	}
+	missingCache[per] = out
+	missingMu.Unlock()
 	writeJSON(w, map[string]interface{}{"total": len(list), "per": per, "items": out})
 }
 
-// handlePluginsScan POST /api/plugins/scan 触发插件库扫描（后台，走同一扫描状态机）。
+// handlePluginsScan POST /api/plugins/scan 同步扫描插件库（只读解析 dll 元数据，不改动任何文件）。
+// 对齐 C# WebApp.cs：回执给 dllTotal / seconds / plugins / nonPlugin / configs（前端直接显示）。
 func (a *App) handlePluginsScan(w http.ResponseWriter, r *http.Request) {
-	scanMu.Lock()
-	if scanState.Running {
-		scanMu.Unlock()
-		writeJSON(w, map[string]interface{}{"ok": false, "error": "已有扫描在跑（同一时刻只允许一个）"})
+	hub, cfg, err := openApp(a.DBPath)
+	if err != nil {
+		writeErr(w, 500, err.Error())
 		return
 	}
-	scanState.Running = true
-	scanState.Target = "plugins"
-	scanState.Message = "启动中"
-	scanState.StartedAt = time.Now().Format("2006-01-02T15:04:05")
-	scanState.FinishedAt = ""
-	scanState.Errors = []string{}
-	scanMu.Unlock()
-	go a.runScan("plugins", false, "")
-	writeJSON(w, map[string]interface{}{"ok": true})
+	defer hub.Close()
+	started := time.Now()
+	result := &core.ScanResult{}
+	dlls, _, configs := core.ScanPlugins(hub.Core(), cfg, result, nil)
+	seconds := time.Since(started).Seconds()
+	rows, _ := hub.Core().LoadPlugins()
+	withGuid := 0
+	for _, row := range rows {
+		if strings.TrimSpace(row.Guid) != "" {
+			withGuid++
+		}
+	}
+	fmt.Printf("[插件] 扫描完成——%d 个 dll · %.1f 秒 · 插件 %d 项 · 配置文件 %d 个\n", dlls, seconds, withGuid, configs)
+	for _, e := range result.Errors {
+		fmt.Println("  ! " + e)
+	}
+	writeJSON(w, map[string]interface{}{
+		"ok": true, "dllTotal": dlls, "seconds": math.Round(seconds*10) / 10,
+		"plugins": withGuid, "nonPlugin": len(rows) - withGuid, "configs": configs,
+		"errors": result.Errors,
+	})
 }
 
 // storeTodoRows 把待办行转 map（面板 JSON 形状）。

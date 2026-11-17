@@ -12,10 +12,15 @@ import (
 )
 
 // handleScan 启动一次扫描（后台任务，页面关掉也继续跑）。
+// target 语义对齐 C# WebApp.cs §/api/scan：main = 预置条目 · extra = 使用者添加的库根 ·
+// mods / cards = 单库更新（root 指定，只扫这一条）· plugins = 插件库 · all = 全量。
 func (a *App) handleScan(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Target string `json:"target"`
 		Force  bool   `json:"force"`
+		Root   string `json:"root"`
+		Order  string `json:"order"`
+		On     string `json:"on"`
 		Steps  string `json:"steps"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -35,42 +40,80 @@ func (a *App) handleScan(w http.ResponseWriter, r *http.Request) {
 	scanState.FinishedAt = ""
 	scanState.Errors = []string{}
 	scanMu.Unlock()
-	go a.runScan(body.Target, body.Force, body.Steps)
+	go a.runScan(body.Target, body.Force, body.Root, body.Order, body.On, body.Steps)
 	writeJSON(w, map[string]interface{}{"ok": true, "target": body.Target})
 }
 
-// runScan 后台执行扫描（mods / cards / all）。
-func (a *App) runScan(target string, force bool, steps string) {
+// scanFail 扫描前置校验失败——落进状态面（失败必须可见），不静默降级成全量扫描。
+func (a *App) scanFail(msg string) {
+	scanMu.Lock()
+	scanState.Errors = append(scanState.Errors, msg)
+	scanMu.Unlock()
+}
+
+// runScan 后台执行扫描（main / extra / mods / cards / plugins / all）。
+func (a *App) runScan(target string, force bool, rootPath, orderText, onText, steps string) {
 	defer func() {
 		scanMu.Lock()
 		scanState.Running = false
 		scanState.Message = "完成"
 		scanState.FinishedAt = time.Now().Format("2006-01-02T15:04:05")
 		scanMu.Unlock()
+		// 扫描改变缺失集合（mod 库 / 卡片库都算）——缓存失效，下次打开缺失清单重建
+		invalidateMissingCache()
 	}()
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
-		scanMu.Lock()
-		scanState.Errors = append(scanState.Errors, err.Error())
-		scanMu.Unlock()
+		a.scanFail(err.Error())
 		return
 	}
 	defer hub.Close()
+	// 扫描计划——请求带了顺序 / 勾选就落盘（全局一套，追加库扫描同样适用），否则读已保存的
+	if strings.TrimSpace(orderText) != "" || strings.TrimSpace(onText) != "" {
+		_ = hub.Core().SetSetting("scan_plan_order", orderText)
+		_ = hub.Core().SetSetting("scan_plan_on", onText)
+	}
 	plan := loadScanPlan(hub, steps)
 	log := func(msg string) {
 		scanMu.Lock()
 		scanState.Message = msg
 		scanMu.Unlock()
 	}
+	// [段1] 单库更新（面板「更新本库」）——只扫这一条；离线库不参与扫描
+	var only *core.RootEntry
+	if strings.TrimSpace(rootPath) != "" {
+		only = core.FindRootEntry(cfg, rootPath)
+		if only == nil {
+			a.scanFail("该库根不在已保存的配置里——先在「库根设置」点「保存配置」，再更新本库：" + rootPath)
+			return
+		}
+		if only.Offline {
+			a.scanFail("该库已离线——先上线再更新：" + only.Path)
+			return
+		}
+	}
+	// [段2] 扫描范围——main = 预置条目 · extra = 使用者添加的库根（离线库跳过）
 	switch target {
+	case "main", "extra":
+		scope := core.ScanScopePreset
+		if target == "extra" {
+			scope = core.ScanScopeExtra
+		}
+		result, scanErr := core.ScanAll(hub, cfg, nil, scope, force, 256, 82, plan, log)
+		a.finishScan(result, scanErr)
 	case "mods":
-		result, scanErr := core.ScanMods(hub, cfg, nil, core.ScanScopePreset, force, plan, log)
+		result, scanErr := core.ScanMods(hub, cfg, only, core.ScanScopeAll, force, plan, log)
 		a.finishScan(result, scanErr)
 	case "cards":
-		result, scanErr := core.ScanCards(hub, cfg, nil, core.ScanScopePreset, force, 256, 82, plan, log)
+		result, scanErr := core.ScanCards(hub, cfg, only, core.ScanScopeAll, force, 256, 82, plan, log)
 		a.finishScan(result, scanErr)
+	case "plugins":
+		result := &core.ScanResult{}
+		dlls, plugins, configs := core.ScanPlugins(hub.Core(), cfg, result, log)
+		result.PluginDlls, result.Plugins, result.PluginConfigs = dlls, plugins, configs
+		a.finishScan(result, nil)
 	default:
-		result, scanErr := core.ScanAll(hub, cfg, nil, core.ScanScopePreset, force, 256, 82, plan, log)
+		result, scanErr := core.ScanAll(hub, cfg, nil, core.ScanScopeAll, force, 256, 82, plan, log)
 		a.finishScan(result, scanErr)
 	}
 }

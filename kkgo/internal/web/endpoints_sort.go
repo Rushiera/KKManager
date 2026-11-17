@@ -6,6 +6,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -219,7 +220,7 @@ func (a *App) handleSortPlanStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true})
 }
 
-// handleSortPlanConfirm 勾「我已核对文件结构」——落 setting.sort_confirm_plan。
+// handleSortPlanConfirm 勾「我已核对文件结构」——落 setting.sort_confirm_plan（值为计划 ID，对齐 C# ConfirmSortPlan）。
 func (a *App) handleSortPlanConfirm(w http.ResponseWriter, r *http.Request) {
 	var dto struct {
 		Confirmed bool  `json:"confirmed"`
@@ -228,19 +229,30 @@ func (a *App) handleSortPlanConfirm(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&dto)
 	}
+	if dto.PlanID <= 0 {
+		writeErr(w, 409, "未指定计划")
+		return
+	}
 	hub, _, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	defer hub.Close()
-	val := "0"
-	if dto.Confirmed {
-		val = "1"
-	}
-	if err := hub.Core().SetSetting("sort_confirm_plan", val); err != nil {
-		writeErr(w, 500, err.Error())
+	plan, perr := hub.Core().SortPlanByID(dto.PlanID)
+	if perr != nil || plan == nil {
+		writeErr(w, 409, "计划不存在（可能已被重新生成）")
 		return
+	}
+	if dto.Confirmed {
+		if setErr := hub.Core().SetSetting("sort_confirm_plan", strconv.FormatInt(plan.ID, 10)); setErr != nil {
+			writeErr(w, 500, setErr.Error())
+			return
+		}
+		fmt.Printf("[整理] 计划 #%d 已核对确认\n", plan.ID)
+	} else {
+		_ = hub.Core().DeleteSetting("sort_confirm_plan")
+		fmt.Printf("[整理] 计划 #%d 确认已撤销\n", plan.ID)
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "confirmed": dto.Confirmed})
 }
@@ -256,6 +268,10 @@ func (a *App) handleSortExecStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if !dto.KoikatsuClosed {
 		writeErr(w, 400, "先在弹框里勾选「koikatsu 已关闭」")
+		return
+	}
+	if dto.PlanID <= 0 {
+		writeErr(w, 400, "未指定计划")
 		return
 	}
 	sortJobMu.Lock()
@@ -280,17 +296,29 @@ func (a *App) handleSortExecStart(w http.ResponseWriter, r *http.Request) {
 		}
 		defer hub.Close()
 		planID := dto.PlanID
-		if planID <= 0 {
-			if plan, perr := hub.Core().LatestSortPlan(); perr == nil && plan != nil {
-				planID = plan.ID
-			}
-		}
-		confirmed, _, _ := hub.Core().GetSetting("sort_confirm_plan")
-		if confirmed != "1" {
+		plan, perr := hub.Core().SortPlanByID(planID)
+		if perr != nil || plan == nil {
 			sortJobMu.Lock()
 			job.Running = false
 			job.FinishedAt = sortNowStamp()
-			job.Errors = append(job.Errors, "闸门[已确认]：先勾选「我已核对文件结构」")
+			job.Errors = append(job.Errors, "计划不存在（可能已被重新生成）")
+			sortJobMu.Unlock()
+			return
+		}
+		if plan.State != "ready" {
+			sortJobMu.Lock()
+			job.Running = false
+			job.FinishedAt = sortNowStamp()
+			job.Errors = append(job.Errors, "计划状态不是 ready（当前 "+plan.State+"）——重新生成计划")
+			sortJobMu.Unlock()
+			return
+		}
+		confirmed, _, _ := hub.Core().GetSetting("sort_confirm_plan")
+		if confirmed != strconv.FormatInt(planID, 10) {
+			sortJobMu.Lock()
+			job.Running = false
+			job.FinishedAt = sortNowStamp()
+			job.Errors = append(job.Errors, "闸门[已确认]：先在计划窗勾选「我已核对文件结构」")
 			sortJobMu.Unlock()
 			return
 		}

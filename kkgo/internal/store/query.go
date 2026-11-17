@@ -877,3 +877,55 @@ func CompareCardsByMod(a, b *CardListRow) int {
 	}
 	return strings.Compare(strings.ToLower(a.FileName), strings.ToLower(b.FileName))
 }
+
+// CardWithGuid 引用查询结果（卡片行 + 它所属的 mod guid）。
+type CardWithGuid struct {
+	// Guid 引用该卡的 mod guid。
+	Guid string
+	// Row 卡片行（含四色聚合与卡片元数据）。
+	Row CardListRow
+}
+
+// RefCardsByModsFullBatch 一批 guid 的引用卡片完整行（含四色聚合与卡片元数据）——
+// 缺失清单样本用（字段集对齐 C# Store.QueryCardsByMod；RefCardsByModsBatch 只给缩略图区轻量行）。
+func (d *DB) RefCardsByModsFullBatch(guids []string) ([]CardWithGuid, error) {
+	if len(guids) == 0 {
+		return nil, nil
+	}
+	names := make([]string, len(guids))
+	args := make([]interface{}, len(guids))
+	for i, g := range guids {
+		names[i] = "?"
+		args[i] = g
+	}
+	sqlText := colorCte(d.modTable()) + ` SELECT cm.mod_guid, c.id, c.file_name, c.card_type, c.size, c.mtime,
+                     c.root_path, c.tier, c.folder, c.mod_count,
+                     COALESCE(a.green,0), COALESCE(a.yellow,0), COALESCE(a.red,0), COALESCE(a.black,0),
+                     (c.thumb IS NOT NULL)
+                     FROM (SELECT DISTINCT mod_guid, card_id FROM card_mod WHERE mod_guid IN (` +
+		strings.Join(names, ",") + `)) cm
+                     JOIN card c ON c.id = cm.card_id
+                     LEFT JOIN agg a ON a.card_id = c.id`
+	rows, err := d.sql.Query(sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []CardWithGuid
+	for rows.Next() {
+		var one CardWithGuid
+		var cardType, mtime, rootPath sql.NullString
+		var thumb int64
+		if err = rows.Scan(&one.Guid, &one.Row.Id, &one.Row.FileName, &cardType, &one.Row.Size, &mtime,
+			&rootPath, &one.Row.Tier, &one.Row.Folder, &one.Row.ModCount,
+			&one.Row.Green, &one.Row.Yellow, &one.Row.Red, &one.Row.Black, &thumb); err != nil {
+			return nil, err
+		}
+		one.Row.CardType, one.Row.CardTypeSet = cardType.String, cardType.Valid
+		one.Row.Mtime, one.Row.MtimeSet = mtime.String, mtime.Valid
+		one.Row.RootPath, one.Row.RootPathSet = rootPath.String, rootPath.Valid
+		one.Row.HasThumb = thumb != 0
+		list = append(list, one)
+	}
+	return list, rows.Err()
+}

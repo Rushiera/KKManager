@@ -85,6 +85,10 @@ func (a *App) handleRootsOffline(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"ok": false, "error": saveErr.Error()})
 			return
 		}
+		if !dto.Offline {
+			// 上线消解该库的「库已离线」待办（对齐 C# SetRootOffline）
+			_ = hub.Core().CloseTodoByKey("offline", strings.ToLower(strings.TrimSpace(list[i].Path)))
+		}
 		writeJSON(w, map[string]interface{}{"ok": true})
 		return
 	}
@@ -144,6 +148,7 @@ func (a *App) handleRootsPurge(w http.ResponseWriter, r *http.Request) {
 	}
 	// 库文件将被删除——先释放该库根的常驻预热连接（占用中的文件删不掉）
 	a.warm.releaseLibs(hub, list[idx].Path)
+	_ = hub.Core().CloseTodoByKey("offline", strings.ToLower(strings.TrimSpace(list[idx].Path)))
 	hub.Close()
 	if libErr == nil && base > 0 {
 		if _, errs := purgeLibFiles(filepath.Dir(a.DBPath), base); len(errs) > 0 {

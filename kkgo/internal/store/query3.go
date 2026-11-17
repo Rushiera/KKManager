@@ -97,6 +97,12 @@ func (d *DB) AddCardEdit(cardPath, cardName string, lib int, archivedFile string
 	return err
 }
 
+// UpdateCardSize 更新一张卡片记录的字节数——编辑后文件长度变了；修改时间按最小改动原则还原，故只更新字节数。
+func (d *DB) UpdateCardSize(id, size int64) error {
+	_, err := d.execer().Exec("UPDATE card SET size=? WHERE id=?", size, id)
+	return err
+}
+
 // QueryCardRefs 某张卡的引用明细（对齐 C# Store.QueryCardRefs）——
 // 同 guid 多部件聚合为一行（MIN(property) 等），tier 按跨库最优；tierFilter 0=不过滤，1/2/3/9 过滤。
 func (d *DB) QueryCardRefs(cardId int64, tierFilter int) ([]RefRow, error) {

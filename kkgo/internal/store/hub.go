@@ -567,3 +567,44 @@ func ShardOfPath(filePath string, shards int) int {
 	}
 	return int(hash % uint32(shards))
 }
+
+// DropLibByPath 按路径彻底删除库文件与映射（彻底删除数据 / 原行改地址换库 共用）。
+// 主库条目（预置主库 / mod 缓存库槽位）由调用方经 UsesCoreDB 排除；映射里没有该路径时返回 false。
+func (h *Hub) DropLibByPath(rootPath string) bool {
+	key := strings.ToLower(strings.TrimSpace(rootPath))
+	if key == "" {
+		return false
+	}
+	lib, ok := h.libOf[key]
+	if !ok {
+		return false
+	}
+	shards, _ := h.ShardCountOf(lib)
+	if shards <= 0 {
+		shards = 1
+	}
+	// 关闭该库根的全部已打开分片连接（占用中的文件删不掉）
+	for k := 0; k < shards; k++ {
+		id := LibOfShard(lib, k)
+		if s, open := h.libs[id]; open {
+			_ = s.Close()
+			delete(h.libs, id)
+		}
+	}
+	delete(h.libOf, key)
+	_ = h.core.DeleteSetting("libdb:" + key)
+	for k := 0; k < shards; k++ {
+		one := filepath.Join(h.dir, LibDbFileName(LibOfShard(lib, k)))
+		for _, f := range []string{one, one + "-wal", one + "-shm"} {
+			if !fileExists(f) {
+				continue
+			}
+			if err := os.Remove(f); err != nil {
+				fmt.Fprintln(os.Stderr, "[库数据] 删除失败（"+f+"）："+err.Error())
+			}
+		}
+	}
+	_ = h.core.DeleteSetting("libshards:" + strconv.Itoa(lib))
+	fmt.Println("[库数据] 已彻底删除：" + rootPath + " → " + LibDbFileName(lib) + "（" + strconv.Itoa(shards) + " 片）")
+	return true
+}
