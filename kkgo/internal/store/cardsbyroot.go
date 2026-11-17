@@ -14,7 +14,7 @@ type CardIdPath struct {
 // pendingStep 非空时只取该步骤无完成戳的卡（分批续跑）。
 func (d *DB) QueryCardIdsByRoot(rootPath, pendingStep string) ([]CardIdPath, error) {
 	sqlText := "SELECT c.id, c.file_path FROM card c WHERE c.root_path=?"
-	args := []interface{}{trimTrailSlash(rootPath)}
+	args := []interface{}{trimTrailSlash(RootKey(rootPath))}
 	if pendingStep != "" {
 		sqlText += " AND NOT EXISTS (SELECT 1 FROM scan_state s WHERE s.file_path=c.file_path AND s.step=?)"
 		args = append(args, pendingStep)

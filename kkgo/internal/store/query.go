@@ -269,7 +269,7 @@ func (d *DB) QueryCardsRows(page, size int, filter, q string, folder *string, ro
 	}
 	if root != "" {
 		where += " AND c.root_path = ?"
-		args = append(args, root)
+		args = append(args, RootKey(root))
 	}
 	switch filter {
 	case "pending":
@@ -730,6 +730,7 @@ func (d *DB) QueryRefRowsByGuid(guid string) ([]RefRow, error) {
 
 // QueryModFileRecsByRoot 某库根下全部 mod 副本行（对齐 C# Store.QueryModFilesByRoot）：按路径升序。
 func (d *DB) QueryModFileRecsByRoot(rootPath string) ([]ModFileRec, error) {
+	rootPath = RootKey(rootPath)
 	rows, err := d.sql.Query("SELECT file_path,guid,tier,root_path,file_name,size,mtime,scan_time FROM mod_file WHERE root_path=? ORDER BY file_path", rootPath)
 	if err != nil {
 		return nil, err

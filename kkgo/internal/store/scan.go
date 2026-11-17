@@ -100,6 +100,7 @@ func manifestText(found map[string]bool, name, value string) interface{} {
 
 // UpsertModFile 写入一个 mod 文件副本并刷新 mod 主表的最优级别（对齐 C# Store.UpsertModFile）。
 func (d *DB) UpsertModFile(in ModFileInput) error {
+	in.RootPath = RootKey(in.RootPath)
 	var existed int64
 	if err := d.execer().QueryRow("SELECT COUNT(*) FROM mod_file WHERE file_path=?", in.FilePath).Scan(&existed); err != nil {
 		return err
@@ -175,13 +176,14 @@ func (d *DB) WriteModRow(guid string, best *ModFileRecord) error {
 	if best == nil {
 		return nil
 	}
+	rootPath := RootKey(best.RootPath)
 	_, err := d.execer().Exec("INSERT INTO "+d.modTable()+`(guid,tier,root_path,file_path,file_name,size,mtime,dup_count,scan_time)
 		VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(guid) DO UPDATE SET
 		  tier=excluded.tier, root_path=excluded.root_path, file_path=excluded.file_path,
 		  file_name=excluded.file_name, size=excluded.size, mtime=excluded.mtime,
 		  dup_count=excluded.dup_count, scan_time=excluded.scan_time`,
-		guid, best.Tier, best.RootPath, best.FilePath, best.FileName, best.Size, best.Mtime, 0, Now())
+		guid, best.Tier, rootPath, best.FilePath, best.FileName, best.Size, best.Mtime, 0, Now())
 	return err
 }
 
@@ -289,6 +291,7 @@ func (d *DB) MarkScanStep(filePath, step string, size int64, mtime string) error
 }
 
 // DeleteScanStepsMissingUnderRoot 清扫某库根下已从磁盘消失文件的步骤记录（present 为空时不清扫）；返回删除条数。
+// 前缀按真实遍历路径（file_path）——库根口径（RootKey）只管 root_path 列与库序号，不管文件路径前缀。
 func (d *DB) DeleteScanStepsMissingUnderRoot(rootPath string, present map[string]bool) (int, error) {
 	prefix := trimRoot(rootPath)
 	if prefix == "" || len(present) == 0 {
@@ -322,6 +325,7 @@ func (d *DB) DeleteScanStepsMissingUnderRoot(rootPath string, present map[string
 
 // DeleteModFilesMissingUnderRoot 清扫某库根下已消失的 mod 副本记录——返回受影响的 guid（去重）。
 func (d *DB) DeleteModFilesMissingUnderRoot(rootPath string, present map[string]bool) ([]string, error) {
+	rootPath = RootKey(rootPath)
 	rows, err := d.execer().Query("SELECT file_path, guid FROM mod_file WHERE root_path=?", rootPath)
 	if err != nil {
 		return nil, err
@@ -355,6 +359,7 @@ func (d *DB) DeleteModFilesMissingUnderRoot(rootPath string, present map[string]
 }
 
 // DeleteModOldMissingUnderRoot 清扫落在某库根下、文件已消失的旧版登记——返回清理条数（旧版登记是主库表）。
+// 前缀按真实文件路径（old_path），理由同 DeleteScanStepsMissingUnderRoot。
 func (d *DB) DeleteModOldMissingUnderRoot(rootPath string, present map[string]bool) (int, error) {
 	if !d.isCore {
 		return 0, nil
@@ -394,6 +399,7 @@ func (d *DB) UpsertNonCard(filePath, rootPath, side, reason string, size int64, 
 	if filePath == "" {
 		return nil
 	}
+	rootPath = RootKey(rootPath)
 	var thumbArg interface{}
 	if len(thumb) > 0 {
 		thumbArg = thumb
@@ -431,6 +437,7 @@ func (d *DB) DeleteNonCardsMissingUnderRoot(rootPath string) (int, error) {
 
 // deleteNonCardsWhere 删除某库根下文件已不存在的非卡登记（逐个 TestPath）。
 func (d *DB) deleteNonCardsWhere(rootPath string) (int, error) {
+	rootPath = RootKey(rootPath)
 	rows, err := d.execer().Query("SELECT id, file_path FROM non_card WHERE root_path=?", rootPath)
 	if err != nil {
 		return 0, err
@@ -481,6 +488,7 @@ func (d *DB) RefreshModAuthors() (int64, error) {
 
 // CountModFilesOf 某库根下的 mod 副本行数（对拍用）。
 func (d *DB) CountModFilesOf(rootPath string) (int64, error) {
+	rootPath = RootKey(rootPath)
 	var n int64
 	err := d.execer().QueryRow("SELECT COUNT(*) FROM mod_file WHERE root_path=?", rootPath).Scan(&n)
 	return n, err
@@ -495,6 +503,7 @@ func (d *DB) CountModRows() (int64, error) {
 
 // CountNonCardsOf 某库根下的非卡登记数（对拍用）。
 func (d *DB) CountNonCardsOf(rootPath string) (int64, error) {
+	rootPath = RootKey(rootPath)
 	var n int64
 	err := d.execer().QueryRow("SELECT COUNT(*) FROM non_card WHERE root_path=?", rootPath).Scan(&n)
 	return n, err

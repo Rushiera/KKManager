@@ -80,6 +80,7 @@ func (d *DB) LoadCardStamps() (map[string]CardStamp, error) {
 
 // UpsertCardRow 扫描「卡片行」步——只写文件与归属；已存在的行只刷新 size / mtime / 归属。返回卡片 id。
 func (d *DB) UpsertCardRow(filePath, fileName string, size int64, mtime string, tier int, rootPath, folder string) (int64, error) {
+	rootPath = RootKey(rootPath)
 	_, err := d.execer().Exec(`INSERT INTO card(file_path,file_name,size,mtime,tier,root_path,folder,scan_time)
 		VALUES(?,?,?,?,?,?,?,?)
 		ON CONFLICT(file_path) DO UPDATE SET
@@ -186,6 +187,7 @@ func (d *DB) DeleteCardByPath(filePath string) error {
 
 // DeleteCardsMissingUnderRoot 清扫某库根下已从磁盘消失的卡片记录（含引用行）；返回删除的卡片数。
 func (d *DB) DeleteCardsMissingUnderRoot(rootPath string, present map[string]bool) (int, error) {
+	rootPath = RootKey(rootPath)
 	rows, err := d.execer().Query("SELECT id, file_path FROM card WHERE root_path=?", rootPath)
 	if err != nil {
 		return 0, err
@@ -308,6 +310,7 @@ func boolInt(v bool) int {
 
 // CountCardsOf 某库根下的卡片行数（对拍用）。
 func (d *DB) CountCardsOf(rootPath string) (int64, error) {
+	rootPath = RootKey(rootPath)
 	var n int64
 	err := d.execer().QueryRow("SELECT COUNT(*) FROM card WHERE root_path=?", rootPath).Scan(&n)
 	return n, err

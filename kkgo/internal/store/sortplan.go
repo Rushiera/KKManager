@@ -74,6 +74,7 @@ func (d *DB) AddSortPlanItem(row *SortPlanItemRow) error {
 	if !d.isCore || row == nil {
 		return nil
 	}
+	row.RootPath = RootKey(row.RootPath)
 	_, err := d.execer().Exec(`INSERT INTO mod_sort_plan_item(seq,plan_id,lib,tier,root_path,guid,author,folder,src_path,dest_path,size,mtime,state,note)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.Seq, row.PlanID, row.Lib, row.Tier, row.RootPath, row.Guid, row.Author, row.Folder,
@@ -106,6 +107,7 @@ func (d *DB) SetSortItemLocation(planID, seq int64, lib, tier int, rootPath, fol
 	if !d.isCore {
 		return nil
 	}
+	rootPath = RootKey(rootPath)
 	_, err := d.execer().Exec(`UPDATE mod_sort_plan_item SET lib=?,tier=?,root_path=?,folder=?,src_path=?,dest_path=?,state=?,note=?
 		WHERE plan_id=? AND seq=?`,
 		lib, tier, rootPath, folder, srcPath, destPath, state, note, planID, seq)
@@ -233,6 +235,7 @@ func (d *DB) InsertModFileRow(rec *ModFileRec, tier int, rootPath, newPath strin
 	if rec == nil {
 		return false, nil
 	}
+	rootPath = RootKey(rootPath)
 	var n int64
 	if err := d.execer().QueryRow("SELECT COUNT(*) FROM mod_file WHERE file_path=?", newPath).Scan(&n); err != nil {
 		return false, err

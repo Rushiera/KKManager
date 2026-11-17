@@ -130,9 +130,9 @@ func LibOfRootPath(hub *store.Hub, cfg *RootsConfig, rootPath string) (int, erro
 	if cfg == nil || strings.TrimSpace(rootPath) == "" {
 		return 0, nil
 	}
-	norm := strings.TrimSpace(rootPath)
+	norm := store.RootKey(rootPath)
 	for _, e := range cfg.ModRoots {
-		if strings.EqualFold(strings.TrimSpace(e.Path), norm) {
+		if strings.EqualFold(store.RootKey(e.Path), norm) {
 			if store.UsesCoreDB(e.Tier, e.Locked, true) {
 				return 0, nil
 			}
@@ -140,7 +140,7 @@ func LibOfRootPath(hub *store.Hub, cfg *RootsConfig, rootPath string) (int, erro
 		}
 	}
 	for _, e := range cfg.CardRoots {
-		if strings.EqualFold(strings.TrimSpace(e.Path), norm) {
+		if strings.EqualFold(store.RootKey(e.Path), norm) {
 			if store.UsesCoreDB(e.Tier, e.Locked, false) {
 				return 0, nil
 			}

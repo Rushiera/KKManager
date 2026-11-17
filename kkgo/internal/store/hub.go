@@ -113,7 +113,22 @@ func (h *Hub) loadLibMap() error {
 				return err
 			}
 		}
-		h.libOf[rootPath] = n
+		key := strings.ToLower(RootKey(rootPath))
+		if prev, ok := h.libOf[key]; ok && prev != n {
+			// 同义键归并：`…\kkc` 与 `…\kkc\整理` 指向同一个库根（数据面只有一套），取小号并出声
+			keep := prev
+			if n < keep {
+				keep = n
+			}
+			fmt.Println("[库数据] 库序号同义键：" + rootPath + " → " + strconv.Itoa(n) + "（已有同库根映射 " + strconv.Itoa(prev) + "，取 " + strconv.Itoa(keep) + "）")
+			h.libOf[key] = keep
+			baseNo := BaseOfLib(keep) + 1
+			if baseNo >= h.nextLib {
+				h.nextLib = baseNo + 1
+			}
+			continue
+		}
+		h.libOf[key] = n
 		baseNo := BaseOfLib(n) + 1
 		if baseNo >= h.nextLib {
 			h.nextLib = baseNo + 1
@@ -124,7 +139,7 @@ func (h *Hub) loadLibMap() error {
 
 // LibOf 取某个库根的库序号（没有则分配并落盘）——返回复合号的**首片**（库根序号 × 进位基数）。
 func (h *Hub) LibOf(rootPath string) (int, error) {
-	key := strings.ToLower(strings.TrimSpace(rootPath))
+	key := strings.ToLower(RootKey(rootPath))
 	if key == "" {
 		return 0, nil
 	}
@@ -364,6 +379,7 @@ func (d *DB) adoptRootFromCore(rootPath string) error {
 	if d.isCore {
 		return nil
 	}
+	rootPath = RootKey(rootPath)
 	stmts := []string{
 		`INSERT OR IGNORE INTO card(id,file_path,file_name,size,mtime,tier,root_path,folder,
 			 card_type,data_version,image_end,uar_blocks,mod_count,thumb,scan_time,error)
@@ -571,7 +587,7 @@ func ShardOfPath(filePath string, shards int) int {
 // DropLibByPath 按路径彻底删除库文件与映射（彻底删除数据 / 原行改地址换库 共用）。
 // 主库条目（预置主库 / mod 缓存库槽位）由调用方经 UsesCoreDB 排除；映射里没有该路径时返回 false。
 func (h *Hub) DropLibByPath(rootPath string) bool {
-	key := strings.ToLower(strings.TrimSpace(rootPath))
+	key := strings.ToLower(RootKey(rootPath))
 	if key == "" {
 		return false
 	}

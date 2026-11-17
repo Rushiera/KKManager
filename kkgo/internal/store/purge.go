@@ -11,7 +11,7 @@ import "strings"
 // 对齐 C# Store.DeleteRecordsUnderRoot：路径前缀匹配 idx_meta / scan_state 时用「前缀 + \%」。
 func (d *DB) DeleteRecordsUnderRoot(rootPath string) ([]string, error) {
 	guids := []string{}
-	prefix := strings.TrimRight(rootPath, `\/`)
+	prefix := RootKey(rootPath)
 	if prefix == "" {
 		return guids, nil
 	}
