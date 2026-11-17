@@ -252,10 +252,10 @@
       <span class="dim">选定游戏根后自动填入 4 条级别 1：游戏根\mods · UserData 下 female / coordinate / Studio</span>
     </div>
 
-    <h2>kkc 接入（独立形态 · 与下面的 mod / 卡片库根不是一套：kkc 由 card-sort 链自己管，这里只有一个开关）</h2>
+    <h2>kkc 接入（独立形态 · 不进库根表：kkc 由 card-sort 链自己管，这里只有一个开关）</h2>
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px">
-      <button id="btnKkcToggle" title="开 = 把 kkc 整理库接成「卡片附加库 + mod 冷冻库」；关 = kkm 不扫 kkc（重复副本与缺失统计都不含它）。数据始终共用同一个数据库">kkc 接入：关</button>
-      <span class="dim" id="kkcHint">关着：只扫游戏目录。开：才扫 kkc\整理（卡片）与 整理\02-mod（mod 冷冻库）——开关独立于下面的库根表，保存库根不会动它</span>
+      <button id="btnKkcToggle" title="开 = 运行态把 kkc 整理库接成「卡片附加库 + mod 冷冻库」（不写进库根配置）；关 = 不接入——库根表、文件夹视图、卡片列表与统计都不含 kkc">kkc 接入：关</button>
+      <span class="dim" id="kkcHint">关着：面板不展示 kkc 文件夹，统计也不含 kkc。开：才把 kkc\整理（卡片）与 整理\02-mod（mod 冷冻库）接进运行态——两个方向都不写进下面的库根表</span>
     </div>
 
     <h2>库根设置 — 插件库（预置条目锁定不可改 · BepInEx 目录 · 含子目录）</h2>
@@ -1643,8 +1643,8 @@ function renderKkcButton(){
   btn.textContent = 'kkc 接入：' + (on ? '开' : '关');
   btn.classList.toggle('primary', on);
   btn.title = on
-    ? '点一下关闭——kkm 不再扫 kkc（已扫的库记录保留，要清走 /api/roots/purge）'
-    : '点一下打开——把 kkc 整理库接成卡片附加库 + mod 冷冻库（数据仍共用同一个库）';
+    ? '点一下关闭——kkc 不再参与运行态（文件夹视图 / 卡片列表 / 统计都不含它；库里的数据保留）'
+    : '点一下打开——运行态接入 kkc 整理库（卡片附加库 + mod 冷冻库；不写进库根配置）';
 }
 async function toggleKkc(){
   const btn = $('btnKkcToggle');
@@ -1656,7 +1656,9 @@ async function toggleKkc(){
     const r = await api('/api/kkc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: next})});
     if(!r || !r.ok){ alert('kkc 接入切换失败：' + ((r && r.error) || '未知错误')); return; }
     await loadSettings();
+    await loadFolders();   /* 开关直接决定 kkc 文件夹是否出现在文件夹条——切完必须重取 */
     await loadStats();
+    await reload();
   }catch(e){ alert('kkc 接入切换失败：' + e.message); }
   finally{ btn.disabled = false; if(!state.kkc) btn.textContent = old; }
 }
@@ -1728,10 +1730,7 @@ async function saveSettings(collapse, quiet){
   try{
     await syncMainRoots($('gameRoot').value);   /* 保存前对齐：4 条级别 1 = 游戏根派生值 */
     const body = { gameRoot: $('gameRoot').value.trim(), modRoots: collectRoots('modRootsBody'), cardRoots: collectRoots('cardRootsBody') };
-    /* kkc 条目不在库根表里显示——保存时按原样带回，避免「保存配置」顺手把 kkc 接入关掉 */
-    const roots0 = state.roots || {};
-    (roots0.modRoots||[]).filter(e => isUnderKkc(e.path)).forEach(e => body.modRoots.push(e));
-    (roots0.cardRoots||[]).filter(e => isUnderKkc(e.path)).forEach(e => body.cardRoots.push(e));
+    /* kkc 条目不进库根表（独立形态：由 kkc 接入开关控制，运行态注入）——保存时既不显示也不带回 */
     const r = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     state.roots = r.roots || state.roots;
     renderRoots();

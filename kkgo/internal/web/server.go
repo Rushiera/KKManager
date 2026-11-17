@@ -168,7 +168,7 @@ func (a *App) Serve(port int, openBrowser bool) error {
 	return srv.Serve(ln)
 }
 
-// openApp 打开主库并读库根配置。
+// openApp 打开主库并读库根配置（含 kkc 运行态注入——配置里永不出现 kkc 条目）。
 func openApp(dbPath string) (*store.Hub, *core.RootsConfig, error) {
 	hub, err := store.OpenHub(dbPath)
 	if err != nil {
@@ -181,6 +181,11 @@ func openApp(dbPath string) (*store.Hub, *core.RootsConfig, error) {
 	}
 	cfg := core.ParseRootsConfig(text)
 	core.Normalize(cfg)
+	// kkc 是独立形态：配置里不留条目（历史残留读面剥掉），开关开着才注入两条运行态库根
+	core.StripKkcRoots(cfg, dbPath)
+	if core.KkcEnabled(hub) {
+		core.InjectKkcRoots(cfg, dbPath)
+	}
 	return hub, cfg, nil
 }
 
@@ -234,6 +239,7 @@ func (a *App) handlePluginNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSettings 库根配置 + 版本 + 编辑授权。
+// kkc 的库根条目一律不展示（独立形态：由 /api/kkc 开关控制，运行态注入）。
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
@@ -241,6 +247,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer hub.Close()
+	core.StripKkcRoots(cfg, a.DBPath)
 	writeJSON(w, map[string]interface{}{
 		"roots":          cfg,
 		"dbPath":         hub.Core().Path(),

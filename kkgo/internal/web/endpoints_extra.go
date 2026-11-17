@@ -334,9 +334,13 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	warnings := make([]string, 0, 4)
 	// 锁定标记只由规范按路径认定——请求带来的标记一律清掉，不信任外部输入
 	core.ClearLockFlags(&cfg)
+	// kkc 是独立形态：请求里的 kkc 条目（历史前端带回的残留）一律剥掉
+	core.StripKkcRoots(&cfg, a.DBPath)
 	// 原行改地址 = 用新地址完全替换原来的——旧库数据作废（删库文件 + 消解待办）；须在 Normalize 之前消费
 	a.applyReplacedRoots(hub, &cfg)
 	core.Normalize(&cfg)
+	// previous 也剥掉运行态注入的 kkc 根——否则预置还原会把它们当「配置里的条目」补回
+	core.StripKkcRoots(previous, a.DBPath)
 	// 游戏根换了 = 预置条目按新根重派生（旧根的条目不再复活；缓存库槽位未被改过则跟随新根）
 	firstModCache := core.ModCachePath(previous) == ""
 	cacheMoved := false
@@ -357,7 +361,7 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if saveErr := saveRootsConfig(hub, &cfg); saveErr != nil {
+	if saveErr := a.saveRoots(hub, &cfg); saveErr != nil {
 		writeErr(w, 500, saveErr.Error())
 		return
 	}

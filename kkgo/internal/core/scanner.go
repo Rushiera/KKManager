@@ -653,6 +653,8 @@ func applyOfflineMarks(hub *store.Hub, cfg *RootsConfig, result *ScanResult, isM
 	} else {
 		cfg.CardRoots = list
 	}
+	// kkc 是运行态注入的库根，不进配置（离线标记只对真实库根有意义）
+	StripKkcRoots(cfg, hub.Core().Path())
 	text, err := RootsConfigJSON(cfg)
 	if err != nil {
 		return err

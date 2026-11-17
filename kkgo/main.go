@@ -948,6 +948,11 @@ func openHub(dbPath string) (*store.Hub, *core.RootsConfig, error) {
 	}
 	cfg := core.ParseRootsConfig(text)
 	core.Normalize(cfg)
+	// kkc 是独立形态：配置里不留条目（历史残留剥掉），开关开着才注入两条运行态库根
+	core.StripKkcRoots(cfg, dbPath)
+	if core.KkcEnabled(hub) {
+		core.InjectKkcRoots(cfg, dbPath)
+	}
 	return hub, cfg, nil
 }
 
@@ -1711,6 +1716,8 @@ func cmdRootsList(rest []string) int {
 	}
 	defer db.Close()
 	core.Normalize(cfg)
+	// kkc 不进库根表（独立形态——开关由面板 / setting kkc_enabled 控制）
+	core.StripKkcRoots(cfg, db.Path())
 	fmt.Println("库: " + db.Path())
 	fmt.Println("游戏根: " + cfg.GameRoot)
 	fmt.Println()
@@ -1945,8 +1952,9 @@ func printScanPlan(p *core.ScanPlan) {
 	}
 }
 
-// saveRoots 写回库根配置（键 roots）。
+// saveRoots 写回库根配置（键 roots）——kkc 条目（历史残留 / 运行态注入）一律不落盘。
 func saveRoots(db *store.DB, cfg *core.RootsConfig) error {
+	core.StripKkcRoots(cfg, db.Path())
 	text, err := core.RootsConfigJSON(cfg)
 	if err != nil {
 		return err

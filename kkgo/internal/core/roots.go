@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kkgo/internal/store"
+	"path/filepath"
 	"strings"
 )
 
@@ -442,4 +443,114 @@ func FindRootEntry(cfg *RootsConfig, path string) *RootEntry {
 		}
 	}
 	return nil
+}
+
+// ---------- kkc 接入（独立形态） ----------
+//
+// kkc 整理库由 card-sort 链自己管，**不进库根配置**（不在「库根设置」的卡片库 / mod 库里出现）。
+// 接入 = 一个独立开关（setting kkc_enabled）；开着时由本组函数在**运行态**注入两条库根，
+// 关掉时整个 kkc 不出现在扫描面 / 读面 / 文件夹视图里。
+// 判据：任何写回 roots 的路径都必须先 StripKkcRoots——配置里永远看不到 kkc 条目。
+
+// KkcSettingKey kkc 接入开关的 setting 键（"1" = 开 · 缺省 / 其它值 = 关）。
+const KkcSettingKey = "kkc_enabled"
+
+// KkcDataDir 返回 kkc 整理库的数据根（主库目录下的 kkc 子目录）；dbPath 为空时返回空串。
+func KkcDataDir(dbPath string) string {
+	if strings.TrimSpace(dbPath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(dbPath), "kkc")
+}
+
+// KkcRootEntries 生成 kkc 接入的两条运行态库根：
+// 卡片侧 = <数据根>\整理（级别 2 · 含子目录 · 只读）· mod 侧 = <数据根>\整理\02-mod（级别 3 · 含子目录 · 只读）。
+// 两者路径都落在 kkc 数据根内——所以任何写回配置的路径都必须先 StripKkcRoots。
+func KkcRootEntries(dbPath string) (card RootEntry, mod RootEntry, ok bool) {
+	data := KkcDataDir(dbPath)
+	if data == "" {
+		return RootEntry{}, RootEntry{}, false
+	}
+	cardRoot := filepath.Join(data, store.KkcOrganizeSubdir)
+	return RootEntry{Tier: TierCache, Path: cardRoot, Recurse: true, ReadOnly: true},
+		RootEntry{Tier: TierCold, Path: filepath.Join(cardRoot, "02-mod"), Recurse: true, ReadOnly: true},
+		true
+}
+
+// UnderKkc 判断路径是否落在 kkc 数据根内（含数据根本身与全部子目录）。
+func UnderKkc(dbPath, path string) bool {
+	data := strings.ToLower(trimPath(KkcDataDir(dbPath)))
+	p := strings.ToLower(trimPath(path))
+	if data == "" || p == "" {
+		return false
+	}
+	return p == data || strings.HasPrefix(p, data+`\`) || strings.HasPrefix(p, data+"/")
+}
+
+// StripKkcRoots 剥掉配置里落在 kkc 数据根内的库根条目（历史残留 / 旧写法 / 运行态注入）——返回剥掉的条数。
+func StripKkcRoots(cfg *RootsConfig, dbPath string) int {
+	if cfg == nil || KkcDataDir(dbPath) == "" {
+		return 0
+	}
+	before := len(cfg.ModRoots) + len(cfg.CardRoots)
+	cfg.ModRoots = dropUnderKkc(cfg.ModRoots, dbPath)
+	cfg.CardRoots = dropUnderKkc(cfg.CardRoots, dbPath)
+	return before - len(cfg.ModRoots) - len(cfg.CardRoots)
+}
+
+// dropUnderKkc 去掉落在 kkc 数据根内的条目（其余保持原样）。
+func dropUnderKkc(list []RootEntry, dbPath string) []RootEntry {
+	out := make([]RootEntry, 0, len(list))
+	for _, e := range list {
+		if UnderKkc(dbPath, e.Path) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// InjectKkcRoots 把 kkc 的两条运行态库根追加进配置（只存在内存；写回配置前必须 StripKkcRoots）。
+// 返回是否注入（dbPath 为空时不注入）。
+func InjectKkcRoots(cfg *RootsConfig, dbPath string) bool {
+	card, mod, ok := KkcRootEntries(dbPath)
+	if cfg == nil || !ok {
+		return false
+	}
+	if !hasRootPathIn(cfg.CardRoots, card.Path) {
+		cfg.CardRoots = append(cfg.CardRoots, card)
+	}
+	if !hasRootPathIn(cfg.ModRoots, mod.Path) {
+		cfg.ModRoots = append(cfg.ModRoots, mod)
+	}
+	return true
+}
+
+// hasRootPathIn 列表里是否存在路径等于 path 的条目（大小写与尾部分隔符不敏感）。
+func hasRootPathIn(list []RootEntry, path string) bool {
+	want := strings.ToLower(trimPath(path))
+	for _, e := range list {
+		if strings.ToLower(trimPath(e.Path)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// KkcEnabled 读 kkc 接入开关（缺省关）。
+func KkcEnabled(hub *store.Hub) bool {
+	if hub == nil {
+		return false
+	}
+	v, _, err := hub.Core().GetSetting(KkcSettingKey)
+	return err == nil && strings.TrimSpace(v) == "1"
+}
+
+// KkcRootsOfDB kkc 数据根与两条运行态库根路径（展示面用——不碰配置）。
+func KkcRootsOfDB(dbPath string) (dataRoot, cardRoot, modRoot string) {
+	card, mod, ok := KkcRootEntries(dbPath)
+	if !ok {
+		return "", "", ""
+	}
+	return KkcDataDir(dbPath), card.Path, mod.Path
 }
