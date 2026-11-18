@@ -326,6 +326,8 @@ func importIndexRow(hub *store.Hub, modRoot, cardRoot *RootEntry, relBase string
 	note := tsvGet(row, "备注")
 	guid := tsvGet(row, "guid")
 	size := tsvParseLong(tsvGet(row, "大小"))
+	dataVersion := tsvGet(row, "数据版本")
+	uarBlocks := int(tsvParseLong(tsvGet(row, "uar块数")))
 
 	meta := store.IdxMetaRow{
 		FilePath: full, IdxId: idxId, Kind: kind, CardType: cardType, Chara: chara, Work: work,
@@ -360,13 +362,16 @@ func importIndexRow(hub *store.Hub, modRoot, cardRoot *RootEntry, relBase string
 		if err != nil {
 			return err
 		}
-		if err = cs.SetCardImportFields(full, cardType, "", chara); err != nil {
+		if err = cs.SetCardImportFields(full, cardType, dataVersion, chara); err != nil {
 			return err
 		}
 		if err = cs.UpsertIndexMeta(meta); err != nil {
 			return err
 		}
-		// 引用列（索引自带）——每 guid 一行写 card_mod，mod_count 同步
+		// 引用列（索引自带）——每 guid 一行写 card_mod；UAR 块数取索引「uar块数」列（C93）。
+		// mod_count 用引用去重数：索引「卡mod数」是 KKM 旧口径快照（覆盖 6,823 张），
+		// 比引用去重面（9,096 张）小，覆盖写会倒退。
+		refN := 0
 		if refsCell := tsvGet(row, "引用mod"); refsCell != "" {
 			refs := make([]string, 0, 8)
 			for _, g := range strings.Split(refsCell, ",") {
@@ -379,11 +384,12 @@ func importIndexRow(hub *store.Hub, modRoot, cardRoot *RootEntry, relBase string
 				if err = cs.ReplaceCardRefs(cardId, refs); err != nil {
 					return err
 				}
-				if err = cs.UpdateCardRefsMeta(full, len(refs), 0); err != nil {
-					return err
-				}
+				refN = len(refs)
 				result.RefRows += int64(len(refs))
 			}
+		}
+		if err = cs.UpdateCardRefsMeta(full, refN, uarBlocks); err != nil {
+			return err
 		}
 		result.Cards++
 		return nil

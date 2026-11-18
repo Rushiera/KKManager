@@ -2034,7 +2034,7 @@ func usage() {
 	usageLine("stats", "库统计（卡片 / mod / 四色 / 未被引用 / 缺失排行）")
 	usageLine("dup", "重复副本组（版本 / 作者 / md5 / 引用卡片）")
 	usageLine("authors", "作者清单（按 mod 数量倒序；聚合表 mod_author）")
-	usageLine("cards [--order 键] [--desc] [--q 词] [--limit N]", "卡片清单（order = mtime|miss|size|file|chara）")
+	usageLine("cards [--order 键] [--desc] [--q 词] [--limit N] [--wide]", "卡片清单（order = mtime|miss|size|file|chara；--wide 附数据版本 / UAR 块数 / 声明 mod 数）")
 	usageLine("todos", "待办清单（库已离线 / 卡片 / 手输三类；id 供 todo-close）")
 	usageLine("todo-add [--card <卡片路径>] <文本>", "新建待办（手输 / 挂到卡片）")
 	usageLine("todo-close <id>", "关闭待办")
@@ -2381,6 +2381,7 @@ func cmdAuthors(rest []string) int {
 func cmdCards(rest []string) int {
 	dbPath := dbFlag(&rest)
 	order := takeFlag(&rest, "--order")
+	wide := takeSwitch(&rest, "--wide")
 	if order == "" {
 		order = "mtime"
 	}
@@ -2422,6 +2423,9 @@ func cmdCards(rest []string) int {
 		return 1
 	}
 	fmt.Println("共列 " + strconv.Itoa(len(rows)) + " 张")
+	if wide {
+		fmt.Println("宽表三列：数据版本 / UAR 块数 / 声明 mod 数")
+	}
 	for _, r := range rows {
 		name := r.CharaName
 		if name == "" {
@@ -2430,6 +2434,9 @@ func cmdCards(rest []string) int {
 		tail := ""
 		if r.TimelineSet {
 			tail = "  |  timeline " + fmt3(r.TimelineSeconds) + " 秒"
+		}
+		if wide {
+			tail += "  |  数据版本 " + orNone(r.DataVersion) + "  |  UAR " + n0(r.UarBlocks) + "  |  声明 " + n0(r.ModCount)
 		}
 		fmt.Println("  " + name + "  |  " + r.Folder + "  |  " + r.FileName + tail)
 	}

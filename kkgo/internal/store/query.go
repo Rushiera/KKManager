@@ -43,6 +43,12 @@ type CardListRow struct {
 	Folder string
 	// ModCount 声明的 mod 数。
 	ModCount int64
+	// DataVersion 卡头数据区版本串（可空；索引导入来自索引「数据版本」列）。
+	DataVersion string
+	// DataVersionSet 数据版本是否有值。
+	DataVersionSet bool
+	// UarBlocks 数据区 Sideloader UAR 块数（索引导入来自索引「uar块数」列）。
+	UarBlocks int64
 	// Green 主库齐备引用数。
 	Green int64
 	// Yellow 仅缓存库引用数。
@@ -322,7 +328,7 @@ func (d *DB) QueryCardsRows(page, size int, filter, q string, folder *string, ro
 	}
 	args = append(args, limit, off)
 	sqlText := colorCte(d.modTable()) + ` SELECT c.id, c.file_name, c.card_type, c.size, c.mtime,
-                     c.root_path, c.tier, c.folder, c.mod_count,
+                     c.root_path, c.tier, c.folder, c.mod_count, c.data_version, c.uar_blocks,
                      COALESCE(a.green,0), COALESCE(a.yellow,0), COALESCE(a.red,0), COALESCE(a.black,0),
                      (c.thumb IS NOT NULL), c.chara_name,
                      CASE WHEN tl.has_entry = 1 AND tl.is_empty = 0 THEN tl.duration END
@@ -337,11 +343,12 @@ func (d *DB) QueryCardsRows(page, size int, filter, q string, folder *string, ro
 	var list []CardListRow
 	for rows.Next() {
 		var r CardListRow
-		var cardType, mtime, rootPath, charaName sql.NullString
+		var cardType, mtime, rootPath, charaName, dataVersion sql.NullString
 		var duration sql.NullFloat64
 		var thumb int64
+		var uarBlocks sql.NullInt64
 		if err = rows.Scan(&r.Id, &r.FileName, &cardType, &r.Size, &mtime,
-			&rootPath, &r.Tier, &r.Folder, &r.ModCount,
+			&rootPath, &r.Tier, &r.Folder, &r.ModCount, &dataVersion, &uarBlocks,
 			&r.Green, &r.Yellow, &r.Red, &r.Black, &thumb, &charaName, &duration); err != nil {
 			return nil, err
 		}
@@ -349,6 +356,8 @@ func (d *DB) QueryCardsRows(page, size int, filter, q string, folder *string, ro
 		r.Mtime, r.MtimeSet = mtime.String, mtime.Valid
 		r.RootPath, r.RootPathSet = rootPath.String, rootPath.Valid
 		r.CharaName, r.CharaNameSet = charaName.String, charaName.Valid
+		r.DataVersion, r.DataVersionSet = dataVersion.String, dataVersion.Valid
+		r.UarBlocks = uarBlocks.Int64
 		r.HasThumb = thumb != 0
 		r.TimelineSeconds, r.TimelineSet = duration.Float64, duration.Valid
 		list = append(list, r)

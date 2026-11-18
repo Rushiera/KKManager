@@ -14,27 +14,37 @@ import (
 )
 
 // handleModCards 该 mod 被哪些卡片引用（三处入口共用：mod 列表 / 缺失清单 / 引用明细行）。
+// 形状对齐 C# WebApp.cs：{guid, total, items}；items 走 cardJSON 给全四色与体积字段。
 func (a *App) handleModCards(w http.ResponseWriter, r *http.Request) {
 	guid := r.PathValue("guid")
+	page := atoiDefault(r.URL.Query().Get("page"), 1)
+	if page <= 0 {
+		page = 1
+	}
+	size := atoiDefault(r.URL.Query().Get("size"), 0)
 	hub, cfg, err := openApp(a.DBPath)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	defer hub.Close()
-	rows, err := core.QueryCardsByModHub(hub, cfg, guid, 1, 0)
+	total, err := core.CountCardsByModHub(hub, cfg, guid)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	out := make([]map[string]interface{}, 0, len(rows))
-	for _, c := range rows {
-		out = append(out, map[string]interface{}{
-			"id": c.Id, "lib": c.Lib, "fileName": c.FileName, "folder": c.Folder,
-			"cardType": c.CardType, "charaName": c.CharaName, "hasThumb": c.HasThumb,
-		})
+	rows, err := core.QueryCardsByModHub(hub, cfg, guid, page, size)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
 	}
-	writeJSON(w, out)
+	items := make([]map[string]interface{}, 0, len(rows))
+	for _, c := range rows {
+		items = append(items, cardJSON(c))
+	}
+	writeJSON(w, map[string]interface{}{
+		"guid": guid, "total": total, "items": items,
+	})
 }
 
 // handleModFiles 该 guid 的磁盘副本清单。
